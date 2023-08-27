@@ -1,0 +1,17 @@
+{
+    "discord": {
+        "token": "MTA5MTA1NTQ2NTkzODU1OTEwNw.Gv2d4t.7PeRQSLfWBa9auusGdsIFvbu2B9I4MGBK4hbPA",
+        "command_prefix": "!",
+        "tts_channel": "no-mic-bot",
+        "tts_role": "no-mic"
+    },
+    "aws": {
+        "access_key_id": "AKIAVP2APIIBCCLCGZSB",
+        "secret_access_key": "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",
+        "region_name": "eu-north-1",
+        "voice_id": "Brian"
+    },
+    "ffmpeg": {
+        "executable": "C:/Users/simon/OneDrive/Skrivbord/ffmpeg-2023-07-19-git-efa6cec759-full_build/bin/ffmpeg.exe"
+    }
+}
