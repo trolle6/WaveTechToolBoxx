@@ -7,7 +7,8 @@ from enum import Enum
 import random
 from typing import Union
 import asyncio
-
+from pydub import AudioSegment
+import atexit
 
 # Load config.json
 try:
@@ -47,6 +48,17 @@ class ColorGroup(str, Enum):
     Blues = "blues"
     Earth = "earth"
 
+@bot.event
+async def on_ready():
+    print("Bot is ready.")
+    channel = bot.get_channel(926896065410637874)  # Replace YOUR_CHANNEL_ID with the ID of the channel
+    await channel.send("ToolBox Active.")
+
+@bot.event
+async def on_disconnect():
+    print("Bot is shutting down.")
+    channel = bot.get_channel(926896065410637874)  # Replace YOUR_CHANNEL_ID with the ID of the channel
+    await channel.send("ToolBox Deactive.")
 
 @bot.slash_command(description="Generate a color palette.")
 async def color_palette(ctx, color_group: str, number_of_colors: int = 5):
@@ -88,23 +100,36 @@ polly_client = boto3.Session(
     region_name=config['aws']['region_name']
 ).client('polly')
 
+
 async def speak(text, voice_client):
     print("Starting to speak...")
-    await asyncio.sleep(1.5)  # Add a 2-second delay before speaking
-    response = polly_client.synthesize_speech(
-        VoiceId='Matthew',
-        OutputFormat='mp3',
-        Text=text
-    )
+    await asyncio.sleep(1)  # Delay Before Speaking
 
-    with NamedTemporaryFile(delete=False, suffix='.mp3') as file:
-        file.write(response['AudioStream'].read())
-        source = disnake.FFmpegPCMAudio(file.name)
-        voice_client.play(source, after=lambda e: print('done', e))
-        while voice_client.is_playing():
-            await disnake.sleep(1)
-        await voice_client.disconnect()
+    # Load the quiet sound
+    quiet_sound = AudioSegment.from_wav("yt1s_nYWSz5R.wav")
+
+    try:
+        response = polly_client.synthesize_speech(
+            VoiceId='Matthew',
+            OutputFormat='mp3',
+            Text=text
+        )
+        with NamedTemporaryFile(delete=False, suffix='.mp3') as file:
+            file.write(response['AudioStream'].read())
+            file.flush()
+
+            # Concatenate the quiet sound and the speech
+            speech_sound = AudioSegment.from_mp3(file.name)
+            combined_sound = quiet_sound + speech_sound
+            combined_sound.export("combined_sound.mp3", format="mp3")
+
+            source = disnake.FFmpegPCMAudio("combined_sound.mp3")  # Use the combined sound file
+            voice_client.play(source, after=lambda e: print('done', e))
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
     print("Finished speaking.")
+
 
 class Dimension(str, Enum):
     Nether = 'nether'
