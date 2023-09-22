@@ -55,7 +55,7 @@ async def on_ready():
     await channel.send("ToolBox Active.")
 
 @bot.event
-async def on_disconnect():
+async def on_disconnecting():
     print("Bot is shutting down.")
     channel = bot.get_channel(926896065410637874)  # Replace YOUR_CHANNEL_ID with the ID of the channel
     await channel.send("ToolBox Deactive.")
@@ -103,7 +103,7 @@ polly_client = boto3.Session(
 
 async def speak(text, voice_client):
     print("Starting to speak...")
-    await asyncio.sleep(1)  # Delay Before Speaking
+    await asyncio.sleep(0)  # Delay Before Speaking
 
     # Load the quiet sound
     quiet_sound = AudioSegment.from_wav("yt1s_nYWSz5R.wav")
@@ -251,16 +251,19 @@ async def on_message(message):
 
     if message.channel.name == "no-mic-bot" and "no-mic" in [role.name for role in message.author.roles]:
         print("Correct role and channel detected.")
-        voice_channel = message.author.voice.channel
-        if voice_channel is not None:
-            voice_client = message.guild.voice_client
-            if voice_client and voice_client.is_connected():
-                await speak(message.content, voice_client)
+        try:
+            voice_channel = message.author.voice.channel
+            if voice_channel is not None:
+                voice_client = message.guild.voice_client
+                if voice_client and voice_client.is_connected():
+                    await speak(message.content, voice_client)
+                else:
+                    voice_client = await voice_channel.connect()
+                    await speak(message.content, voice_client)
             else:
-                voice_client = await voice_channel.connect()
-                await speak(message.content, voice_client)
-        else:
-            await message.channel.send("Please join a voice channel.")
+                await message.channel.send("Please join a voice channel.")
+        except AttributeError:
+            await message.channel.send("You need to be in a voice channel to use this feature.")
 
 class MyCog(commands.Cog):
     def __init__(self, bot):
