@@ -242,9 +242,6 @@ async def godo(ctx, user: disnake.Member, *, task: str):
     else:
         await ctx.send(f"{user.mention}, Please Godo: {task}")
 
-voices = ["Matthew", "Salli", "Joanna"]  # List of voices
-voice_assignments = {}  # Dictionary to store voice assignments
-
 @bot.event
 async def on_message(message):
     await bot.process_commands(message)
@@ -258,37 +255,15 @@ async def on_message(message):
             voice_channel = message.author.voice.channel
             if voice_channel is not None:
                 voice_client = message.guild.voice_client
-
-                # Assign a voice based on the user's join order
-                if message.author.id not in voice_assignments:
-                    voice_assignments[message.author.id] = voices[len(voice_assignments) % len(voices)]
-
-                assigned_voice = voice_assignments[message.author.id]
-
                 if voice_client and voice_client.is_connected():
-                    await speak(message.content, voice_client, assigned_voice)
+                    await speak(message.content, voice_client)
                 else:
                     voice_client = await voice_channel.connect()
-                    await speak(message.content, voice_client, assigned_voice)
+                    await speak(message.content, voice_client)
             else:
                 await message.channel.send("Please join a voice channel.")
         except AttributeError:
             await message.channel.send("You need to be in a voice channel to use this feature.")
-
-async def speak(text, voice_client, voice):
-    print("Starting to speak...")
-    await asyncio.sleep(0)  # Delay Before Speaking
-
-    # Your existing Polly code, just change the 'Matthew' to the 'voice' parameter
-    try:
-        response = polly_client.synthesize_speech(
-            VoiceId=voice,
-            OutputFormat='mp3',
-            Text=text
-        )
-        # Rest of your Polly logic here
-    except Exception as e:
-        print(f"An error occurred: {e}")
 
 class MyCog(commands.Cog):
     def __init__(self, bot):
