@@ -110,7 +110,7 @@ async def speak(text, voice_client):
 
     try:
         response = polly_client.synthesize_speech(
-            VoiceId='Matthew',
+            VoiceId='Ivy',
             OutputFormat='mp3',
             Text=text
         )
