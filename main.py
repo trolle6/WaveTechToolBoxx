@@ -51,13 +51,13 @@ class ColorGroup(str, Enum):
 @bot.event
 async def on_ready():
     print("Bot is ready.")
-    channel = bot.get_channel(926896065410637874)  # Replace YOUR_CHANNEL_ID with the ID of the channel
+    channel = bot.get_channel(1160224883553345548)  # Replace YOUR_CHANNEL_ID with the ID of the channel
     await channel.send("ToolBox Active.")
 
 @bot.event
 async def on_disconnecting():
     print("Bot is shutting down.")
-    channel = bot.get_channel(926896065410637874)  # Replace YOUR_CHANNEL_ID with the ID of the channel
+    channel = bot.get_channel(1160224883553345548)  # Replace YOUR_CHANNEL_ID with the ID of the channel
     await channel.send("ToolBox Deactive.")
 
 @bot.slash_command(description="Generate a color palette.")
@@ -110,7 +110,7 @@ async def speak(text, voice_client):
 
     try:
         response = polly_client.synthesize_speech(
-            VoiceId='Ivy',
+            VoiceId='Matthew',
             OutputFormat='mp3',
             Text=text
         )
@@ -249,7 +249,7 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if message.channel.name == "no-mic-bot" and "no-mic" in [role.name for role in message.author.roles]:
+    if message.channel.name == "tts" and "TTS access" in [role.name for role in message.author.roles]:
         print("Correct role and channel detected.")
         try:
             voice_channel = message.author.voice.channel
