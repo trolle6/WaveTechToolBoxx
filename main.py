@@ -10,7 +10,7 @@ import asyncio
 from pydub import AudioSegment
 import atexit
 from math_cog import MathCog
-
+from SecretSanta_cog import SecretSantaCog
 
 # Load config.json
 try:
@@ -25,7 +25,6 @@ except json.JSONDecodeError:
 
 TOKEN = config['discord']['token']
 intents = disnake.Intents.all()
-bot = commands.Bot(command_prefix='!')
 bot = commands.Bot(command_prefix=config['discord']['command_prefix'], intents=intents)
 bot.config = config
 
@@ -90,9 +89,6 @@ async def speak(text, voice_client):
     print("Finished speaking.")
 
 # Voice channel leave function
-@bot.event
-async def on_voice_state_update(member, before, after):
-    await check_voice_channels()
 
 @bot.event
 async def on_message(message):
@@ -133,10 +129,12 @@ if target_message_id is None:
 bot.load_extension("admin_cog")
 bot.load_extension('todo_cog')
 bot.load_extension("reaction_cog")
-bot.load_extension("voice_cog")
 bot.load_extension("math_cog")
 bot.load_extension("color_cog")
 bot.load_extension("voice_processing_cog")
+bot.load_extension("voice_cog")
+voice_processing_cog = bot.get_cog("VoiceProcessingCog")
+bot.add_cog(SecretSantaCog(bot, config))
 
 bot.target_message_id = config['discord'].get('target_message_id', None)
 bot.run(TOKEN)
