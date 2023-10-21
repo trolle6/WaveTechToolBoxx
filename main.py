@@ -50,7 +50,6 @@ async def on_disconnecting():
         print("channel_id not found in config.json")
 
 
-
 # Configure Polly client
 polly_client = boto3.Session(
     aws_access_key_id=config['aws']['access_key_id'],
@@ -97,7 +96,12 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if message.channel.name == "tts" and "TTS access" in [role.name for role in message.author.roles]:
+    tts_channel_id = config['discord'].get('channel_id')  # Assuming you've named it channel_id in config.json
+    tts_role_name = config['discord'].get('tts_role')  # Assuming you've named it tts_role in config.json
+
+    channel = bot.get_channel(int(tts_channel_id))
+
+    if message.channel == channel and tts_role_name in [role.name for role in message.author.roles]:
         print("Correct role and channel detected.")
         try:
             voice_channel = message.author.voice.channel
