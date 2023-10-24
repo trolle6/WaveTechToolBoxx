@@ -117,15 +117,12 @@ async def on_error(event, *args, **kwargs):
         print("Log channel not found.")
 
 # Loading Extensions
-bot.load_extension("admin_cog")
-bot.load_extension('todo_cog')
 bot.load_extension("reaction_cog")
 bot.load_extension("math_cog")
 bot.load_extension("color_cog")
 bot.load_extension("voice_processing_cog")
 bot.load_extension("voice_cog")
 voice_processing_cog = bot.get_cog("VoiceProcessingCog")
-bot.load_extension('statistic_cog')
 
 # Add SecretSantaCog
 bot.add_cog(SecretSantaCog(bot, config))
