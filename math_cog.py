@@ -13,15 +13,10 @@ class Dimension(str, Enum):
     Overworld = 'overworld'
 
 class MathCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, config):
         self.bot = bot
-        self.volume_factors = {
-            "items": 1,
-            "st": 64,
-            "sb": 1728,
-            "dcos": 1728 * 54,
-            "bulk": 1728 * 27,
-        }
+        self.config = config
+        self.volume_factors = config['math']['volume_factors']
 
     @commands.slash_command(description="Calculate different volumes.")
     async def calc(self, ctx, volume_amount: int, volume_unit: VolumeUnit):
@@ -43,4 +38,4 @@ class MathCog(commands.Cog):
             await ctx.send("Invalid dimension. Please use 'nether' or 'overworld'.")
 
 def setup(bot):
-    bot.add_cog(MathCog(bot))
+    bot.add_cog(MathCog(bot, bot.config))

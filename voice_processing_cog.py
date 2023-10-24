@@ -6,9 +6,16 @@ from pydub import AudioSegment
 from disnake.ext import commands
 
 class VoiceProcessingCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, config):
         self.bot = bot
-        self.user_voices = {}  # Dictionary to hold user-voice mappings
+        self.config = config  # New line
+        self.user_voices = {}
+        self.polly_client = boto3.Session(
+            aws_access_key_id=self.config['aws']['access_key_id'],  # Modified
+            aws_secret_access_key=self.config['aws']['secret_access_key'],  # Modified
+            region_name=self.config['aws']['region_name']  # Modified
+        ).client('polly')
+        self.available_voices = self.config['aws'].get('available_voices', [])  # Modified
 
         # Configure Polly client
         try:
@@ -90,4 +97,5 @@ class VoiceProcessingCog(commands.Cog):
         await self.check_voice_channels()
 
 def setup(bot):
-    bot.add_cog(VoiceProcessingCog(bot))
+    config = bot.config  # New line
+    bot.add_cog(VoiceProcessingCog(bot, config))  # Modified

@@ -31,5 +31,21 @@ class AdminCog(commands.Cog, name="Admin Commands"):
     async def ping(self, ctx):
         await ctx.send(f"Pong! Latency is {self.bot.latency * 1000:.2f}ms")
 
+@commands.slash_command(name="update_config", description="Update the config (Admin Only).")
+async def update_config(self, ctx, key: str, value: str):
+    # Replace YOUR_DISCORD_ID with your actual Discord ID
+    if ctx.author.id == 251835504654286852:
+        if key == "target_message_id":
+            try:
+                self.target_message_id = int(value)
+                await ctx.send(f"Configuration updated. New target_message_id is {self.target_message_id}.")
+                # Optionally, save this to a file or database for persistence
+            except ValueError:
+                await ctx.send("Invalid value. Please provide an integer for target_message_id.")
+        else:
+            await ctx.send("Invalid key. Available keys: target_message_id")
+    else:
+        await ctx.send("You do not have permission to use this command.")
+
 def setup(bot):
     bot.add_cog(AdminCog(bot))

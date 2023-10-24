@@ -4,7 +4,7 @@ from pydub import AudioSegment
 from disnake.ext import commands
 
 class VoiceCog(commands.Cog):
-    def __init__(self, bot, aws_config, voice_processing_cog):
+    def __init__(self, bot, config, voice_processing_cog):
         self.bot = bot
         self.voice_processing_cog = voice_processing_cog
         self.polly_client = voice_processing_cog.polly_client
@@ -60,9 +60,5 @@ def setup(bot):
     if voice_processing_cog is None:
         print("VoiceProcessingCog has not been loaded yet.")
         return
-    aws_config = {
-        'access_key_id': bot.config['aws']['access_key_id'],
-        'secret_access_key': bot.config['aws']['secret_access_key'],
-        'region_name': bot.config['aws']['region_name']
-    }
-    bot.add_cog(VoiceCog(bot, aws_config, voice_processing_cog))
+    config = bot.config
+    bot.add_cog(VoiceCog(bot, config, voice_processing_cog))

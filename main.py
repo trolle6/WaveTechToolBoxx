@@ -3,14 +3,10 @@ from disnake.ext import commands
 import json
 import boto3
 from tempfile import NamedTemporaryFile
-from enum import Enum
-import random
-from typing import Union
 import asyncio
 from pydub import AudioSegment
-import atexit
-from math_cog import MathCog
-from SecretSanta_cog import SecretSantaCog
+from math_cog import MathCog  # Assuming you have a math_cog.py
+from SecretSanta_cog import SecretSantaCog  # Assuming you have a SecretSanta_cog.py
 
 # Load config.json
 try:
@@ -25,30 +21,8 @@ except json.JSONDecodeError:
 
 TOKEN = config['discord']['token']
 intents = disnake.Intents.all()
-bot = commands.Bot(command_prefix=config['discord']['command_prefix'], intents=intents)
+bot = commands.Bot(command_prefix="nonUsablePrefixThatIsVeryUnlikelyToBeUsed1234567890", intents=intents)
 bot.config = config
-
-
-@bot.event
-async def on_ready():
-    print("Bot is ready.")
-    channel_id = config['discord'].get('channel_id')
-    if channel_id is not None:
-        channel = bot.get_channel(channel_id)
-        await channel.send("ToolBox Active.")
-    else:
-        print("channel_id not found in config.json")
-
-@bot.event
-async def on_disconnecting():
-    print("Bot is shutting down.")
-    channel_id = config['discord'].get('channel_id')
-    if channel_id is not None:
-        channel = bot.get_channel(channel_id)
-        await channel.send("ToolBox Deactive.")
-    else:
-        print("channel_id not found in config.json")
-
 
 # Configure Polly client
 polly_client = boto3.Session(
@@ -57,7 +31,7 @@ polly_client = boto3.Session(
     region_name=config['aws']['region_name']
 ).client('polly')
 
-
+# Async function to handle TTS
 async def speak(text, voice_client):
     print("Starting to speak...")
     await asyncio.sleep(0)  # Delay Before Speaking
@@ -80,15 +54,14 @@ async def speak(text, voice_client):
             combined_sound = quiet_sound + speech_sound
             combined_sound.export("combined_sound.mp3", format="mp3")
 
-            source = disnake.FFmpegPCMAudio("combined_sound.mp3")  # Use the combined sound file
+            source = disnake.FFmpegPCMAudio("combined_sound.mp3")
             voice_client.play(source, after=lambda e: print('done', e))
     except Exception as e:
         print(f"An error occurred: {e}")
 
     print("Finished speaking.")
 
-# Voice channel leave function
-
+# Voice channel function
 @bot.event
 async def on_message(message):
     await bot.process_commands(message)
@@ -96,12 +69,10 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    tts_channel_id = config['discord'].get('channel_id')  # Assuming you've named it channel_id in config.json
-    tts_role_name = config['discord'].get('tts_role')  # Assuming you've named it tts_role in config.json
+    tts_channel_id = config['discord'].get('channel_id')
+    tts_role_name = config['discord'].get('tts_role')
 
-    channel = bot.get_channel(int(tts_channel_id))
-
-    if message.channel == channel and tts_role_name in [role.name for role in message.author.roles]:
+    if message.channel.id == int(tts_channel_id) and tts_role_name in [role.name for role in message.author.roles]:
         print("Correct role and channel detected.")
         try:
             voice_channel = message.author.voice.channel
@@ -121,15 +92,31 @@ async def on_message(message):
     async def ping(self, ctx):
         await ctx.send(f'Pong! Latency is {bot.latency * 1000}ms')
 
+# Load target message ID
 target_message_id = config['discord'].get('target_message_id', None)
 bot.target_message_id = target_message_id
 
-aws_config = config['aws']
+# Logging to Discord channel
+log_channel_id = int(config['discord'].get('log_channel_id', 0))
 
-target_message_id = config['discord'].get('target_message_id')
-if target_message_id is None:
-    print("target_message_id not found in config.json")
+@bot.event
+async def on_ready():
+    print("Bot is ready.")
+    log_channel = bot.get_channel(log_channel_id)
+    if log_channel:
+        await log_channel.send("Bot is ready.")
+    else:
+        print("Log channel not found.")
 
+@bot.event
+async def on_error(event, *args, **kwargs):
+    log_channel = bot.get_channel(log_channel_id)
+    if log_channel:
+        await log_channel.send(f"An error occurred in {event}: {args} {kwargs}")
+    else:
+        print("Log channel not found.")
+
+# Loading Extensions
 bot.load_extension("admin_cog")
 bot.load_extension('todo_cog')
 bot.load_extension("reaction_cog")
@@ -138,7 +125,11 @@ bot.load_extension("color_cog")
 bot.load_extension("voice_processing_cog")
 bot.load_extension("voice_cog")
 voice_processing_cog = bot.get_cog("VoiceProcessingCog")
+bot.load_extension('statistic_cog')
+
+# Add SecretSantaCog
 bot.add_cog(SecretSantaCog(bot, config))
 
+# Run the bot
 bot.target_message_id = config['discord'].get('target_message_id', None)
 bot.run(TOKEN)

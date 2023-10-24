@@ -2,7 +2,6 @@ from disnake.ext import commands
 import random
 from enum import Enum
 
-# Define color groups
 color_groups = {
     "monochrome": ["Black", "Gray", "White"],
     "warm": ["Red", "Orange", "Yellow"],
@@ -18,16 +17,15 @@ class ColorGroup(str, Enum):
     Blues = "blues"
     Earth = "earth"
 
-# Define some blocks for random palette generation
 blocks = [
     "Stone", "Dirt", "Grass Block", "Cobblestone", "Sand", "Gravel",
     "Gold Ore", "Iron Ore", "Coal Ore", "Oak Log", "Spruce Log", "Birch Log"
-    # Add more blocks as needed
 ]
 
 class ColorCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, config):
         self.bot = bot
+        self.config = config
 
     @commands.slash_command(description="Generate a color palette.")
     async def color_palette(self, ctx, color_group: str, number_of_colors: int = 5):
@@ -61,4 +59,4 @@ class ColorCog(commands.Cog):
         await ctx.send(f"Here's your random block palette:\n{palette_text}")
 
 def setup(bot):
-    bot.add_cog(ColorCog(bot))
+    bot.add_cog(ColorCog(bot, bot.config))
