@@ -1,64 +1,66 @@
-import asyncio
-from tempfile import NamedTemporaryFile
-from pydub import AudioSegment
+import json
+import openai
+import disnake
 from disnake.ext import commands
+import asyncio
+import os
+import aiohttp
+
+with open('config.json') as config_file:
+    config = json.load(config_file)
+
+openai.api_key = config['openai']['api_key']
 
 class VoiceCog(commands.Cog):
-    def __init__(self, bot, config, voice_processing_cog):
+    def __init__(self, bot):
         self.bot = bot
-        self.voice_processing_cog = voice_processing_cog
-        self.polly_client = voice_processing_cog.polly_client
+        self.config = config
 
-    async def speak(self, text, voice_client, user_id):
-        print("Starting to speak...")
-        await asyncio.sleep(0)  # Delay Before Speaking
+    async def process_with_openai(self, text):
+        response = openai.Completion.create(
+            engine=self.config['openai']['engine'] if 'engine' in self.config['openai'] else "text-davinci-003",
+            prompt=text,
+            max_tokens=self.config['openai'].get('max_tokens', 1000),
+            n=1,
+            stop=None,
+            temperature=self.config['openai'].get('temperature', 0.5)
+        )
+        processed_text = response.choices[0].text.strip()
+        return processed_text
 
-        # Load the quiet sound
-        quiet_sound = AudioSegment.from_wav("yt1s_nYWSz5R.wav")
+    async def generate_speech(self, text, voice):
+        response = openai.TextToSpeech.create(
+            text=text,
+            voice=voice
+        )
+        audio_url = response['audio_url']
+        return audio_url
 
-        # Get the voice ID from the VoiceProcessingCog
-        voice_id = self.voice_processing_cog.user_voices.get(user_id, "Joanna")
-
-        try:
-            response = self.polly_client.synthesize_speech(
-                VoiceId=voice_id,
-                OutputFormat='mp3',
-                Text=text
-            )
-
-            with NamedTemporaryFile(delete=False, suffix='.mp3') as file:
-                file.write(response['AudioStream'].read())
-                file.flush()
-
-                # Concatenate the quiet sound and the speech
-                speech_sound = AudioSegment.from_mp3(file.name)
-                combined_sound = quiet_sound + speech_sound
-                combined_sound.export("combined_sound.mp3", format="mp3")
-
-                source = self.bot.FFmpegPCMAudio("combined_sound.mp3")  # Use the combined sound file
-                voice_client.play(source, after=lambda e: print('done', e))
-        except Exception as e:
-            print(f"An error occurred: {e}")
-
-        print("Finished speaking.")
-
-    @commands.command(name='speak')
-    async def speak_command(self, ctx, *, text: str):
-        voice_channel = ctx.author.voice.channel
-        if voice_channel:
-            voice_client = ctx.guild.voice_client
-            if voice_client and voice_client.is_connected():
-                await self.speak(text, voice_client, ctx.author.id)
-            else:
+    @commands.command(name='speak', help='Make the bot speak generated text')
+    async def speak(self, ctx, *, message):
+        processed_message = await self.process_with_openai(message)
+        voice_code = self.config['voice']['default_voice']
+        audio_url = await self.generate_speech(processed_message, voice_code)
+        if ctx.author.voice:
+            voice_channel = ctx.author.voice.channel
+            if voice_channel not in self.bot.voice_clients:
                 voice_client = await voice_channel.connect()
-                await self.speak(text, voice_client, ctx.author.id)
+            else:
+                voice_client = disnake.utils.get(self.bot.voice_clients, guild=ctx.guild)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(audio_url) as resp:
+                    if resp.status == 200:
+                        audio_data = await resp.read()
+                        with open('temp_audio.mp3', 'wb') as f:
+                            f.write(audio_data)
+                        audio_source = disnake.FFmpegPCMAudio('temp_audio.mp3')
+                        voice_client.play(audio_source)
+                        while voice_client.is_playing():
+                            await asyncio.sleep(1)
+                        await voice_client.disconnect()
+                        os.remove('temp_audio.mp3')  # Corrected file name for removal
         else:
-            await ctx.send("Please join a voice channel.")
+            await ctx.send("You are not in a voice channel.")
 
 def setup(bot):
-    voice_processing_cog = bot.get_cog("VoiceProcessingCog")
-    if voice_processing_cog is None:
-        print("VoiceProcessingCog has not been loaded yet.")
-        return
-    config = bot.config
-    bot.add_cog(VoiceCog(bot, config, voice_processing_cog))
+    bot.add_cog(VoiceCog(bot))

@@ -1,84 +1,81 @@
+import requests
 import json
-import boto3
-from tempfile import NamedTemporaryFile
+import os
 import asyncio
-from pydub import AudioSegment
 from disnake.ext import commands
+import disnake
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 
 class VoiceProcessingCog(commands.Cog):
     def __init__(self, bot, config):
         self.bot = bot
-        self.config = config  # New line
+        self.config = config
+        self.available_voices = {voice: True for voice in config['openai']['voices'].get('available_voices', [])}
         self.user_voices = {}
-        self.polly_client = boto3.Session(
-            aws_access_key_id=self.config['aws']['access_key_id'],  # Modified
-            aws_secret_access_key=self.config['aws']['secret_access_key'],  # Modified
-            region_name=self.config['aws']['region_name']  # Modified
-        ).client('polly')
-        self.available_voices = self.config['aws'].get('available_voices', [])  # Modified
+        self.voice_clients = {}
 
-        # Configure Polly client
+        self.ruthro_voice = config['openai']['voices'].get("ruthro's_voice", {}).get('690607710390976633', 'echo')
+        self.ruthro_user_id = '690607710390976633'
+
         try:
-            with open('config.json', 'r') as f:
-                config = json.load(f)
-            self.polly_client = boto3.Session(
-                aws_access_key_id=config['aws']['access_key_id'],
-                aws_secret_access_key=config['aws']['secret_access_key'],
-                region_name=config['aws']['region_name']
-            ).client('polly')
-            self.available_voices = config['aws'].get('available_voices', [])
-        except FileNotFoundError:
-            print("The config.json file was not found.")
-            exit()
-        except json.JSONDecodeError:
-            print("Error parsing config.json. Please make sure it is a valid JSON file.")
-            exit()
+            self.no_mic_role_id = int(config['discord']['no_mic_role_id'])
+        except ValueError:
+            logger.error("The 'no_mic_role_id' value must be a numeric ID.")
+            raise ValueError("The 'no_mic_role_id' value must be a numeric ID.") from None
 
-    def has_allowed_role(self, user):
-        return True  # Placeholder
+        self.voice_channel_check_interval = config.get('voice_channel_check_interval', 10)
 
-    def on_user_join_voice_channel(self, member):
-        if member == self.bot.user:  # Skip if the bot itself has joined the channel
-            return
+        bot.loop.create_task(self.assign_voices_to_existing_members())
+        bot.loop.create_task(self.voice_channel_monitor())
+        logger.info("VoiceProcessingCog initialized.")
 
-        if self.has_allowed_role(member):
-            if self.available_voices:
-                voice = self.available_voices.pop(0)
-                self.user_voices[member.id] = voice
-                print(f"Assigning voice {voice} to user {member.id} ({member.display_name})")
-            else:
-                print(f"No more available voices for user {member.id} ({member.display_name})")
+    def has_no_mic_role(self, member):
+        return any(role.id == self.no_mic_role_id for role in member.roles)
 
-    def on_user_leave_voice_channel(self, member):
-        if member == self.bot.user:  # Skip if the bot itself has left the channel
-            return
+    async def assign_voices_to_existing_members(self):
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            for vc in guild.voice_channels:
+                for member in vc.members:
+                    if member != self.bot.user and not self.has_no_mic_role(member):
+                        if str(member.id) == self.ruthro_user_id:
+                            self.user_voices[member.id] = self.ruthro_voice
+                            logger.info(f"Assigned Ruthro's voice ({self.ruthro_voice}) to user {member.id} ({member.display_name}) on bot restart.")
+                        else:
+                            voice = self.get_available_voice()
+                            if voice:
+                                self.user_voices[member.id] = voice
+                                logger.info(f"Assigned voice {voice} to user {member.id} ({member.display_name}) on bot restart.")
+                            else:
+                                logger.info(f"No available voices for user {member.id} ({member.display_name}) on bot restart.")
 
+    def get_available_voice(self):
+        for voice, available in self.available_voices.items():
+            if available and voice != self.ruthro_voice:
+                self.available_voices[voice] = False
+                return voice
+        return None
+
+    async def on_user_leave_voice_channel(self, member):
         if member.id in self.user_voices:
             voice = self.user_voices.pop(member.id)
-            self.available_voices.append(voice)
-            print(f"Removing voice {voice} from user {member.id} ({member.display_name})")
+            if voice != self.ruthro_voice:
+                self.available_voices[voice] = True
+            logger.info(f"Returned voice {voice} to pool for user {member.id} ({member.display_name})")
 
-    async def speak(self, text, voice_client, user_id):
-        print("Starting to speak...")
-        await asyncio.sleep(0)
-
-        voice = self.user_voices.get(user_id, "Joanna")
-        print(f"Using voice {voice} for user {user_id}")
-
-        voice = self.user_voices.get(user_id, "Joanna")
-        response = self.polly_client.synthesize_speech(
-            Text=text,
-            OutputFormat='mp3',
-            VoiceId=voice
-        )
-        soundfile = NamedTemporaryFile(delete=True)
-        soundbytes = response['AudioStream'].read()
-        soundfile.write(soundbytes)
-
-        audio = AudioSegment.from_file(soundfile.name, format="mp3")
-        audio.export("temp.mp3", format="mp3")
-
-        # Your logic to play this in the voice channel
+    async def voice_channel_monitor(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            await asyncio.sleep(self.voice_channel_check_interval)
+            try:
+                await self.check_voice_channels()
+            except Exception as e:
+                logger.error(f'Error in voice_channel_monitor: {e}')
 
     async def check_voice_channels(self):
         for guild in self.bot.guilds:
@@ -87,15 +84,99 @@ class VoiceProcessingCog(commands.Cog):
                     voice_client = voice_channel.guild.voice_client
                     if voice_client and voice_client.is_connected():
                         await voice_client.disconnect()
+                        del self.voice_clients[voice_channel.guild.id]
+                        logger.info(f"Bot disconnected from voice channel {voice_channel.name} in guild {guild.name} as it was alone.")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
-        if before.channel is None and after.channel is not None:
-            self.on_user_join_voice_channel(member)
-        elif before.channel is not None and after.channel is None:
-            self.on_user_leave_voice_channel(member)
-        await self.check_voice_channels()
+        if self.has_no_mic_role(member):
+            # Handle the case when a user joins a voice channel
+            if after.channel is not None and member.id not in self.user_voices:
+                voice = self.get_available_voice()
+                if voice:
+                    self.user_voices[member.id] = voice
+                    logger.info(f"Assigned voice {voice} to user {member.id} ({member.display_name}) upon joining VC.")
+                else:
+                    logger.info(f"No available voices for user {member.id} ({member.display_name}) upon joining VC.")
 
+            # Handle the case when a user leaves a voice channel
+            elif before.channel is not None and after.channel is None:
+                if member.id in self.user_voices:
+                    # Retrieve the user's assigned voice
+                    voice = self.user_voices[member.id]
+                    # Remove the user from the voice pool
+                    self.user_voices.pop(member.id)
+                    # Make the voice available again for others to use
+                    if voice != self.ruthro_voice:
+                        self.available_voices[voice] = True
+                    logger.info(
+                        f"User {member.id} ({member.display_name}) left the voice channel. Voice {voice} returned to pool.")
+
+    async def join_and_speak(self, voice_channel, text, user_id):
+        try:
+            # text = self.apply_custom_dictionary(text)  # Removed this line
+            voice_client = voice_channel.guild.voice_client
+            if not voice_client or not voice_client.is_connected():
+                voice_client = await voice_channel.connect()
+                self.voice_clients[voice_channel.guild.id] = voice_client
+                logger.info(f"Connected to voice channel: {voice_channel.name}")
+
+            if str(user_id) == self.ruthro_user_id:
+                voice = self.ruthro_voice
+            else:
+                voice = self.user_voices.get(user_id, self.config['openai']['voices'].get('default_voice', 'default_voice'))
+            logger.info(f"Using voice {voice} for user {user_id}. Speaking: '{text}'")
+
+
+            payload = {
+                "engine": self.config['openai']['engine'],
+                "model": self.config['openai']['model'],
+                "input": text,
+                "voice": voice
+            }
+            headers = {
+                "Authorization": f"Bearer {self.config['openai']['api_key']}",
+                "Content-Type": "application/json"
+            }
+
+            response = requests.post(self.config['openai']['api_url'], headers=headers, data=json.dumps(payload))
+            if response.status_code == 200:
+                temp_file = 'temp_audio_file.mp3'
+                with open(temp_file, 'wb') as audio_file:
+                    audio_file.write(response.content)
+                    logger.info(f"Audio file created: {temp_file}")
+
+                source = disnake.FFmpegPCMAudio(temp_file)
+                if voice_client and voice_client.is_connected():
+                    voice_client.play(source, after=lambda e: self.after_playing(e, temp_file))
+                else:
+                    logger.info("Voice client not connected or has an issue")
+            else:
+                logger.error(f"Failed to generate speech. Status Code: {response.status_code}, Response: {response.text}")
+
+        except Exception as e:
+            logger.error(f'Error in join_and_speak: {e}')
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        try:
+            if message.channel.id == int(self.config['discord']['channel_id']) and message.author != self.bot.user:
+                if message.author.voice and message.author.voice.channel and self.has_no_mic_role(message.author):
+                    await self.join_and_speak(message.author.voice.channel, message.content, message.author.id)
+                else:
+                    await message.channel.send(
+                        f"{message.author.display_name}, you need to be in a voice channel with the no-mic role for me to speak.")
+        except Exception as e:
+            logger.error(f'Error in on_message: {e}')
+
+    def after_playing(self, error, audio_file_path):
+        if error:
+            logger.error(f'Playback error: {error}')
+        else:
+            logger.info('Playback finished.')
+        if os.path.exists(audio_file_path):
+            os.remove(audio_file_path)
+            logger.debug(f"Deleted temp audio file: {audio_file_path}")
 def setup(bot):
-    config = bot.config  # New line
-    bot.add_cog(VoiceProcessingCog(bot, config))  # Modified
+    config = bot.config
+    bot.add_cog(VoiceProcessingCog(bot, config))
