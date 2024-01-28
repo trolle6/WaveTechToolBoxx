@@ -4,6 +4,7 @@ import os
 import asyncio
 from disnake.ext import commands
 import disnake
+import time
 
 class VoiceProcessingCog(commands.Cog):
     def __init__(self, bot, config):
@@ -12,6 +13,7 @@ class VoiceProcessingCog(commands.Cog):
         self.available_voices = {voice: True for voice in config['openai']['voices'].get('available_voices', [])}
         self.user_voices = {}
         self.voice_clients = {}
+        self.audio_queues = {}  # Audio queues for each guild
 
         self.ruthro_voice = config['openai']['voices'].get("ruthro's_voice", {}).get('690607710390976633', 'echo')
         self.ruthro_user_id = '690607710390976633'
@@ -22,6 +24,7 @@ class VoiceProcessingCog(commands.Cog):
             raise ValueError("The 'no_mic_role_id' value must be a numeric ID.") from None
 
         self.voice_channel_check_interval = config.get('voice_channel_check_interval', 10)
+        self.delay_between_messages = config.get('delay_between_messages', 1.0)  # Default to 1 second if not specified
 
         bot.loop.create_task(self.assign_voices_to_existing_members())
         bot.loop.create_task(self.voice_channel_monitor())
@@ -86,11 +89,13 @@ class VoiceProcessingCog(commands.Cog):
                         self.available_voices[voice] = True
 
     async def join_and_speak(self, voice_channel, text, user_id):
+        guild_id = voice_channel.guild.id
         try:
             voice_client = voice_channel.guild.voice_client
             if not voice_client or not voice_client.is_connected():
                 voice_client = await voice_channel.connect()
-                self.voice_clients[voice_channel.guild.id] = voice_client
+                self.voice_clients[guild_id] = voice_client
+                self.audio_queues[guild_id] = []
 
             if str(user_id) == self.ruthro_user_id:
                 voice = self.ruthro_voice
@@ -110,18 +115,36 @@ class VoiceProcessingCog(commands.Cog):
 
             response = requests.post(self.config['openai']['api_url'], headers=headers, data=json.dumps(payload))
             if response.status_code == 200:
-                temp_file = 'temp_audio_file.mp3'
+                temp_file = f'temp_audio_file_{guild_id}_{user_id}_{int(time.time())}.mp3'
                 with open(temp_file, 'wb') as audio_file:
                     audio_file.write(response.content)
 
-                source = disnake.FFmpegPCMAudio(temp_file)
-                if voice_client and voice_client.is_connected():
-                    voice_client.play(source, after=lambda e: self.after_playing(e, temp_file))
-            else:
-                pass
+                self.audio_queues[guild_id].append(temp_file)
+                if not voice_client.is_playing():
+                    await self.play_next_in_queue(guild_id)
 
         except Exception as e:
             pass
+
+    async def play_next_in_queue(self, guild_id):
+        voice_client = self.voice_clients.get(guild_id)
+        if voice_client and voice_client.is_connected() and self.audio_queues[guild_id]:
+            next_audio_file = self.audio_queues[guild_id].pop(0)
+            source = disnake.FFmpegPCMAudio(next_audio_file)
+            voice_client.play(source, after=lambda e: self.after_playing(e, next_audio_file, guild_id))
+
+    def after_playing(self, error, audio_file_path, guild_id):
+        if error:
+            pass
+        else:
+            pass
+        if os.path.exists(audio_file_path):
+            os.remove(audio_file_path)
+        asyncio.run_coroutine_threadsafe(self.wait_and_play_next(guild_id), self.bot.loop)
+
+    async def wait_and_play_next(self, guild_id):
+        await asyncio.sleep(self.delay_between_messages)
+        await self.play_next_in_queue(guild_id)
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -134,14 +157,6 @@ class VoiceProcessingCog(commands.Cog):
                         f"{message.author.display_name}, you need to be in a voice channel with the no-mic role for me to speak.")
         except Exception as e:
             pass
-
-    def after_playing(self, error, audio_file_path):
-        if error:
-            pass
-        else:
-            pass
-        if os.path.exists(audio_file_path):
-            os.remove(audio_file_path)
 
 def setup(bot):
     config = bot.config
