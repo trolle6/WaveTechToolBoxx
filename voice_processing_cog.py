@@ -1,163 +1,217 @@
-import requests
-import json
-import os
-import asyncio
-from disnake.ext import commands
+# voice_processing_cog.py
+
 import disnake
+from disnake.ext import commands
+import asyncio
+import logging
+import os
+from gtts import gTTS
 import time
+
+
+def setup_logger(name, log_file, level=logging.INFO):
+    """Sets up a logger."""
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        handler.setFormatter(formatter)
+        logger.setLevel(level)
+        logger.addHandler(handler)
+    return logger
+
 
 class VoiceProcessingCog(commands.Cog):
     def __init__(self, bot, config):
         self.bot = bot
         self.config = config
-        self.available_voices = {voice: True for voice in config['openai']['voices'].get('available_voices', [])}
-        self.user_voices = {}
-        self.voice_clients = {}
-        self.audio_queues = {}  # Audio queues for each guild
+        self.logger = setup_logger("VoiceProcessing", "VoiceProcessing.log")
+        self.channel_id = int(config["discord"].get("channel_id"))  # Ensure this is an integer
+        self.guild_id = int(config["discord"].get("guild_id"))  # Read guild_id from config
+        self.queues = {}  # asyncio.Queue per guild
+        self.locks = {}  # asyncio.Lock per guild to prevent race conditions
 
-        self.ruthro_voice = config['openai']['voices'].get("ruthro's_voice", {}).get('690607710390976633', 'echo')
-        self.ruthro_user_id = '690607710390976633'
-
-        try:
-            self.no_mic_role_id = int(config['discord']['no_mic_role_id'])
-        except ValueError:
-            raise ValueError("The 'no_mic_role_id' value must be a numeric ID.") from None
-
-        self.voice_channel_check_interval = config.get('voice_channel_check_interval', 10)
-        self.delay_between_messages = config.get('delay_between_messages', 1.0)  # Default to 1 second if not specified
-
-        bot.loop.create_task(self.assign_voices_to_existing_members())
-        bot.loop.create_task(self.voice_channel_monitor())
-
-    def has_no_mic_role(self, member):
-        return any(role.id == self.no_mic_role_id for role in member.roles)
-
-    async def assign_voices_to_existing_members(self):
-        await self.bot.wait_until_ready()
-        for guild in self.bot.guilds:
-            for vc in guild.voice_channels:
-                for member in vc.members:
-                    if member != self.bot.user and not self.has_no_mic_role(member):
-                        if str(member.id) == self.ruthro_user_id:
-                            self.user_voices[member.id] = self.ruthro_voice
-                        else:
-                            voice = self.get_available_voice()
-                            if voice:
-                                self.user_voices[member.id] = voice
-
-    def get_available_voice(self):
-        for voice, available in self.available_voices.items():
-            if available and voice != self.ruthro_voice:
-                self.available_voices[voice] = False
-                return voice
-        return None
-
-    async def on_user_leave_voice_channel(self, member):
-        if member.id in self.user_voices:
-            voice = self.user_voices.pop(member.id)
-            if voice != self.ruthro_voice:
-                self.available_voices[voice] = True
-
-    async def voice_channel_monitor(self):
-        await self.bot.wait_until_ready()
-        while not self.bot.is_closed():
-            await asyncio.sleep(self.voice_channel_check_interval)
-            await self.check_voice_channels()
-
-    async def check_voice_channels(self):
-        for guild in self.bot.guilds:
-            for voice_channel in guild.voice_channels:
-                if len(voice_channel.members) == 1 and self.bot.user in voice_channel.members:
-                    voice_client = voice_channel.guild.voice_client
-                    if voice_client and voice_client.is_connected():
-                        await voice_client.disconnect()
-                        del self.voice_clients[voice_channel.guild.id]
+        # Define audio directory within the project
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        self.audio_dir = os.path.join(current_dir, 'tts_audios')
+        os.makedirs(self.audio_dir, exist_ok=True)
+        self.logger.info(f"TTS audio directory set to: {self.audio_dir}")
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-        if self.has_no_mic_role(member):
-            if after.channel is not None and member.id not in self.user_voices:
-                voice = self.get_available_voice()
-                if voice:
-                    self.user_voices[member.id] = voice
-
-            elif before.channel is not None and after.channel is None:
-                if member.id in self.user_voices:
-                    voice = self.user_voices[member.id]
-                    self.user_voices.pop(member.id)
-                    if voice != self.ruthro_voice:
-                        self.available_voices[voice] = True
-
-    async def join_and_speak(self, voice_channel, text, user_id):
-        guild_id = voice_channel.guild.id
-        try:
-            voice_client = voice_channel.guild.voice_client
-            if not voice_client or not voice_client.is_connected():
-                voice_client = await voice_channel.connect()
-                self.voice_clients[guild_id] = voice_client
-                self.audio_queues[guild_id] = []
-
-            if str(user_id) == self.ruthro_user_id:
-                voice = self.ruthro_voice
-            else:
-                voice = self.user_voices.get(user_id, self.config['openai']['voices'].get('default_voice', 'default_voice'))
-
-            payload = {
-                "engine": self.config['openai']['engine'],
-                "model": self.config['openai']['model'],
-                "input": text,
-                "voice": voice
-            }
-            headers = {
-                "Authorization": f"Bearer {self.config['openai']['api_key']}",
-                "Content-Type": "application/json"
-            }
-
-            response = requests.post(self.config['openai']['api_url'], headers=headers, data=json.dumps(payload))
-            if response.status_code == 200:
-                temp_file = f'temp_audio_file_{guild_id}_{user_id}_{int(time.time())}.mp3'
-                with open(temp_file, 'wb') as audio_file:
-                    audio_file.write(response.content)
-
-                self.audio_queues[guild_id].append(temp_file)
-                if not voice_client.is_playing():
-                    await self.play_next_in_queue(guild_id)
-
-        except Exception as e:
-            pass
-
-    async def play_next_in_queue(self, guild_id):
-        voice_client = self.voice_clients.get(guild_id)
-        if voice_client and voice_client.is_connected() and self.audio_queues[guild_id]:
-            next_audio_file = self.audio_queues[guild_id].pop(0)
-            source = disnake.FFmpegPCMAudio(next_audio_file)
-            voice_client.play(source, after=lambda e: self.after_playing(e, next_audio_file, guild_id))
-
-    def after_playing(self, error, audio_file_path, guild_id):
-        if error:
-            pass
-        else:
-            pass
-        if os.path.exists(audio_file_path):
-            os.remove(audio_file_path)
-        asyncio.run_coroutine_threadsafe(self.wait_and_play_next(guild_id), self.bot.loop)
-
-    async def wait_and_play_next(self, guild_id):
-        await asyncio.sleep(self.delay_between_messages)
-        await self.play_next_in_queue(guild_id)
+    async def on_ready(self):
+        self.logger.info("VoiceProcessingCog is ready.")
 
     @commands.Cog.listener()
     async def on_message(self, message):
+        # Ignore messages from bots or in other channels or guilds
+        if message.author.bot:
+            return
+
+        if message.guild.id != self.guild_id:
+            return
+
+        if message.channel.id != self.channel_id:
+            return
+
+        self.logger.info(f"Processing TTS for message from {message.author} in channel ID {message.channel.id}")
+        print(
+            f"Processing TTS for message from {message.author} in channel ID {message.channel.id}")  # For immediate
+        # feedback
+
+        # Proceed with TTS processing
+        await self.enqueue_tts(message)
+
+    async def enqueue_tts(self, message):
+        guild_id = message.guild.id
+
+        # Initialize queue and lock for the guild if not present
+        if guild_id not in self.queues:
+            self.queues[guild_id] = asyncio.Queue()
+            self.locks[guild_id] = asyncio.Lock()
+            await asyncio.create_task(self.process_queue(guild_id))
+            self.logger.info(f"Created new queue and processing task for guild ID {guild_id}.")
+
+        await self.queues[guild_id].put(message)
+        self.logger.info(f"Message from {message.author} queued for TTS in guild {message.guild.name}.")
+
+    async def process_queue(self, guild_id):
+        queue = self.queues[guild_id]
+        lock = self.locks[guild_id]
+
+        while True:
+            try:
+                message = await queue.get()
+                async with lock:
+                    await self.process_tts(message)
+                queue.task_done()
+            except asyncio.CancelledError:
+                self.logger.info(f"Queue processing task for guild ID {guild_id} has been cancelled.")
+                break
+            except Exception as e:
+                self.logger.error(f"Error processing message in guild {guild_id}: {e}", exc_info=True)
+
+            # Check if the queue is empty to potentially exit the loop
+            if queue.empty():
+                # Remove the queue and lock
+                del self.queues[guild_id]
+                del self.locks[guild_id]
+                self.logger.info(f"No more messages in queue for guild ID {guild_id}. Queue task exiting.")
+                break
+
+    async def process_tts(self, message):
+        member = message.author
+        guild = message.guild
+        guild_id = guild.id  # Ensure guild_id is defined
+
+        # Check if the user is in a voice channel
+        if not member.voice or not member.voice.channel:
+            self.logger.warning(f"User {member} attempted TTS but is not in a voice channel.")
+            await message.channel.send("❌ You need to be in a voice channel to use TTS.")
+            return
+
+        voice_channel = member.voice.channel
+
+        # Check if the bot is already connected to a voice channel in this guild
+        voice_client = disnake.utils.get(self.bot.voice_clients, guild=guild)
+
+        if voice_client and voice_client.is_connected():
+            self.logger.info(
+                f"Bot is already connected to voice channel: {voice_client.channel.name} in guild: {guild.name}")
+            target_voice_client = voice_client
+        else:
+            try:
+                # Connect to the voice channel
+                target_voice_client = await voice_channel.connect()
+                self.logger.info(f"Connected to voice channel: {voice_channel.name} in guild: {guild.name}")
+            except disnake.ClientException as e:
+                self.logger.error(f"Failed to connect to voice channel: {e}")
+                await message.channel.send("❌ Failed to connect to your voice channel.")
+                return
+            except Exception as e:
+                self.logger.error(f"Unexpected error while connecting to voice channel: {e}")
+                await message.channel.send("❌ An unexpected error occurred while connecting to your voice channel.")
+                return
+
+        # Define filename
+        user_id = message.author.id
+        timestamp = int(time.time())
+        filename = f"temp_audio_file_{guild_id}_{user_id}_{timestamp}.mp3"
+        audio_path = os.path.join(self.audio_dir, filename)
+
+        # Generate TTS audio using gTTS and save to the specified file in project directory
         try:
-            if message.channel.id == int(self.config['discord']['channel_id']) and message.author != self.bot.user:
-                if message.author.voice and message.author.voice.channel and self.has_no_mic_role(message.author):
-                    await self.join_and_speak(message.author.voice.channel, message.content, message.author.id)
-                else:
-                    await message.channel.send(
-                        f"{message.author.display_name}, you need to be in a voice channel with the no-mic role for me to speak.")
+            tts = gTTS(text=message.content, lang='en')
+            tts.save(audio_path)
+            self.logger.info(f"TTS audio generated and saved to {audio_path}")
         except Exception as e:
-            pass
+            self.logger.error(f"Failed to generate TTS audio: {e}")
+            await message.channel.send("❌ Failed to generate TTS audio.")
+            return
+
+        # Ensure file exists before playing
+        if not os.path.exists(audio_path):
+            self.logger.error(f"Audio file was not found after saving: {audio_path}")
+            await message.channel.send("❌ Failed to generate TTS audio.")
+            return
+
+        # Play the audio in the voice channel
+        try:
+            # Initialize FFmpeg audio source
+            source = disnake.FFmpegPCMAudio(audio_path)
+            if not target_voice_client.is_playing():
+                # Capture guild_id and audio_path in the lambda
+                target_voice_client.play(
+                    source,
+                    after=lambda e: self.after_playing(e, audio_path)
+                )
+                self.logger.info(f"Playing audio: {audio_path} in voice channel.")
+            else:
+                self.logger.warning("Voice client is already playing audio.")
+                await message.channel.send("❌ Already playing audio in the voice channel.")
+                # Re-queue the message
+                await self.queues[guild_id].put(message)
+                return
+
+            # Removed the confirmation message
+            # await message.channel.send("✅ Playing your message in the voice channel.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to play audio: {e}")
+            await message.channel.send("❌ Failed to play audio.")
+        # No need to delete the file here; handled in after_playing
+
+    def after_playing(self, error, audio_path):
+        if error:
+            self.logger.error(f"Error in playing audio: {error}")
+
+        # Schedule the deletion of the audio file
+        asyncio.run_coroutine_threadsafe(self.delete_audio_file(audio_path), self.bot.loop)
+
+    async def delete_audio_file(self, audio_path):
+        try:
+            os.remove(audio_path)
+            self.logger.info(f"Removed temporary audio file: {audio_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to remove temporary audio file: {audio_path}. Error: {e}")
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member):
+        """
+        Listener to check if the voice channel is empty.
+        If empty, disconnect the bot.
+        """
+        guild_id = member.guild.id
+        if guild_id != self.guild_id:
+            return  # Ignore updates from other guilds
+
+        voice_client = disnake.utils.get(self.bot.voice_clients, guild=member.guild)
+        if voice_client and voice_client.is_connected():
+            voice_channel = voice_client.channel
+            # Check if the voice channel has no members other than the bot
+            if len(voice_channel.members) == 1 and voice_channel.members[0].id == self.bot.user.id:
+                self.logger.info(f"Voice channel '{voice_channel.name}' is empty. Disconnecting bot.")
+                await voice_client.disconnect()
+
 
 def setup(bot):
-    config = bot.config
-    bot.add_cog(VoiceProcessingCog(bot, config))
+    bot.add_cog(VoiceProcessingCog(bot, bot.config))
