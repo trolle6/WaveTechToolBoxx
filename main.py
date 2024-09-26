@@ -50,6 +50,7 @@ def load_config():
         config["discord"]["token"] = os.getenv("DISCORD_TOKEN") or config["discord"].get("token")
         config["tts"]["api_key"] = os.getenv("OPENAI_API_KEY") or config["tts"].get("api_key")
         config["dalle"]["api_key"] = os.getenv("DALLE_API_KEY") or config["dalle"].get("api_key")
+        config["random_org"]["api_key"] = os.getenv("RANDOM_ORG_API_KEY") or config["random_org"].get("api_key")
 
         # Log the overridden config (exclude sensitive info)
         logger.debug(

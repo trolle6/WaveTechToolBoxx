@@ -4,6 +4,7 @@ import disnake
 from disnake.ext import commands
 import logging
 import random
+from rdoclient import RandomOrgClient
 import asyncio
 import json
 from datetime import datetime
@@ -40,6 +41,8 @@ class SecretSantaCog(commands.Cog):
         self.bot = bot
         self.config = config
         self.logger = setup_logger("SecretSanta", "SecretSanta.log")
+        self.random_client = RandomOrgClient(config["random_org"]["api_key"])
+        self.signed_random_links = []
         self.participants = {}  # Maps user_id to member object
         self.assignments = {}  # Maps santa_id to giftee_id
         self.active = False
@@ -57,6 +60,7 @@ class SecretSantaCog(commands.Cog):
             "active": self.active,
             "join_closed": self.join_closed,
             "announcement_message_id": self.announcement_message_id,
+            "signed_random_links": self.signed_random_links
         }
         with open(self.data_file, "w") as f:
             json.dump(data, f)
@@ -77,6 +81,7 @@ class SecretSantaCog(commands.Cog):
             self.active = data.get("active", False)
             self.join_closed = data.get("join_closed", False)
             self.announcement_message_id = data.get("announcement_message_id")
+            self.signed_random_links = data.get("signed_random_links")
             self.logger.info("Secret Santa data loaded from secret_santa_data.json.")
 
     @commands.slash_command(
@@ -397,18 +402,20 @@ class SecretSantaCog(commands.Cog):
 
     def assign_santas(self):
         """
-        Assigns Secret Santas to participants ensuring no one is assigned to themselves.
-        Utilizes the derangement algorithm for a complete derangement.
+        Assigns Secret Santas to participants, ensuring no one is assigned to themselves.
         """
+
         santa_ids = list(self.participants.keys())
-        receivers = santa_ids.copy()
-        deranged = False
+        # Multiple shuffles for higher entropy
+        for _ in range(10):
+            santa_ids = self.create_shuffled_list(santa_ids)
 
-        while not deranged:
-            random.shuffle(receivers)
-            deranged = all(santa != receiver for santa, receiver in zip(santa_ids, receivers))
+        santa_ids.append(santa_ids[0])
+        new_assignments = {}
+        for i in range(0, len(santa_ids) - 1):
+            new_assignments[santa_ids[i]] = santa_ids[i + 1]
 
-        self.assignments = {santa: receiver for santa, receiver in zip(santa_ids, receivers)}
+        self.assignments = new_assignments
 
     @commands.slash_command(
         name="send_question", description="Send a question to your Secret Santa giftee."
@@ -644,6 +651,28 @@ class SecretSantaCog(commands.Cog):
             )
             # You can choose to auto-assign or require manual assignment via /assign_santas.
             pass
+
+    def generate_integers(self, n, min, max, optional_data=None):
+        try:
+            response = self.random_client.generate_signed_integers(n, min, max, replacement=False, user_data=optional_data)
+            integers = response["random"]["data"]
+            link = self.random_client.create_url(response["random"], response["signature"])
+            self.signed_random_links.append(link)
+            self.logger.info(f'Random.org used. Link: {link}')
+            return integers
+        except Exception as e:
+            self.logger.info(f"Random.org API failed, using Python random instead.\n{e}")
+            return random.sample(range(min, max + 1), k=n)
+
+    def create_shuffled_list(self, x):
+        x_len = len(x)
+        new_order = self.generate_integers(x_len, 0, x_len - 1, optional_data=x)
+
+        shuffled_x = [None] * x_len
+        for i in range(x_len):
+            shuffled_x[i] = x[new_order[i]]
+
+        return shuffled_x
 
 # The 'setup' function must be asynchronous
 async def setup(bot):
