@@ -1,0 +1,152 @@
+2024-10-24 20:21:19,861 - bot_logger - INFO - Bot is starting...
+2024-10-24 20:21:22,733 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '143918724745920512': 143918724745920512, '725334060666192004': 725334060666192004, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {}, 'active': True, 'join_closed': False, 'announcement_message_id': 1299068314374635611, 'event_type': 'Secret'}
+2024-10-24 20:21:22,734 - bot_logger - INFO - Logged in as TTS-TestBot#1357 (ID: 1166031616402018404)
+2024-10-24 20:21:22,734 - bot_logger - INFO - Bot is ready and running.
+2024-10-24 20:21:39,168 - bot_logger - INFO - Current number of participants: 6
+2024-10-24 20:21:39,168 - bot_logger - INFO - Participant: trolle (ID: 251835504654286852)
+2024-10-24 20:21:39,168 - bot_logger - INFO - Participant: Velizar (ID: 320526362219905038)
+2024-10-24 20:21:39,169 - bot_logger - INFO - Participant: crubleigh (ID: 143918724745920512)
+2024-10-24 20:21:39,169 - bot_logger - INFO - Participant: Eagle-From-Aut (ID: 725334060666192004)
+2024-10-24 20:21:39,169 - bot_logger - INFO - Participant: JKM (ID: 185834053558075392)
+2024-10-24 20:21:39,170 - bot_logger - INFO - Participant: paradoxx_42 (ID: 584694654780309524)
+2024-10-24 20:21:39,170 - bot_logger - INFO - Secret Santa assignments have been made.
+2024-10-24 20:21:43,516 - bot_logger - ERROR - Error in slash command 'assign_santas': Command raised an exception: InteractionTimedOut: Interaction took more than 3 seconds to be responded to. Please defer it using "interaction.response.defer" on the start of your command. Later you may send a response by editing the deferred message using "interaction.edit_original_response"
+Note: This might also be caused by a misconfiguration in the components make sure you do not respond twice in case this is a component.
+NoneType: None
+2024-10-24 20:21:43,676 - bot_logger - ERROR - Error in on_slash_command_error
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\interactions\base.py", line 1023, in send_message
+    await adapter.create_interaction_response(
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\webhook\async_.py", line 208, in request
+    raise NotFound(response, data)
+disnake.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\client.py", line 703, in _run_event
+    await coro(*args, **kwargs)
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\main.py", line 94, in on_slash_command_error
+    await inter.send(f"❌ An error occurred: {error}", ephemeral=True)
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\interactions\base.py", line 695, in send
+    await sender(
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\interactions\base.py", line 1033, in send_message
+    raise InteractionTimedOut(self._parent) from e
+disnake.errors.InteractionTimedOut: Interaction took more than 3 seconds to be responded to. Please defer it using "interaction.response.defer" on the start of your command. Later you may send a response by editing the deferred message using "interaction.edit_original_response"
+Note: This might also be caused by a misconfiguration in the components make sure you do not respond twice in case this is a component.
+2024-10-24 20:23:51,329 - bot_logger - INFO - Secret Santa assignments revealed by trolle6.
+2024-10-24 20:26:04,320 - bot_logger - INFO - Received exit signal SIGINT...
+2024-10-24 20:26:04,321 - bot_logger - INFO - Shutting down bot...
+2024-10-24 20:26:04,322 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-10-24 20:26:04,323 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-10-24 20:26:04,323 - bot_logger - INFO - DALLECog is being unloaded.
+2024-10-24 20:26:04,324 - bot_logger - INFO - process_queue task has been cancelled.
+2024-10-24 20:28:00,603 - bot_logger - INFO - Bot is starting...
+2024-10-24 20:28:03,522 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '143918724745920512': 143918724745920512, '725334060666192004': 725334060666192004, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {}, 'active': True, 'join_closed': False, 'announcement_message_id': 1299068314374635611, 'event_type': 'Secret'}
+2024-10-24 20:28:03,522 - bot_logger - INFO - Logged in as TTS-TestBot#1357 (ID: 1166031616402018404)
+2024-10-24 20:28:03,523 - bot_logger - INFO - Bot is ready and running.
+2024-10-24 20:28:50,336 - bot_logger - INFO - Current number of participants: 6
+2024-10-24 20:28:50,336 - bot_logger - INFO - Participant: trolle (ID: 251835504654286852)
+2024-10-24 20:28:50,337 - bot_logger - INFO - Participant: Velizar (ID: 320526362219905038)
+2024-10-24 20:28:50,337 - bot_logger - INFO - Participant: crubleigh (ID: 143918724745920512)
+2024-10-24 20:28:50,337 - bot_logger - INFO - Participant: Eagle-From-Aut (ID: 725334060666192004)
+2024-10-24 20:28:50,338 - bot_logger - INFO - Participant: JKM (ID: 185834053558075392)
+2024-10-24 20:28:50,338 - bot_logger - INFO - Participant: paradoxx_42 (ID: 584694654780309524)
+2024-10-24 20:28:50,338 - bot_logger - INFO - Secret Santa assignments have been made.
+2024-10-24 20:28:53,557 - bot_logger - INFO - Saving current state of assignments and participants.
+2024-10-24 20:28:53,585 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '143918724745920512': 143918724745920512, '725334060666192004': 725334060666192004, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {'251835504654286852': 584694654780309524, '320526362219905038': 725334060666192004, '143918724745920512': 185834053558075392, '725334060666192004': 251835504654286852, '185834053558075392': 143918724745920512, '584694654780309524': 320526362219905038}, 'active': True, 'join_closed': False, 'announcement_message_id': 1299068314374635611, 'event_type': 'Secret'}
+2024-10-24 20:28:53,586 - bot_logger - INFO - State saved successfully.
+2024-10-24 20:29:07,256 - bot_logger - INFO - Secret Santa assignments revealed by trolle6.
+2024-10-24 20:35:42,259 - bot_logger - INFO - Received exit signal SIGINT...
+2024-10-24 20:35:42,260 - bot_logger - INFO - Shutting down bot...
+2024-10-24 20:35:42,260 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-10-24 20:35:42,261 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-10-24 20:35:42,262 - bot_logger - INFO - DALLECog is being unloaded.
+2024-10-24 20:35:42,262 - bot_logger - INFO - process_queue task has been cancelled.
+2024-10-24 20:36:12,974 - bot_logger - INFO - Bot is starting...
+2024-10-24 20:36:16,236 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '143918724745920512': 143918724745920512, '725334060666192004': 725334060666192004, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {'251835504654286852': 584694654780309524, '320526362219905038': 725334060666192004, '143918724745920512': 185834053558075392, '725334060666192004': 251835504654286852, '185834053558075392': 143918724745920512, '584694654780309524': 320526362219905038}, 'active': True, 'join_closed': False, 'announcement_message_id': 1299068314374635611, 'event_type': 'Secret'}
+2024-10-24 20:36:16,237 - bot_logger - INFO - Logged in as TTS-TestBot#1357 (ID: 1166031616402018404)
+2024-10-24 20:36:16,238 - bot_logger - INFO - Bot is ready and running.
+2024-10-24 20:36:22,524 - bot_logger - INFO - Current number of participants: 6
+2024-10-24 20:36:22,525 - bot_logger - INFO - Participant: trolle (ID: 251835504654286852)
+2024-10-24 20:36:22,525 - bot_logger - INFO - Participant: Velizar (ID: 320526362219905038)
+2024-10-24 20:36:22,525 - bot_logger - INFO - Participant: crubleigh (ID: 143918724745920512)
+2024-10-24 20:36:22,526 - bot_logger - INFO - Participant: Eagle-From-Aut (ID: 725334060666192004)
+2024-10-24 20:36:22,526 - bot_logger - INFO - Participant: JKM (ID: 185834053558075392)
+2024-10-24 20:36:22,527 - bot_logger - INFO - Participant: paradoxx_42 (ID: 584694654780309524)
+2024-10-24 20:36:46,160 - bot_logger - INFO - Secret Santa event ended by trolle6. Assignments were: {251835504654286852: 584694654780309524, 320526362219905038: 725334060666192004, 143918724745920512: 185834053558075392, 725334060666192004: 251835504654286852, 185834053558075392: 143918724745920512, 584694654780309524: 320526362219905038}
+2024-10-24 20:36:46,524 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {}, 'assignments': {}, 'active': False, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:36:58,118 - bot_logger - ERROR - Error while starting Secret Santa event: 400 Bad Request (error code: 50035): Invalid Form Body
+In message_id: Value "None" is not snowflake.
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\SecretSanta_cog.py", line 122, in start_santa
+    announcement = await channel.fetch_message(self.announcement_message_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\abc.py", line 1825, in fetch_message
+    data = await self._state.http.get_message(channel.id, id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\http.py", line 415, in request
+    raise HTTPException(response, data)
+disnake.errors.HTTPException: 400 Bad Request (error code: 50035): Invalid Form Body
+In message_id: Value "None" is not snowflake.
+2024-10-24 20:37:53,381 - bot_logger - INFO - Processing TTS for message from trolle6 in channel ID 1189303419916267640
+2024-10-24 20:37:53,382 - bot_logger - INFO - Message from trolle6 queued for TTS in guild Trolles Test Server.
+2024-10-24 20:37:53,382 - bot_logger - WARNING - User trolle6 attempted TTS but is not in a voice channel.
+2024-10-24 20:38:05,343 - bot_logger - INFO - Received exit signal SIGINT...
+2024-10-24 20:38:05,343 - bot_logger - INFO - Shutting down bot...
+2024-10-24 20:38:05,344 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-10-24 20:38:05,346 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-10-24 20:38:05,347 - bot_logger - INFO - DALLECog is being unloaded.
+2024-10-24 20:38:05,348 - bot_logger - INFO - process_queue task has been cancelled.
+2024-10-24 20:38:09,319 - bot_logger - INFO - Bot is starting...
+2024-10-24 20:38:12,225 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {}, 'assignments': {}, 'active': False, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:38:12,225 - bot_logger - INFO - Logged in as TTS-TestBot#1357 (ID: 1166031616402018404)
+2024-10-24 20:38:12,226 - bot_logger - INFO - Bot is ready and running.
+2024-10-24 20:39:46,746 - bot_logger - INFO - Ignored reaction from bot: TTS-TestBot (ID: 1166031616402018404)
+2024-10-24 20:39:46,786 - bot_logger - INFO - Secret Santa event started by trolle6. Using existing announcement message ID: 1299079753990668299
+2024-10-24 20:39:47,017 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {}, 'assignments': {}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:39:58,335 - bot_logger - INFO - Added participant: trolle (ID: 251835504654286852)
+2024-10-24 20:39:58,380 - bot_logger - INFO - Saving state after new participant added.
+2024-10-24 20:39:58,382 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852}, 'assignments': {}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:39:58,382 - bot_logger - INFO - State saved successfully after new participant added.
+2024-10-24 20:40:48,799 - bot_logger - INFO - Added participant: Velizar (ID: 320526362219905038)
+2024-10-24 20:40:48,799 - bot_logger - INFO - Saving state after new participant added.
+2024-10-24 20:40:48,800 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038}, 'assignments': {}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:40:48,800 - bot_logger - INFO - State saved successfully after new participant added.
+2024-10-24 20:41:02,676 - bot_logger - INFO - Added participant: JKM (ID: 185834053558075392)
+2024-10-24 20:41:02,676 - bot_logger - INFO - Saving state after new participant added.
+2024-10-24 20:41:02,680 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '185834053558075392': 185834053558075392}, 'assignments': {}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:41:02,680 - bot_logger - INFO - State saved successfully after new participant added.
+2024-10-24 20:41:03,999 - bot_logger - INFO - Added participant: paradoxx_42 (ID: 584694654780309524)
+2024-10-24 20:41:04,000 - bot_logger - INFO - Saving state after new participant added.
+2024-10-24 20:41:04,000 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:41:04,001 - bot_logger - INFO - State saved successfully after new participant added.
+2024-10-24 20:41:28,155 - bot_logger - INFO - Current number of participants: 4
+2024-10-24 20:41:28,155 - bot_logger - INFO - Participant: trolle (ID: 251835504654286852)
+2024-10-24 20:41:28,156 - bot_logger - INFO - Participant: Velizar (ID: 320526362219905038)
+2024-10-24 20:41:28,156 - bot_logger - INFO - Participant: JKM (ID: 185834053558075392)
+2024-10-24 20:41:28,156 - bot_logger - INFO - Participant: paradoxx_42 (ID: 584694654780309524)
+2024-10-24 20:41:28,157 - bot_logger - INFO - Secret Santa assignments have been made.
+2024-10-24 20:41:30,651 - bot_logger - INFO - Saving current state of assignments and participants.
+2024-10-24 20:41:30,653 - bot_logger - INFO - Secret Santa data saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {'251835504654286852': 584694654780309524, '320526362219905038': 185834053558075392, '185834053558075392': 320526362219905038, '584694654780309524': 251835504654286852}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:41:30,654 - bot_logger - INFO - State saved successfully.
+2024-10-24 20:41:34,504 - bot_logger - INFO - Secret Santa assignments revealed by trolle6.
+2024-10-24 20:42:30,171 - bot_logger - INFO - Processing TTS for message from trolle6 in channel ID 1189303419916267640
+2024-10-24 20:42:30,173 - bot_logger - INFO - Message from trolle6 queued for TTS in guild Trolles Test Server.
+2024-10-24 20:42:30,174 - bot_logger - WARNING - User trolle6 attempted TTS but is not in a voice channel.
+2024-10-24 20:42:37,439 - bot_logger - INFO - Received exit signal SIGINT...
+2024-10-24 20:42:37,440 - bot_logger - INFO - Shutting down bot...
+2024-10-24 20:42:37,442 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-10-24 20:42:37,443 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-10-24 20:42:37,443 - bot_logger - INFO - DALLECog is being unloaded.
+2024-10-24 20:42:37,444 - bot_logger - INFO - process_queue task has been cancelled.
+2024-10-24 20:44:35,541 - bot_logger - INFO - Bot is starting...
+2024-10-24 20:44:39,018 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json. Data: {'participants': {'251835504654286852': 251835504654286852, '320526362219905038': 320526362219905038, '185834053558075392': 185834053558075392, '584694654780309524': 584694654780309524}, 'assignments': {'251835504654286852': 584694654780309524, '320526362219905038': 185834053558075392, '185834053558075392': 320526362219905038, '584694654780309524': 251835504654286852}, 'active': True, 'join_closed': False, 'event_type': 'Secret'}
+2024-10-24 20:44:39,022 - bot_logger - INFO - Logged in as TTS-TestBot#1357 (ID: 1166031616402018404)
+2024-10-24 20:44:39,024 - bot_logger - INFO - Bot is ready and running.
+2024-10-24 20:45:34,342 - bot_logger - INFO - Received exit signal SIGINT...
+2024-10-24 20:45:34,342 - bot_logger - INFO - Shutting down bot...
+2024-10-24 20:45:34,343 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-10-24 20:45:34,344 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-10-24 20:45:34,345 - bot_logger - INFO - DALLECog is being unloaded.
+2024-10-24 20:45:34,345 - bot_logger - INFO - process_queue task has been cancelled.

@@ -1,0 +1,30 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <value>
+          <list size="10">
+            <item index="0" class="java.lang.String" itemvalue="openai" />
+            <item index="1" class="java.lang.String" itemvalue="boto3" />
+            <item index="2" class="java.lang.String" itemvalue="s3transfer" />
+            <item index="3" class="java.lang.String" itemvalue="botocore" />
+            <item index="4" class="java.lang.String" itemvalue="nextcord" />
+            <item index="5" class="java.lang.String" itemvalue="typing_extensions" />
+            <item index="6" class="java.lang.String" itemvalue="pydantic" />
+            <item index="7" class="java.lang.String" itemvalue="discord" />
+            <item index="8" class="java.lang.String" itemvalue="tzdata" />
+            <item index="9" class="java.lang.String" itemvalue="discord.py" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyUnresolvedReferencesInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredIdentifiers">
+        <list>
+          <option value="disnake.voice_client.VoiceProtocol.is_connected" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
