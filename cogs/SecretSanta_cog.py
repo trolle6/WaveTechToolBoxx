@@ -130,6 +130,7 @@ class SecretSantaCog(commands.Cog):
                 return
 
             announcement = await channel.fetch_message(self.announcement_message_id)
+            # Optionally remove the following line if you don't want to add any reactions
             await announcement.add_reaction("🎁")
 
             self.logger.info(f"Secret Santa event started by {inter.author}. Using existing announcement message ID: {self.announcement_message_id}")
@@ -267,7 +268,7 @@ class SecretSantaCog(commands.Cog):
 
         if not self.participants:
             await inter.response.send_message(
-                "🎄 **No participants have joined yet.**\nReact to the announcement message with 🎁 to join!",
+                "🎄 **No participants have joined yet.**\nReact to the announcement message to join!",
                 ephemeral=True,
             )
             return
@@ -403,9 +404,7 @@ class SecretSantaCog(commands.Cog):
             self.logger.debug(f"Reaction not on announcement message. Payload message ID: {payload.message_id}, Announcement message ID: {self.announcement_message_id}")
             return
 
-        if str(payload.emoji) != "🎁":
-            self.logger.debug(f"Reaction is not the correct emoji. Emoji: {payload.emoji}")
-            return
+        # Removed the check for the specific emoji
 
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
@@ -448,8 +447,7 @@ class SecretSantaCog(commands.Cog):
         if payload.message_id != self.announcement_message_id:
             return
 
-        if str(payload.emoji) != "🎁":
-            return
+        # Removed the check for the specific emoji
 
         guild = self.bot.get_guild(payload.guild_id)
         if not guild:
@@ -469,6 +467,33 @@ class SecretSantaCog(commands.Cog):
         if member.bot:
             return
 
+        # Fetch the message to check for other reactions
+        channel = self.bot.get_channel(payload.channel_id)
+        if not channel:
+            return
+
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except Exception as e:
+            self.logger.error(f"Error fetching message: {e}", exc_info=True)
+            return
+
+        # Check if the user still has any reactions on the message
+        user_still_has_reactions = False
+        for reaction in message.reactions:
+            if reaction.count == 0:
+                continue
+            async for user in reaction.users():
+                if user.id == payload.user_id:
+                    user_still_has_reactions = True
+                    break
+            if user_still_has_reactions:
+                break
+
+        if user_still_has_reactions:
+            return  # User still has other reactions, do not remove from participants
+
+        # Remove the participant
         async with self.lock:
             if payload.user_id in self.participants:
                 removed_member = self.participants.pop(payload.user_id)
