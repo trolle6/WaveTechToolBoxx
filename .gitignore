@@ -2,3 +2,4 @@ config.json
 venv/
 env/
 *.log
+secret_santa_data.json
