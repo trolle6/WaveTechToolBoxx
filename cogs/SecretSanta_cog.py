@@ -384,15 +384,16 @@ class SecretSantaCog(commands.Cog):
 
     def assign_santas(self):
         santa_ids = list(self.participants.keys())
-        max_attempts = 1000
-        for attempt in range(max_attempts):
-            random.shuffle(santa_ids)
-            if all(santa_id != receiver_id for santa_id, receiver_id in zip(self.participants.keys(), santa_ids)):
-                break
-        else:
-            raise Exception("Failed to assign Secret Santas without self-assignment after many attempts.")
+        # Multiple shuffles for higher entropy
+        for _ in range(10):
+            santa_ids = self.create_shuffled_list(santa_ids)
 
-        self.assignments = dict(zip(self.participants.keys(), santa_ids))
+        santa_ids.append(santa_ids[0])
+        new_assignments = {}
+        for i in range(0, len(santa_ids) - 1):
+            new_assignments[santa_ids[i]] = santa_ids[i + 1]
+
+        self.assignments = new_assignments
 
     async def fetch_user(self, user_id):
         user = self.bot.get_user(user_id)
