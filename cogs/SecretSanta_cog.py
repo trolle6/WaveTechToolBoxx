@@ -13,9 +13,13 @@ import openai  # For ChatGPT API usage
 import aiohttp  # For async HTTP requests
 
 def is_moderator():
-    """A decorator that checks if the user has administrator permissions."""
+    """A decorator that checks if the user has the moderator role specified in the config."""
     async def predicate(inter):
-        return inter.author.guild_permissions.administrator
+        # Get the moderator role ID from the bot's config
+        moderator_role_id = int(inter.bot.config["discord"]["moderator_role_id"])
+        # Check if the author has that role
+        has_role = any(role.id == moderator_role_id for role in inter.author.roles)
+        return has_role
     return commands.check(predicate)
 
 class SecretSantaCog(commands.Cog):

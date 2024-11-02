@@ -7,6 +7,61 @@ import signal
 import asyncio
 from logging.handlers import RotatingFileHandler
 
+# Define the DiscordLogHandler class here
+class DiscordLogHandler(logging.Handler):
+    def __init__(self, bot, channel_id):
+        super().__init__()
+        self.bot = bot
+        self.channel_id = channel_id
+        self.queue = asyncio.Queue()
+        self.task = self.bot.loop.create_task(self.process_logs())
+
+    def emit(self, record):
+        self.queue.put_nowait(record)
+
+    async def process_logs(self):
+        await self.bot.wait_until_ready()
+        channel = self.bot.get_channel(self.channel_id)
+        if channel is None:
+            self.bot.logger.error(f"DiscordLogHandler: Channel with ID {self.channel_id} not found.")
+            return
+        while True:
+            record = await self.queue.get()
+            try:
+                log_entry = self.format(record)
+                # Split long messages to fit Discord's message length limit
+                max_length = 1990  # Adjust for formatting characters
+                for chunk in [log_entry[i:i+max_length] for i in range(0, len(log_entry), max_length)]:
+                    await channel.send(f"```{chunk}```")
+            except Exception as e:
+                self.bot.logger.error(f"Error sending log message to Discord: {e}", exc_info=True)
+            self.queue.task_done()
+
+# Load configuration first
+def load_config():
+    try:
+        with open("config.json") as f:
+            config = json.load(f)
+        return config
+    except FileNotFoundError:
+        logging.basicConfig(level=logging.ERROR)
+        logger = logging.getLogger("bot_logger")
+        logger.error("config.json file not found. Please ensure it exists in the project directory.")
+        raise
+    except json.JSONDecodeError as e:
+        logging.basicConfig(level=logging.ERROR)
+        logger = logging.getLogger("bot_logger")
+        logger.error(f"JSON decode error in config.json: {e}")
+        raise
+    except Exception as e:
+        logging.basicConfig(level=logging.ERROR)
+        logger = logging.getLogger("bot_logger")
+        logger.error(f"Failed to load configuration: {e}")
+        raise
+
+config = load_config()
+
+# Set up the unified logger
 def setup_logger(config):
     logger = logging.getLogger("bot_logger")
     if not logger.handlers:
@@ -35,38 +90,12 @@ def setup_logger(config):
 
     return logger
 
-def load_config():
-    try:
-        with open("config.json") as f:
-            config = json.load(f)
-        return config
-    except FileNotFoundError:
-        logging.basicConfig(level=logging.ERROR)
-        logger = logging.getLogger("bot_logger")
-        logger.error("config.json file not found. Please ensure it exists in the project directory.")
-        raise
-    except json.JSONDecodeError as e:
-        logging.basicConfig(level=logging.ERROR)
-        logger = logging.getLogger("bot_logger")
-        logger.error(f"JSON decode error in config.json: {e}")
-        raise
-    except Exception as e:
-        logging.basicConfig(level=logging.ERROR)
-        logger = logging.getLogger("bot_logger")
-        logger.error(f"Failed to load configuration: {e}")
-        raise
-
-# Load configuration first
-config = load_config()
-
-# Set up the unified logger
 logger = setup_logger(config)
 logger.debug("Logger has been set up.")
 
 # Create the bot instance
 intents = disnake.Intents.all()
 
-# Replace commands.Bot with commands.InteractionBot
 bot = commands.InteractionBot(
     intents=intents,
     test_guilds=[int(config["discord"]["guild_id"])]
@@ -81,7 +110,15 @@ async def on_ready():
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     logger.info("Bot is ready and running.")
 
-# Error handlers and shutdown code
+    # Set up the Discord log handler
+    log_channel_id = int(bot.config["discord"]["log_channel_id"])
+    discord_handler = DiscordLogHandler(bot, log_channel_id)
+    discord_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    discord_handler.setFormatter(formatter)
+    logger.addHandler(discord_handler)
+    logger.info("Discord Is Being Logged.")
+
 @bot.event
 async def on_error(event_method, *args, **kwargs):
     logger.error(f"Error in {event_method}", exc_info=True)
