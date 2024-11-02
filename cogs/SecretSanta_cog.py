@@ -29,7 +29,7 @@ class SecretSantaCog(commands.Cog):
         self.logger = bot.logger
         self.random_client = RandomOrgClient(self.config["random_org"]["api_key"])
         self.signed_random_links = []
-        self.participants = {}  # Maps user_id to member object
+        self.participants = {}  # Maps user_id to member object or None if not available
         self.assignments = {}  # Maps santa_id to giftee_id
         self.pending_questions = {}  # Maps giftee_id to list of questions
         self.active = False
@@ -52,7 +52,7 @@ class SecretSantaCog(commands.Cog):
     def save_assignments(self):
         """Saves the current state to a JSON file."""
         data = {
-            "participants": {str(k): v.id for k, v in self.participants.items()},
+            "participants": {str(k): v.id if v else None for k, v in self.participants.items()},
             "assignments": {str(k): v for k, v in self.assignments.items()},
             "pending_questions": self.pending_questions,  # Needs to be serializable
             "active": self.active,
@@ -63,7 +63,7 @@ class SecretSantaCog(commands.Cog):
         try:
             with open(self.data_file, "w") as f:
                 json.dump(data, f)
-            self.logger.info(f"Secret Santa data saved to {self.data_file}. Data: {data}")
+            self.logger.info(f"Secret Santa data saved to {self.data_file}.")
         except Exception as e:
             self.logger.error(f"Error saving Secret Santa data: {e}", exc_info=True)
 
@@ -74,17 +74,11 @@ class SecretSantaCog(commands.Cog):
             if os.path.exists(self.data_file):
                 with open(self.data_file, "r") as f:
                     data = json.load(f)
-                self.logger.info(f"Secret Santa data loaded from {self.data_file}. Data: {data}")
+                self.logger.info(f"Secret Santa data loaded from {self.data_file}.")
                 self.participants = {}
                 for k, v in data.get("participants", {}).items():
-                    user = self.bot.get_user(int(v))
-                    if user is None:
-                        try:
-                            user = await self.bot.fetch_user(int(v))
-                        except disnake.NotFound:
-                            self.logger.warning(f"User with ID {v} not found.")
-                            continue
-                    self.participants[int(k)] = user
+                    user_id = int(v) if v else None
+                    self.participants[int(k)] = user_id  # Store user IDs instead of member objects
 
                 self.assignments = {
                     int(k): int(v) for k, v in data.get("assignments", {}).items()
@@ -230,12 +224,9 @@ class SecretSantaCog(commands.Cog):
         if self.event_type == "Regular":
             reveal_text = "🎁 **Secret Santa Assignments:**\n"
             for santa_id, receiver_id in self.assignments.items():
-                santa = self.participants.get(santa_id)
-                receiver = self.participants.get(receiver_id)
-                if santa and receiver:
-                    reveal_text += f"{santa.display_name} ➡️ {receiver.display_name}\n"
-                else:
-                    reveal_text += f"❓ **Unknown Assignments**\n"
+                santa_name = await self.get_user_display_name(santa_id)
+                receiver_name = await self.get_user_display_name(receiver_id)
+                reveal_text += f"{santa_name} ➡️ {receiver_name}\n"
 
             embed = disnake.Embed(
                 title="🎁 Secret Santa Assignments Revealed! 🎁",
@@ -278,7 +269,7 @@ class SecretSantaCog(commands.Cog):
             return
 
         participant_names = [
-            member.display_name for member in self.participants.values()
+            await self.get_user_display_name(user_id) for user_id in self.participants.keys()
         ]
         participant_list = "\n".join(participant_names)
         embed = disnake.Embed(
@@ -310,8 +301,9 @@ class SecretSantaCog(commands.Cog):
             min_participants = 2  # Default to 2 if there's an error
 
         self.logger.info(f"Current number of participants: {len(self.participants)}")
-        for participant_id, participant in self.participants.items():
-            self.logger.info(f"Participant: {participant.display_name} (ID: {participant_id})")
+        for participant_id in self.participants.keys():
+            participant_name = await self.get_user_display_name(participant_id)
+            self.logger.info(f"Participant: {participant_name} (ID: {participant_id})")
 
         if len(self.participants) < min_participants:
             await inter.edit_original_response(
@@ -343,20 +335,28 @@ class SecretSantaCog(commands.Cog):
             failed_assignments = []
 
             for santa_id, receiver_id in self.assignments.items():
-                santa = self.participants.get(santa_id)
-                receiver = self.participants.get(receiver_id)
-
-                if santa and receiver:
-                    try:
-                        await santa.send(
-                            f"🎄 **Your Secret Santa Assignment!** 🎄\n"
-                            f"You are the Secret Santa for: **{receiver.display_name}** 🎁"
-                        )
-                    except disnake.Forbidden:
-                        failed_assignments.append(santa.display_name)
+                try:
+                    santa_user = await self.fetch_user(santa_id)
+                    receiver_name = await self.get_user_display_name(receiver_id)
+                    if santa_user:
+                        try:
+                            await santa_user.send(
+                                f"🎄 **Your Secret Santa Assignment!** 🎄\n"
+                                f"You are the Secret Santa for: **{receiver_name}** 🎁"
+                            )
+                        except disnake.Forbidden:
+                            failed_assignments.append(await self.get_user_display_name(santa_id))
+                            self.logger.warning(
+                                f"Failed to send DM to user ID {santa_id}"
+                            )
+                    else:
+                        failed_assignments.append(f"User ID {santa_id}")
                         self.logger.warning(
-                            f"Failed to send DM to {santa.display_name} (ID: {santa_id})"
+                            f"Could not fetch user with ID {santa_id} to send DM."
                         )
+                except Exception as e:
+                    self.logger.error(f"Error handling assignment for user ID {santa_id}: {e}", exc_info=True)
+                    failed_assignments.append(f"User ID {santa_id}")
 
             if failed_assignments:
                 failed_list = ", ".join(failed_assignments)
@@ -375,25 +375,32 @@ class SecretSantaCog(commands.Cog):
     def assign_santas(self):
         """Assigns Secret Santas to participants, ensuring no one is assigned to themselves."""
         santa_ids = list(self.participants.keys())
-        # Multiple shuffles for higher entropy
-        for _ in range(10):
-            santa_ids = self.create_shuffled_list(santa_ids)
+        # Shuffle until no one is assigned to themselves
+        max_attempts = 1000
+        for attempt in range(max_attempts):
+            random.shuffle(santa_ids)
+            if all(santa_id != receiver_id for santa_id, receiver_id in zip(self.participants.keys(), santa_ids)):
+                break
+        else:
+            raise Exception("Failed to assign Secret Santas without self-assignment after many attempts.")
 
-        santa_ids.append(santa_ids[0])
-        new_assignments = {}
-        for i in range(0, len(santa_ids) - 1):
-            new_assignments[santa_ids[i]] = santa_ids[i + 1]
+        self.assignments = dict(zip(self.participants.keys(), santa_ids))
 
-        self.assignments = new_assignments
+    async def fetch_user(self, user_id):
+        """Fetches a user object by ID, handles exceptions."""
+        user = self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except Exception as e:
+                self.logger.error(f"Error fetching user with ID {user_id}: {e}", exc_info=True)
+                user = None
+        return user
 
-    async def periodic_save_state(self):
-        """Periodically saves the state to ensure minimal data loss."""
-        while True:
-            await asyncio.sleep(300)  # Save every 5 minutes
-            async with self.lock:
-                self.logger.info("Periodic save: saving current state of assignments and participants.")
-                self.save_assignments()
-                self.logger.info("Periodic save: state saved successfully.")
+    async def get_user_display_name(self, user_id):
+        """Gets the display name of a user, or 'Unknown User' if not available."""
+        user = await self.fetch_user(user_id)
+        return user.display_name if user else f"User ID {user_id}"
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
@@ -408,35 +415,17 @@ class SecretSantaCog(commands.Cog):
             self.logger.debug(f"Reaction not on announcement message. Payload message ID: {payload.message_id}, Announcement message ID: {self.announcement_message_id}")
             return
 
-        # Removed the check for the specific emoji
-
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
             self.logger.error("Guild not found for reaction.")
             return
 
-        member = guild.get_member(payload.user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(payload.user_id)
-                self.logger.info(f"Fetched member: {member.display_name} (ID: {payload.user_id})")
-            except disnake.NotFound:
-                self.logger.error(f"Member with ID {payload.user_id} not found.")
-                return
-            except Exception as e:
-                self.logger.error(f"Error fetching member: {e}", exc_info=True)
-                return
-
-        if member.bot:
-            self.logger.info(f"Ignored reaction from bot: {member.display_name} (ID: {payload.user_id})")
-            return
-
         async with self.lock:
             if payload.user_id not in self.participants:
-                self.participants[payload.user_id] = member
-                self.logger.info(f"Added participant: {member.display_name} (ID: {payload.user_id})")
+                self.participants[payload.user_id] = None  # Store user ID
+                self.logger.info(f"Added participant with user ID: {payload.user_id}")
             else:
-                self.logger.info(f"Participant {member.display_name} (ID: {payload.user_id}) already added.")
+                self.logger.info(f"Participant with user ID {payload.user_id} already added.")
 
         self.logger.info("Saving state after new participant added.")
         self.save_assignments()
@@ -451,62 +440,21 @@ class SecretSantaCog(commands.Cog):
         if payload.message_id != self.announcement_message_id:
             return
 
-        # Removed the check for the specific emoji
-
         guild = self.bot.get_guild(payload.guild_id)
         if not guild:
             return
 
-        member = guild.get_member(payload.user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(payload.user_id)
-            except disnake.NotFound:
-                self.logger.error(f"Member with ID {payload.user_id} not found.")
-                return
-            except Exception as e:
-                self.logger.error(f"Error fetching member: {e}", exc_info=True)
-                return
-
-        if member.bot:
-            return
-
-        # Fetch the message to check for other reactions
-        channel = self.bot.get_channel(payload.channel_id)
-        if not channel:
-            return
-
-        try:
-            message = await channel.fetch_message(payload.message_id)
-        except Exception as e:
-            self.logger.error(f"Error fetching message: {e}", exc_info=True)
-            return
-
-        # Check if the user still has any reactions on the message
-        user_still_has_reactions = False
-        for reaction in message.reactions:
-            if reaction.count == 0:
-                continue
-            async for user in reaction.users():
-                if user.id == payload.user_id:
-                    user_still_has_reactions = True
-                    break
-            if user_still_has_reactions:
-                break
-
-        if user_still_has_reactions:
-            return  # User still has other reactions, do not remove from participants
-
-        # Remove the participant
         async with self.lock:
             if payload.user_id in self.participants:
-                removed_member = self.participants.pop(payload.user_id)
-                self.logger.info(f"User {removed_member.display_name} removed from Secret Santa participants.")
+                self.participants.pop(payload.user_id, None)
+                self.logger.info(f"User ID {payload.user_id} removed from Secret Santa participants.")
 
-                try:
-                    await removed_member.send("❌ You have been removed from the Secret Santa event.")
-                except disnake.Forbidden:
-                    self.logger.warning(f"Could not send DM to {removed_member.display_name}. They might have DMs disabled.")
+                user = await self.fetch_user(payload.user_id)
+                if user:
+                    try:
+                        await user.send("❌ You have been removed from the Secret Santa event.")
+                    except disnake.Forbidden:
+                        self.logger.warning(f"Could not send DM to user ID {payload.user_id}. They might have DMs disabled.")
 
                 self.save_assignments()
 
@@ -543,12 +491,9 @@ class SecretSantaCog(commands.Cog):
 
         reveal_text = "🎁 **Secret Santa Assignments:**\n"
         for santa_id, receiver_id in self.assignments.items():
-            santa = self.participants.get(santa_id)
-            receiver = self.participants.get(receiver_id)
-            if santa and receiver:
-                reveal_text += f"{santa.display_name} ➡️ {receiver.display_name}\n"
-            else:
-                reveal_text += f"❓ **Unknown Assignments**\n"
+            santa_name = await self.get_user_display_name(santa_id)
+            receiver_name = await self.get_user_display_name(receiver_id)
+            reveal_text += f"{santa_name} ➡️ {receiver_name}\n"
 
         embed = disnake.Embed(
             title="🎁 Secret Santa Assignments Revealed! 🎁",
@@ -702,8 +647,8 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ You do not have an assigned giftee or assignments have not been made yet.")
             return
 
-        giftee = self.participants.get(giftee_id)
-        if not giftee:
+        giftee_user = await self.fetch_user(giftee_id)
+        if not giftee_user:
             await inter.edit_original_response(content="❌ Unable to find your assigned giftee.")
             return
 
@@ -720,15 +665,15 @@ class SecretSantaCog(commands.Cog):
             })
             self.save_assignments()
 
-            await giftee.send(
+            await giftee_user.send(
                 f"📩 **You have received an anonymous question from your Secret Santa:**\n\n{question}\n\n"
                 f"Please reply to this message to answer."
             )
             await inter.edit_original_response(content="✅ Your question has been sent anonymously to your giftee.")
-            self.logger.info(f"{inter.author} sent an anonymous question to {giftee}.")
+            self.logger.info(f"{inter.author} sent an anonymous question to user ID {giftee_id}.")
         except disnake.Forbidden:
             await inter.edit_original_response(content="❌ Unable to send the question. The giftee may have DMs disabled.")
-            self.logger.warning(f"Could not send anonymous question to {giftee.display_name}.")
+            self.logger.warning(f"Could not send anonymous question to user ID {giftee_id}.")
         except Exception as e:
             await inter.edit_original_response(content="❌ An error occurred while sending your question.")
             self.logger.error(f"Error sending anonymous question: {e}", exc_info=True)
@@ -750,19 +695,16 @@ class SecretSantaCog(commands.Cog):
 
         last_question = pending[-1]
         santa_id = last_question['santa_id']
-        santa = self.bot.get_user(santa_id)
-        if not santa:
-            try:
-                santa = await self.bot.fetch_user(santa_id)
-            except Exception as e:
-                self.logger.error(f"Error fetching Santa user: {e}", exc_info=True)
-                return
+        santa_user = await self.fetch_user(santa_id)
+        if not santa_user:
+            self.logger.error(f"Unable to find Santa user with ID {santa_id}")
+            return
 
         try:
-            await santa.send(
+            await santa_user.send(
                 f"📬 **Your giftee has replied to your question:**\n\n{message.content}"
             )
-            self.logger.info(f"Forwarded giftee's reply to Santa {santa.display_name}.")
+            self.logger.info(f"Forwarded giftee's reply to Santa user ID {santa_id}.")
 
             pending.pop()
             if not pending:
@@ -773,7 +715,7 @@ class SecretSantaCog(commands.Cog):
             self.save_assignments()
 
         except disnake.Forbidden:
-            self.logger.warning(f"Could not send reply to Santa {santa.display_name}.")
+            self.logger.warning(f"Could not send reply to Santa user ID {santa_id}.")
         except Exception as e:
             self.logger.error(f"Error forwarding reply to Santa: {e}", exc_info=True)
 

@@ -6,17 +6,25 @@ import sys
 import signal
 import asyncio
 from logging.handlers import RotatingFileHandler
+from typing import Any, Dict
+
+# Constants
+MAX_MESSAGE_LENGTH = 1990  # Max length for Discord messages minus formatting
 
 # Define the DiscordLogHandler class here
 class DiscordLogHandler(logging.Handler):
-    def __init__(self, bot, channel_id):
+    def __init__(self, bot: commands.Bot, channel_id: int):
         super().__init__()
         self.bot = bot
         self.channel_id = channel_id
         self.queue = asyncio.Queue()
-        self.task = self.bot.loop.create_task(self.process_logs())
+        self.task = None  # Will be initialized in on_ready
 
-    def emit(self, record):
+    def start_logging(self):
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self.process_logs())
+
+    def emit(self, record: logging.LogRecord):
         self.queue.put_nowait(record)
 
     async def process_logs(self):
@@ -24,21 +32,21 @@ class DiscordLogHandler(logging.Handler):
         channel = self.bot.get_channel(self.channel_id)
         if channel is None:
             self.bot.logger.error(f"DiscordLogHandler: Channel with ID {self.channel_id} not found.")
+            # Optional: Implement a retry mechanism or notify the bot admin
             return
         while True:
             record = await self.queue.get()
             try:
                 log_entry = self.format(record)
                 # Split long messages to fit Discord's message length limit
-                max_length = 1990  # Adjust for formatting characters
-                for chunk in [log_entry[i:i+max_length] for i in range(0, len(log_entry), max_length)]:
+                for chunk in [log_entry[i:i+MAX_MESSAGE_LENGTH] for i in range(0, len(log_entry), MAX_MESSAGE_LENGTH)]:
                     await channel.send(f"```{chunk}```")
             except Exception as e:
                 self.bot.logger.error(f"Error sending log message to Discord: {e}", exc_info=True)
             self.queue.task_done()
 
 # Load configuration first
-def load_config():
+def load_config() -> Dict[str, Any]:
     try:
         with open("config.json") as f:
             config = json.load(f)
@@ -62,7 +70,7 @@ def load_config():
 config = load_config()
 
 # Set up the unified logger
-def setup_logger(config):
+def setup_logger(config: Dict[str, Any]) -> logging.Logger:
     logger = logging.getLogger("bot_logger")
     if not logger.handlers:
         logger.setLevel(logging.DEBUG if config.get("debug", False) else logging.INFO)
@@ -117,14 +125,15 @@ async def on_ready():
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     discord_handler.setFormatter(formatter)
     logger.addHandler(discord_handler)
-    logger.info("Discord Is Being Logged.")
+    discord_handler.start_logging()
+    logger.info("Discord log handler has been added.")
 
 @bot.event
-async def on_error(event_method, *args, **kwargs):
+async def on_error(event_method: str, *args, **kwargs):
     logger.error(f"Error in {event_method}", exc_info=True)
 
 @bot.event
-async def on_slash_command_error(inter, error):
+async def on_slash_command_error(inter: disnake.ApplicationCommandInteraction, error: Exception):
     command_name = getattr(inter.application_command, "name", "unknown command")
     logger.error(f"Error in slash command '{command_name}': {error}", exc_info=True)
     try:
@@ -136,7 +145,9 @@ async def shutdown():
     logger.info("Shutting down bot...")
     for voice_client in bot.voice_clients:
         await voice_client.disconnect()
-    for task in asyncio.all_tasks():
+    # Filter out tasks related to the bot's own loop and other critical tasks
+    tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    for task in tasks:
         task.cancel()
     await bot.close()
     logger.info("Bot has shut down successfully.")
