@@ -1,756 +1,555 @@
-# cogs/SecretSanta_cog.py
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import json
+import pathlib
+import random
+import time
+import traceback
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Callable, Set, Union
 
 import disnake
-from disnake.ext import commands
-import logging
-import random
-from rdoclient import RandomOrgClient
-import asyncio
-import json
-from datetime import datetime
-import os
-import openai  # For ChatGPT API usage
-import aiohttp  # For async HTTP requests
+from disnake.ext import commands, tasks
 
-async def is_moderator(interaction):
-    moderator_role_id = int(interaction.bot.config["discord"]["moderator_role_id"])
-    return any(role.id == moderator_role_id for role in interaction.author.roles)
+# Constants
+JOIN_EMOJI = "🎁"
+ROOT_DIR = pathlib.Path(__file__).parent
+STATE_PATH = ROOT_DIR / "secret_santa_state.json"
+BACKUP_PATH = ROOT_DIR / "secret_santa_state.bak"
+ARCHIVE_DIR = ROOT_DIR / "archive"
+ARCHIVE_DIR.mkdir(exist_ok=True)
+QUESTION_ARCHIVE_PATH = ROOT_DIR / "santa_questions.json"
+GIFT_SUBMISSION_PATH = ROOT_DIR / "gift_submissions.json"
+
+
+# State helpers
+def _load_state() -> Dict[str, Any]:
+    """Load state with fallback to backup if main file is corrupted"""
+    for path in [STATE_PATH, BACKUP_PATH]:
+        if path.exists():
+            try:
+                return json.loads(path.read_text())
+            except json.JSONDecodeError:
+                continue
+    return {
+        "pair_history": {},
+        "current_year": dt.date.today().year,
+        "current_event": None,
+    }
+
+
+def _save_state(state: Dict[str, Any]) -> None:
+    """Save state atomically with backup"""
+    temp_path = STATE_PATH.with_suffix('.tmp')
+    temp_path.write_text(json.dumps(state, indent=2))
+    temp_path.replace(STATE_PATH)
+
+
+def _load_questions() -> Dict[str, Any]:
+    if QUESTION_ARCHIVE_PATH.exists():
+        return json.loads(QUESTION_ARCHIVE_PATH.read_text())
+    return {"questions": {}}
+
+
+def _save_questions(questions: Dict[str, Any]) -> None:
+    temp_path = QUESTION_ARCHIVE_PATH.with_suffix('.tmp')
+    temp_path.write_text(json.dumps(questions, indent=2))
+    temp_path.replace(QUESTION_ARCHIVE_PATH)
+
+
+def _load_gift_submissions() -> Dict[str, Any]:
+    if GIFT_SUBMISSION_PATH.exists():
+        return json.loads(GIFT_SUBMISSION_PATH.read_text())
+    return {"submissions": []}
+
+
+def _save_gift_submissions(submissions: Dict[str, Any]) -> None:
+    temp_path = GIFT_SUBMISSION_PATH.with_suffix('.tmp')
+    temp_path.write_text(json.dumps(submissions, indent=2))
+    temp_path.replace(GIFT_SUBMISSION_PATH)
+
+
+# Pair assignment
+def _make_assignments(participants: List[int], pair_history: Dict[str, List[int]]) -> Dict[int, int]:
+    """Create assignments ensuring no repeats until full cycle"""
+    if len(participants) < 2:
+        raise ValueError("Need at least two participants for Secret Santa.")
+
+    givers = participants.copy()
+    random.shuffle(givers)
+    receivers = givers.copy()
+    assigns: Dict[int, int] = {}
+
+    for giver in givers:
+        for _ in range(len(receivers)):
+            cand = receivers[0]
+            if cand != giver and cand not in pair_history.get(str(giver), []):
+                assigns[giver] = cand
+                receivers.pop(0)
+                break
+            receivers.append(receivers.pop(0))
+        else:  # Reset giver history if stuck
+            pair_history[str(giver)] = []
+            return _make_assignments(participants, pair_history)
+    return assigns
+
+
+def _maybe_reset_histories(pair_history: Dict[str, List[int]], universe: Set[int]):
+    """Reset histories for users who have gifted everyone"""
+    for giver_str, recs in list(pair_history.items()):
+        giver = int(giver_str)
+        if set(recs) >= (universe - {giver}):
+            pair_history[giver_str] = []
+
+
+# Archiving
+def _archive_year(year: int, assignments: Dict[int, int], participants: Dict[int, str]) -> pathlib.Path:
+    """Create archive file for the year"""
+    lines = [f"Secret Santa {year}", ""]
+    lines += [f"<@{g}> -> <@{r}>" for g, r in assignments.items()]
+    lines += ["", "Participants:"]
+    lines += [f"• <@{uid}> ({name})" for uid, name in participants.items()]
+
+    path = ARCHIVE_DIR / f"wavesanta_{year}.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+# Decorators
+def mod_only() -> Callable[[commands.InvokableSlashCommand], commands.InvokableSlashCommand]:
+    """Restrict command to moderators"""
+
+    async def predicate(inter: disnake.ApplicationCommandInteraction):
+        mod_role_id = inter.bot.config.discord.moderator_role_id
+        return any(r.id == mod_role_id for r in inter.author.roles)
+
+    return commands.check(predicate)
+
+
+def participant_only() -> Callable[[commands.InvokableSlashCommand], commands.InvokableSlashCommand]:
+    """Restrict command to Secret Santa participants"""
+
+    async def predicate(inter: disnake.ApplicationCommandInteraction):
+        event = inter.bot.get_cog("SecretSantaCog")._event()
+        if not event:
+            await inter.send("No active Secret Santa event", ephemeral=True)
+            return False
+        return str(inter.author.id) in event["participants"]
+
+    return commands.check(predicate)
+
 
 class SecretSantaCog(commands.Cog):
-    def __init__(self, bot):
+    """Automated Secret Santa with Gift Tracking"""
+
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.config = bot.config
-        self.logger = bot.logger
-        self.random_client = RandomOrgClient(self.config["random_org"]["api_key"])
-        self.signed_random_links = []
-        self.participants = {}
-        self.assignments = {}
-        self.pending_questions = {}
-        self.active = False
-        self.join_closed = False
-        self.lock = asyncio.Lock()
-        self.data_file = os.path.join(os.path.dirname(__file__), "secret_santa_data.json")
-        self.event_type = "Secret"
-        self.moderator_channel_id = int(self.config["discord"]["moderator_channel_id"])
-        self.announcement_message_id = int(self.config["discord"]["announcement_message_id"])
-        self.openai_api_key = self.config.get("openai_api_key")
-        openai.api_key = self.openai_api_key
-        self.bot.loop.create_task(self.load_assignments())
+        self.state = _load_state()
+        self.questions = _load_questions()
+        self.gift_submissions = _load_gift_submissions()
+        self._lock = asyncio.Lock()
+        self.deadline_check.start()
+        self.active_events = defaultdict(dict)
 
-    def save_assignments(self):
-        data = {
-            "participants": {str(k): v for k, v in self.participants.items()},
-            "assignments": {str(k): v for k, v in self.assignments.items()},
-            "pending_questions": self.pending_questions,
-            "active": self.active,
-            "join_closed": self.join_closed,
-            "event_type": self.event_type,
-            "signed_random_links": self.signed_random_links,
-        }
+        # Don't start backup task here, wait for cog_load
+        self._backup_task = None
+
+    async def cog_load(self):
+        """Start the backup task when the cog is loaded"""
+        self._backup_task = asyncio.create_task(self._start_backup_task())
+
+    async def _start_backup_task(self):
+        """Periodically backup state"""
         try:
-            with open(self.data_file, "w") as f:
-                json.dump(data, f)
-            self.logger.info(f"Secret Santa data saved to {self.data_file}.")
-        except Exception as e:
-            self.logger.error(f"Error saving Secret Santa data: {e}", exc_info=True)
-
-    async def load_assignments(self):
-        await self.bot.wait_until_ready()
-        try:
-            if os.path.exists(self.data_file):
-                with open(self.data_file, "r") as f:
-                    data = json.load(f)
-                self.logger.info(f"Secret Santa data loaded from {self.data_file}.")
-                self.participants = {int(k): v for k, v in data.get("participants", {}).items()}
-                self.assignments = {int(k): int(v) for k, v in data.get("assignments", {}).items()}
-                self.pending_questions = data.get("pending_questions", {})
-                self.active = data.get("active", False)
-                self.join_closed = data.get("join_closed", False)
-                self.event_type = data.get("event_type", "Secret")
-                self.signed_random_links = data.get("signed_random_links", [])
-            else:
-                self.logger.info(f"No existing Secret Santa data file found at {self.data_file}.")
-        except Exception as e:
-            self.logger.error(f"Error loading Secret Santa data: {e}", exc_info=True)
-
-    @commands.slash_command(
-        name="start_santa",
-        description="Starts a Secret Santa event using an existing announcement."
-    )
-    @commands.check(is_moderator)
-    async def start_santa(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        event_type: str = commands.Param(
-            choices=["Regular", "Secret"],
-            description="Choose the type of Secret Santa event."
-        ),
-    ):
-        if self.active:
-            await inter.response.send_message(
-                "🔔 A Secret Santa event is already active.", ephemeral=True
-            )
-            return
-
-        self.active = True
-        self.join_closed = False
-        # Do not reset self.participants
-        self.assignments = {}
-        self.pending_questions = {}
-        self.event_type = event_type
-
-        try:
-            announcement_message_id = int(self.config["discord"]["announcement_message_id"])
-
-            announcement = None
-
-            # Attempt to find the announcement message in cached messages
-            announcement = disnake.utils.get(self.bot.cached_messages, id=announcement_message_id)
-
-            if announcement is None:
-                # If not in cache, search through all text channels in the guild
-                for channel in inter.guild.text_channels:
-                    try:
-                        announcement = await channel.fetch_message(announcement_message_id)
-                        if announcement:
-                            break
-                    except disnake.NotFound:
-                        continue
-                    except Exception as e:
-                        self.logger.error(f"Error fetching message from channel {channel.id}: {e}", exc_info=True)
-                        continue
-
-            if not announcement:
-                await inter.response.send_message(
-                    "❌ Announcement message not found in any text channel. Please check the message ID.",
-                    ephemeral=True,
-                )
-                return
-
-            self.logger.info(
-                f"Secret Santa event started by {inter.author}. Using existing announcement message ID: {announcement_message_id}"
-            )
-            await inter.response.send_message(
-                f"🔔 Secret Santa event of type '{event_type}' has been started! Using the existing announcement message.",
-                ephemeral=True,
-            )
-        except Exception as e:
-            await inter.response.send_message(
-                "❌ An error occurred while starting the Secret Santa event.", ephemeral=True
-            )
-            self.logger.error(f"Error while starting Secret Santa event: {e}", exc_info=True)
-            return
-
-        self.save_assignments()
-
-    @commands.slash_command(
-        name="close_joining",
-        description="Closes the joining phase of the current Secret Santa event.",
-    )
-    @commands.check(is_moderator)
-    async def close_joining(self, inter: disnake.ApplicationCommandInteraction):
-        if not self.active:
-            await inter.response.send_message(
-                "🔔 No active Secret Santa event to close joining.", ephemeral=True
-            )
-            return
-
-        if self.join_closed:
-            await inter.response.send_message(
-                "🔔 The joining phase has already been ended.", ephemeral=True
-            )
-            return
-
-        self.join_closed = True
-
-        try:
-            announcement_message_id = int(self.config["discord"]["announcement_message_id"])
-
-            announcement = None
-
-            # Attempt to find the announcement message in cached messages
-            announcement = disnake.utils.get(self.bot.cached_messages, id=announcement_message_id)
-
-            if announcement is None:
-                # If not in cache, search through all text channels in the guild
-                for channel in inter.guild.text_channels:
-                    try:
-                        announcement = await channel.fetch_message(announcement_message_id)
-                        if announcement:
-                            break
-                    except disnake.NotFound:
-                        continue
-                    except Exception as e:
-                        self.logger.error(f"Error fetching message from channel {channel.id}: {e}", exc_info=True)
-                        continue
-
-            if not announcement:
-                await inter.response.send_message(
-                    "❌ Announcement message not found in any text channel. Please check the message ID.",
-                    ephemeral=True,
-                )
-                return
-
-            await announcement.clear_reactions()
-
-            await inter.channel.send("🔒 The Secret Santa event is now closed for new participants.")
-
-            self.logger.info("Joining phase has been closed.")
-            await inter.response.send_message(
-                "🔒 Joining phase has been closed. No further participants can join.",
-                ephemeral=True,
-            )
-        except disnake.NotFound:
-            await inter.response.send_message(
-                "❌ Announcement message not found.", ephemeral=True
-            )
-            self.logger.error(
-                "Announcement message not found when attempting to close joining."
-            )
-        except Exception as e:
-            await inter.response.send_message(
-                "❌ An error occurred while closing the joining phase.", ephemeral=True
-            )
-            self.logger.error(f"Error while closing joining phase: {e}", exc_info=True)
-
-        self.save_assignments()
-
-    @commands.slash_command(
-        name="end_santa",
-        description="Ends the current Secret Santa event.",
-    )
-    @commands.check(is_moderator)
-    async def end_santa(self, inter: disnake.ApplicationCommandInteraction):
-        if not self.active:
-            await inter.response.send_message(
-                "🔔 No active Secret Santa event to end.", ephemeral=True
-            )
-            return
-
-        self.logger.info(
-            f"Secret Santa event ended by {inter.author}. Assignments were: {self.assignments}"
-        )
-
-        if self.event_type == "Regular":
-            reveal_text = "🎁 **Secret Santa Assignments:**\n"
-            for santa_id, receiver_id in self.assignments.items():
-                santa_name = await self.get_user_display_name(santa_id)
-                receiver_name = await self.get_user_display_name(receiver_id)
-                reveal_text += f"{santa_name} ➡️ {receiver_name}\n"
-
-            embed = disnake.Embed(
-                title="🎁 Secret Santa Assignments Revealed! 🎁",
-                description=reveal_text,
-                color=disnake.Color.gold(),
-                timestamp=datetime.utcnow()
-            )
-            await inter.channel.send(embed=embed)
-
-        self.participants.clear()
-        self.assignments.clear()
-        self.pending_questions.clear()
-        self.active = False
-        self.join_closed = False
-        self.event_type = "Secret"
-        await inter.response.send_message(
-            "🔔 Secret Santa event has been ended. All assignments have been cleared.",
-            ephemeral=True,
-        )
-
-        self.save_assignments()
-
-    @commands.slash_command(
-        name="list_participants",
-        description="Lists all participants in the current Secret Santa event.",
-    )
-    @commands.check(is_moderator)
-    async def list_participants(self, inter: disnake.ApplicationCommandInteraction):
-        if not self.active:
-            await inter.response.send_message(
-                "🔔 No active Secret Santa event.", ephemeral=True
-            )
-            return
-
-        if not self.participants:
-            await inter.response.send_message(
-                "🎄 **No participants have joined yet.**\nReact to the announcement message to join!",
-                ephemeral=True,
-            )
-            return
-
-        participant_names = [
-            await self.get_user_display_name(user_id) for user_id in self.participants.keys()
-        ]
-        participant_list = "\n".join(participant_names)
-        embed = disnake.Embed(
-            title="🎄 Secret Santa Participants 🎄",
-            description=participant_list,
-            color=disnake.Color.blue(),
-            timestamp=datetime.utcnow()
-        )
-        await inter.response.send_message(embed=embed, ephemeral=True)
-
-    @commands.slash_command(
-        name="assign_santas",
-        description="Assigns each Secret Santa to a giftee and notifies them via DM."
-    )
-    @commands.check(is_moderator)
-    async def assign_santas_command(self, inter: disnake.ApplicationCommandInteraction):
-        await inter.response.defer(ephemeral=True)
-
-        if not self.active:
-            await inter.edit_original_response(
-                content="🔔 No active Secret Santa event to assign."
-            )
-            return
-
-        try:
-            min_participants = int(self.config.get('SecretSanta', {}).get('minimum_participants', 2))
-        except Exception as e:
-            self.logger.error(f"Error accessing configuration: {e}", exc_info=True)
-            min_participants = 2
-
-        self.logger.info(f"Current number of participants: {len(self.participants)}")
-        for participant_id in self.participants.keys():
-            participant_name = await self.get_user_display_name(participant_id)
-            self.logger.info(f"Participant: {participant_name} (ID: {participant_id})")
-
-        if len(self.participants) < min_participants:
-            await inter.edit_original_response(
-                content="❌ Not enough participants to assign Secret Santas."
-            )
-            return
-
-        self.logger.debug(f"Participants: {self.participants.keys()}")
-
-        async with self.lock:
-            if self.assignments:
-                await inter.edit_original_response(
-                    content="🔔 Secret Santa assignments have already been made."
-                )
-                return
-
-            try:
-                self.assign_santas()
-                self.logger.info("Secret Santa assignments have been made.")
-            except Exception as e:
-                self.logger.error(
-                    f"Error during Secret Santa assignment: {e}", exc_info=True
-                )
-                await inter.edit_original_response(
-                    content="❌ An error occurred while assigning Secret Santas."
-                )
-                return
-
-            failed_assignments = []
-
-            for santa_id, receiver_id in self.assignments.items():
+            while True:
+                await asyncio.sleep(3600)  # Hourly backups
                 try:
-                    santa_user = await self.fetch_user(santa_id)
-                    receiver_name = await self.get_user_display_name(receiver_id)
-                    if santa_user:
-                        try:
-                            await santa_user.send(
-                                f"🎄 **Your Secret Santa Assignment!** 🎄\n"
-                                f"You are the Secret Santa for: **{receiver_name}** 🎁"
-                            )
-                        except disnake.Forbidden:
-                            failed_assignments.append(await self.get_user_display_name(santa_id))
-                            self.logger.warning(
-                                f"Failed to send DM to user ID {santa_id}"
-                            )
-                    else:
-                        failed_assignments.append(f"User ID {santa_id}")
-                        self.logger.warning(
-                            f"Could not fetch user with ID {santa_id} to send DM."
-                        )
+                    async with self._lock:
+                        _save_state(self.state)
+                        _save_questions(self.questions)
+                        _save_gift_submissions(self.gift_submissions)
+                        BACKUP_PATH.write_text(json.dumps(self.state, indent=2))
                 except Exception as e:
-                    self.logger.error(f"Error handling assignment for user ID {santa_id}: {e}", exc_info=True)
-                    failed_assignments.append(f"User ID {santa_id}")
+                    self.bot.logger.error(f"Backup failed: {e}")
+        except asyncio.CancelledError:
+            self.bot.logger.info("Backup task cancelled")
+        except Exception as e:
+            self.bot.logger.error(f"Backup task error: {e}")
 
-            if failed_assignments:
-                failed_list = ", ".join(failed_assignments)
-                await inter.edit_original_response(
-                    content=f"🔔 Assignments have been made, but failed to send DMs to: {failed_list}."
-                )
-            else:
-                await inter.edit_original_response(
-                    content="🎁 Secret Santa assignments have been successfully made and notified!"
-                )
+    async def _save(self):
+        """Thread-safe state saving"""
+        async with self._lock:
+            _save_state(self.state)
 
-        self.logger.info("Saving current state of assignments and participants.")
-        self.save_assignments()
-        self.logger.info("State saved successfully.")
+    def _event(self) -> Optional[Dict[str, Any]]:
+        return self.state.get("current_event")
 
-    def assign_santas(self):
-        santa_ids = list(self.participants.keys())
-        # Multiple shuffles for higher entropy
-        for _ in range(10):
-            santa_ids = self.create_shuffled_list(santa_ids)
-
-        santa_ids.append(santa_ids[0])
-        new_assignments = {}
-        for i in range(0, len(santa_ids) - 1):
-            new_assignments[santa_ids[i]] = santa_ids[i + 1]
-
-        self.assignments = new_assignments
-
-    async def fetch_user(self, user_id):
-        user = self.bot.get_user(user_id)
-        if user is None:
+    async def _dm_assignment(self, giver_id: int, receiver_id: int):
+        """DM assignment with retry logic"""
+        for attempt in range(3):
             try:
-                user = await self.bot.fetch_user(user_id)
-            except Exception as e:
-                self.logger.error(f"Error fetching user with ID {user_id}: {e}", exc_info=True)
-                user = None
-        return user
+                user = await self.bot.fetch_user(giver_id)
+                receiver_name = self._event()["participants"].get(str(receiver_id), f"User {receiver_id}")
+                await user.send(
+                    f"🎅 You are Secret Santa for {receiver_name} (<@{receiver_id}>) this year! "
+                    "Keep it secret, keep it safe.\n\n"
+                    "You'll receive questions from them via DM, and you can submit your gift using "
+                    "`/santa submit_gift` when you're ready!"
+                )
+                return
+            except disnake.HTTPException as e:
+                if attempt == 2:
+                    self.bot.logger.warning(f"Failed to DM {giver_id}: {e}")
+                await asyncio.sleep(1)
 
-    async def get_user_display_name(self, user_id):
-        user = await self.fetch_user(user_id)
-        return user.display_name if user else f"User ID {user_id}"
+    async def _send_to_mods(self, content: str):
+        """Send message to moderator channel"""
+        try:
+            chan_id = self.bot.config.discord.moderator_channel_id
+            chan = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+            await chan.send(content)
+        except Exception as e:
+            self.bot.logger.error(f"Failed to send to mods: {e}")
 
+    async def _rephrase_question(self, question: str) -> str:
+        """Rephrase question using AI (simplified version)"""
+        return f"❓ Rephrased: {question}"
+
+    # Command group
+    @commands.slash_command(name="santa")
+    async def santa_root(self, _: disnake.AppCmdInter):
+        pass
+
+    # NEW: Start command for moderators
+    @santa_root.sub_command(name="start", description="Start a new Secret Santa event")
+    @mod_only()
+    async def santa_start(
+            self,
+            inter: disnake.AppCmdInter,
+            announcement_message_id: int,
+            channel: disnake.TextChannel,
+            deadline_days: int = commands.Param(description="Days until signup closes", gt=0)
+    ):
+        """Start a new Secret Santa event"""
+        if self._event() and self._event().get("active", False):
+            await inter.send("❌ There's already an active Secret Santa event", ephemeral=True)
+            return
+
+        # Calculate deadline
+        deadline = dt.datetime.now() + dt.timedelta(days=deadline_days)
+
+        # Create new event
+        new_event = {
+            "active": True,
+            "join_closed": False,
+            "announcement_message_id": announcement_message_id,
+            "channel_id": channel.id,
+            "deadline": deadline.isoformat(),
+            "participants": {},
+            "assignments": {},
+            "guild_id": inter.guild.id
+        }
+
+        async with self._lock:
+            self.state["current_event"] = new_event
+            self.state["current_year"] = dt.date.today().year
+            await self._save()
+
+        # Store in active events
+        self.active_events[inter.guild.id] = new_event
+
+        await inter.send(
+            f"✅ Secret Santa {self.state['current_year']} started!\n"
+            f"Participants can react with 🎁 to [this message](https://discord.com/channels/{inter.guild.id}/{channel.id}/{announcement_message_id}) "
+            f"in {channel.mention} to join.\n"
+            f"Signups close in {deadline_days} days on {deadline.strftime('%B %d, %Y')}"
+        )
+
+    # Essential commands
+    @santa_root.sub_command(name="ask", description="Ask your Santa a question")
+    @participant_only()
+    async def santa_ask(self, inter: disnake.AppCmdInter, question: str):
+        """Ask your Santa an anonymous question"""
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.send("No active Secret Santa event", ephemeral=True)
+            return
+
+        # Find who is assigned to this user (their Santa)
+        receiver_id = inter.author.id
+        giver_id = None
+        for giver, receiver in event["assignments"].items():
+            if receiver == receiver_id:
+                giver_id = giver
+                break
+
+        if not giver_id:
+            await inter.send("❌ Couldn't find your Santa. Contact a moderator.", ephemeral=True)
+            return
+
+        # Rephrase question
+        rephrased = await self._rephrase_question(question)
+
+        # Save question
+        year = self.state["current_year"]
+        question_id = f"{year}-{time.time()}"
+        async with self._lock:
+            if str(year) not in self.questions["questions"]:
+                self.questions["questions"][str(year)] = {}
+            self.questions["questions"][str(year)][question_id] = {
+                "receiver_id": receiver_id,
+                "giver_id": giver_id,
+                "original": question,
+                "rephrased": rephrased
+            }
+            _save_questions(self.questions)
+
+        # Send question to Santa
+        try:
+            santa_user = await self.bot.fetch_user(giver_id)
+            await santa_user.send(
+                f"❓ **Question from your giftee:**\n"
+                f"{rephrased}\n\n"
+                f"You can reply to them directly in this DM!"
+            )
+            await inter.send("✅ Your question has been sent to your Santa!", ephemeral=True)
+        except Exception as e:
+            self.bot.logger.error(f"Failed to send question: {e}")
+            await inter.send("❌ Failed to send question. Contact a moderator.", ephemeral=True)
+
+    @santa_root.sub_command(name="submit_gift", description="Submit your gift for your receiver")
+    @participant_only()
+    async def santa_submit_gift(
+            self,
+            inter: disnake.AppCmdInter,
+            description: str,
+            image: disnake.Attachment = None
+    ):
+        """Submit your gift to the moderators"""
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.send("No active Secret Santa event", ephemeral=True)
+            return
+
+        # Find who this user is assigned to
+        giver_id = inter.author.id
+        receiver_id = event["assignments"].get(giver_id)
+
+        if not receiver_id:
+            await inter.send("❌ Couldn't find your receiver. Contact a moderator.", ephemeral=True)
+            return
+
+        receiver_name = event["participants"].get(str(receiver_id), f"User {receiver_id}")
+
+        # Save submission
+        submission = {
+            "year": self.state["current_year"],
+            "giver_id": giver_id,
+            "receiver_id": receiver_id,
+            "description": description,
+            "timestamp": dt.datetime.now().isoformat(),
+            "image_url": image.url if image else None
+        }
+
+        async with self._lock:
+            self.gift_submissions["submissions"].append(submission)
+            _save_gift_submissions(self.gift_submissions)
+
+        # Send to mods
+        image_text = f"\n📸 [Image Link]({image.url})" if image else ""
+        await self._send_to_mods(
+            f"🎁 **New Gift Submission**\n"
+            f"**From:** <@{giver_id}>\n"
+            f"**To:** {receiver_name} (<@{receiver_id}>)\n"
+            f"**Description:** {description}{image_text}"
+        )
+
+        await inter.send("✅ Your gift submission has been sent to the moderators!", ephemeral=True)
+
+    @santa_root.sub_command(name="questions", description="View questions from a specific year (Mods only)")
+    @mod_only()
+    async def santa_questions(self, inter: disnake.AppCmdInter, year: int):
+        """View archived questions"""
+        year_questions = self.questions["questions"].get(str(year), {})
+        if not year_questions:
+            await inter.send(f"No questions found for {year}", ephemeral=True)
+            return
+
+        response = [f"**Questions from {year}:**"]
+        for qid, question in year_questions.items():
+            response.append(
+                f"\n❓ **Question {qid.split('-')[-1]}**\n"
+                f"From: <@{question['receiver_id']}>\n"
+                f"To: <@{question['giver_id']}>\n"
+                f"Original: {question['original']}\n"
+                f"Rephrased: {question['rephrased']}"
+            )
+
+        await inter.send("\n".join(response), ephemeral=True)
+
+    @santa_root.sub_command(name="reveal", description="Reveal pairs")
+    @mod_only()
+    async def santa_reveal(self, inter: disnake.AppCmdInter):
+        """Reveal all Santa-giftee pairs"""
+        event = self._event()
+        if not event or not event["assignments"]:
+            await inter.send("No assignments to reveal.", ephemeral=True)
+            return
+
+        lines = [f"<@{g}> → <@{r}>" for g, r in event["assignments"].items()]
+        await inter.send(
+            f"🎉 **Secret Santa {self.state['current_year']} Reveal!**\n" +
+            "\n".join(lines)
+        )
+
+    # NEW: Stop command for moderators
+    @santa_root.sub_command(name="stop", description="Stop the current Secret Santa event")
+    @mod_only()
+    async def santa_stop(self, inter: disnake.AppCmdInter):
+        """Stop the current Secret Santa event"""
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.send("❌ No active Secret Santa event", ephemeral=True)
+            return
+
+        # Archive the event
+        participants = event["participants"]
+        assignments = event["assignments"]
+        year = self.state["current_year"]
+
+        try:
+            archive_path = _archive_year(year, assignments, participants)
+            await inter.send(f"✅ Event archived: {archive_path.name}")
+        except Exception as e:
+            self.bot.logger.error(f"Archiving failed: {e}")
+            await inter.send("❌ Archiving failed, but event stopped")
+
+        async with self._lock:
+            # Update history
+            for giver_id in assignments:
+                giver_key = str(giver_id)
+                if giver_key not in self.state["pair_history"]:
+                    self.state["pair_history"][giver_key] = []
+                self.state["pair_history"][giver_key].append(assignments[giver_id])
+
+            # Clear current event
+            self.state["current_event"] = None
+            await self._save()
+
+        await inter.send("✅ Secret Santa event stopped")
+
+    # Listeners
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
-        self.logger.debug(f"on_raw_reaction_add called with payload: {payload}")
-
-        if not self.active or self.join_closed:
-            self.logger.debug(f"Event inactive or joining closed. Active: {self.active}, Join Closed: {self.join_closed}")
+        """Handle join reactions"""
+        if (payload.emoji.name != JOIN_EMOJI or
+                payload.user_id == self.bot.user.id):
             return
 
-        if payload.message_id != self.announcement_message_id:
-            self.logger.debug(f"Reaction not on announcement message. Payload message ID: {payload.message_id}, Announcement message ID: {self.announcement_message_id}")
+        event = self._event()
+        if (not event or not event.get("active", False) or
+                event.get("join_closed", False) or
+                payload.message_id != event.get("announcement_message_id")):
             return
 
-        guild = self.bot.get_guild(payload.guild_id)
-        if guild is None:
-            self.logger.error("Guild not found for reaction.")
+        if str(payload.user_id) in event["participants"]:
             return
 
-        async with self.lock:
-            if payload.user_id not in self.participants:
-                self.participants[payload.user_id] = None
-                self.logger.info(f"Added participant with user ID: {payload.user_id}")
-            else:
-                self.logger.info(f"Participant with user ID {payload.user_id} already added.")
+        # Get display name
+        name = f"User {payload.user_id}"
+        if payload.guild_id:
+            try:
+                guild = self.bot.get_guild(payload.guild_id)
+                member = guild.get_member(payload.user_id) if guild else None
+                name = member.display_name if member else name
+            except Exception:
+                pass
 
-        self.logger.info("Saving state after new participant added.")
-        self.save_assignments()
-        self.logger.info("State saved successfully after new participant added.")
+        async with self._lock:
+            event["participants"][str(payload.user_id)] = name
+            await self._save()
 
-    @commands.Cog.listener()
-    async def on_raw_reaction_remove(self, payload: disnake.RawReactionActionEvent):
-        if not self.active:
+        # DM confirmation
+        try:
+            user = await self.bot.fetch_user(payload.user_id)
+            await user.send("✅ You've joined Secret Santa! 🎁")
+        except disnake.HTTPException:
+            pass
+
+    # Tasks
+    @tasks.loop(minutes=5)
+    async def deadline_check(self):
+        """Check if join deadline has passed"""
+        await self.bot.wait_until_ready()
+        event = self._event()
+        if not event or event.get("join_closed", False) or not event.get("deadline"):
             return
 
-        if payload.message_id != self.announcement_message_id:
-            return
+        try:
+            deadline = dt.datetime.fromisoformat(event["deadline"])
+            if dt.datetime.now() > deadline:
+                guild_id = event.get("guild_id")
+                if not guild_id:
+                    self.bot.logger.error("Missing guild_id in event")
+                    return
 
-        guild = self.bot.get_guild(payload.guild_id)
-        if not guild:
-            return
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    self.bot.logger.error(f"Guild not found: {guild_id}")
+                    return
 
-        async with self.lock:
-            if payload.user_id in self.participants:
-                self.participants.pop(payload.user_id, None)
-                self.logger.info(f"User ID {payload.user_id} removed from Secret Santa participants.")
+                # Close joining automatically
+                chan_id = event["channel_id"]
+                chan = guild.get_channel(chan_id)
 
-                user = await self.fetch_user(payload.user_id)
-                if user:
+                if not chan:
+                    self.bot.logger.error(f"Channel not found: {chan_id}")
+                    return
+
+                # Send notification
+                await chan.send("⏰ Joining period has ended! Assigning Santas now...")
+
+                # Close and assign
+                participants = list(map(int, event["participants"].keys()))
+
+                if len(participants) < 2:
+                    await chan.send("❌ Not enough participants (need at least 2)")
+                    async with self._lock:
+                        event["active"] = False
+                        await self._save()
+                    return
+
+                assigns = _make_assignments(participants, self.state["pair_history"])
+
+                async with self._lock:
+                    event["assignments"] = assigns
+                    event["join_closed"] = True
+                    await self._save()
+
+                # DM assignments with error handling
+                for giver, receiver in assigns.items():
                     try:
-                        await user.send("❌ You have been removed from the Secret Santa event.")
-                    except disnake.Forbidden:
-                        self.logger.warning(f"Could not send DM to user ID {payload.user_id}. They might have DMs disabled.")
+                        await self._dm_assignment(giver, receiver)
+                    except Exception as e:
+                        self.bot.logger.error(f"Failed to DM {giver}: {e}\n{traceback.format_exc()}")
 
-                self.save_assignments()
-
-    @commands.Cog.listener()
-    async def on_message_delete(self, message):
-        if message.id == self.announcement_message_id:
-            self.logger.warning("Announcement message was deleted. Ending Secret Santa event.")
-            self.active = False
-            self.join_closed = False
-            self.participants.clear()
-            self.assignments.clear()
-            self.pending_questions.clear()
-            self.event_type = "Secret"
-            self.save_assignments()
-
-    @commands.slash_command(
-        name="reveal_santas",
-        description="Reveals all Secret Santa assignments to the server.",
-    )
-    @commands.check(is_moderator)
-    async def reveal_santas(self, inter: disnake.ApplicationCommandInteraction):
-        if not self.active:
-            await inter.response.send_message(
-                "🔔 No active Secret Santa event.", ephemeral=True
-            )
-            return
-
-        if not self.assignments:
-            await inter.response.send_message(
-                "🔔 Secret Santa assignments have not been made yet.", ephemeral=True
-            )
-            return
-
-        reveal_text = "🎁 **Secret Santa Assignments:**\n"
-        for santa_id, receiver_id in self.assignments.items():
-            santa_name = await self.get_user_display_name(santa_id)
-            receiver_name = await self.get_user_display_name(receiver_id)
-            reveal_text += f"{santa_name} ➡️ {receiver_name}\n"
-
-        embed = disnake.Embed(
-            title="🎁 Secret Santa Assignments Revealed! 🎁",
-            description=reveal_text,
-            color=disnake.Color.gold(),
-            timestamp=datetime.utcnow()
-        )
-        await inter.channel.send(embed=embed)
-        self.logger.info(f"Secret Santa assignments revealed by {inter.author}.")
-        await inter.response.send_message(
-            "🎉 Secret Santa assignments have been revealed!", ephemeral=True
-        )
-
-    @commands.slash_command(
-        name="submit_gift",
-        description="Submit your Secret Santa gift details to the moderators.",
-    )
-    async def submit_gift_command(
-            self,
-            inter: disnake.ApplicationCommandInteraction,
-            description: str = commands.Param(
-                description="Describe your gift.",
-                max_length=2000
-            ),
-            image1: disnake.Attachment = commands.Param(
-                default=None,
-                description="First image of your gift (optional)."
-            ),
-            image2: disnake.Attachment = commands.Param(
-                default=None,
-                description="Second image of your gift (optional)."
-            ),
-    ):
-        await inter.response.defer(ephemeral=True)
-
-        rephrased_description = await self.rephrase_text(description)
-
-        embed = disnake.Embed(
-            title="🎁 Secret Santa Gift Submission",
-            description=rephrased_description,
-            color=disnake.Color.green(),
-            timestamp=datetime.utcnow()
-        )
-        embed.set_author(name=inter.author.display_name, icon_url=inter.author.avatar.url)
-
-        files = []
-        if image1:
-            if image1.content_type.startswith('image/'):
-                image1_file = await image1.to_file()
-                embed.set_image(url=f"attachment://{image1.filename}")
-                files.append(image1_file)
-            else:
-                await inter.edit_original_response(content="❌ The first file you uploaded is not an image.")
-                return
-
-        if image2:
-            if image2.content_type.startswith('image/'):
-                image2_file = await image2.to_file()
-                if not embed.image.url:
-                    embed.set_image(url=f"attachment://{image2.filename}")
-                else:
-                    embed.set_thumbnail(url=f"attachment://{image2.filename}")
-                files.append(image2_file)
-            else:
-                await inter.edit_original_response(content="❌ The second file you uploaded is not an image.")
-                return
-
-        try:
-            moderator_channel = self.bot.get_channel(self.moderator_channel_id)
-            if not moderator_channel:
-                await inter.edit_original_response(
-                    content="❌ Moderator channel not found. Please contact an administrator."
-                )
-                return
-
-            await moderator_channel.send(embed=embed, files=files)
-            await inter.edit_original_response(
-                content="✅ Your gift submission has been sent to the moderators!"
-            )
-            self.logger.info(f"{inter.author} submitted a gift to the moderators.")
+                await chan.send("🎁 Assignments sent via DM! Participants can now use `/santa ask` to ask questions")
         except Exception as e:
-            await inter.edit_original_response(
-                content="❌ An error occurred while submitting your gift."
-            )
-            self.logger.error(
-                f"Error while submitting gift from {inter.author}: {e}", exc_info=True
-            )
+            self.bot.logger.error(f"Auto-close failed: {e}\n{traceback.format_exc()}")
 
-    async def rephrase_text(self, text: str) -> str:
-        self.logger.debug("Starting text rephrasing using ChatGPT API.")
-        try:
-            prompt = (
-                "Please rephrase the following gift description to make it more clear and concise, without changing its meaning:\n\n"
-                f"{text}"
-            )
-            response = await self.call_chatgpt_api(prompt)
-            return response.strip() if response else text
-        except Exception as e:
-            self.logger.error(f"Failed to rephrase text using ChatGPT API: {e}", exc_info=True)
-            return text
-
-    async def call_chatgpt_api(self, prompt: str) -> str:
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.openai_api_key}"
-                }
-                json_data = {
-                    "model": "gpt-3.5-turbo",
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant that rephrases text."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "max_tokens": 500,
-                    "temperature": 0.7,
-                }
-                async with session.post("https://api.openai.com/v1/chat/completions", headers=headers, json=json_data) as resp:
-                    if resp.status != 200:
-                        self.logger.error(f"Error calling OpenAI API: {resp.status} {await resp.text()}")
-                        return ""
-                    data = await resp.json()
-                    reply = data['choices'][0]['message']['content']
-                    return reply
-        except Exception as e:
-            self.logger.error(f"Error calling OpenAI API: {e}", exc_info=True)
-            return ""
-
-    @commands.slash_command(
-        name="ask_santa",
-        description="Send an anonymous question to your giftee."
-    )
-    async def ask_santa_command(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        question: str = commands.Param(
-            description="Your question to your giftee.",
-            max_length=2000
-        ),
-    ):
-        await inter.response.defer(ephemeral=True)
-
-        if not self.active:
-            await inter.edit_original_response(content="🔔 No active Secret Santa event.")
-            return
-
-        santa_id = inter.author.id
-        giftee_id = self.assignments.get(santa_id)
-
-        if not giftee_id:
-            await inter.edit_original_response(content="❌ You do not have an assigned giftee or assignments have not been made yet.")
-            return
-
-        giftee_user = await self.fetch_user(giftee_id)
-        if not giftee_user:
-            await inter.edit_original_response(content="❌ Unable to find your assigned giftee.")
-            return
-
-        try:
-            question_id = str(datetime.utcnow().timestamp()).replace('.', '')
-
-            if str(giftee_id) not in self.pending_questions:
-                self.pending_questions[str(giftee_id)] = []
-
-            self.pending_questions[str(giftee_id)].append({
-                "question_id": question_id,
-                "santa_id": santa_id,
-                "question": question,
-            })
-            self.save_assignments()
-
-            await giftee_user.send(
-                f"📩 **You have received an anonymous question from your Secret Santa:**\n\n{question}\n\n"
-                f"Please reply to this message to answer."
-            )
-            await inter.edit_original_response(content="✅ Your question has been sent anonymously to your giftee.")
-            self.logger.info(f"{inter.author} sent an anonymous question to user ID {giftee_id}.")
-        except disnake.Forbidden:
-            await inter.edit_original_response(content="❌ Unable to send the question. The giftee may have DMs disabled.")
-            self.logger.warning(f"Could not send anonymous question to user ID {giftee_id}.")
-        except Exception as e:
-            await inter.edit_original_response(content="❌ An error occurred while sending your question.")
-            self.logger.error(f"Error sending anonymous question: {e}", exc_info=True)
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        if message.author.bot:
-            return
-
-        if not isinstance(message.channel, disnake.DMChannel):
-            return
-
-        giftee_id = message.author.id
-
-        pending = self.pending_questions.get(str(giftee_id))
-        if not pending:
-            return
-
-        last_question = pending[-1]
-        santa_id = last_question['santa_id']
-        santa_user = await self.fetch_user(santa_id)
-        if not santa_user:
-            self.logger.error(f"Unable to find Santa user with ID {santa_id}")
-            return
-
-        try:
-            await santa_user.send(
-                f"📬 **Your giftee has replied to your question:**\n\n{message.content}"
-            )
-            self.logger.info(f"Forwarded giftee's reply to Santa user ID {santa_id}.")
-
-            pending.pop()
-            if not pending:
-                del self.pending_questions[str(giftee_id)]
-            else:
-                self.pending_questions[str(giftee_id)] = pending
-
-            self.save_assignments()
-
-        except disnake.Forbidden:
-            self.logger.warning(f"Could not send reply to Santa user ID {santa_id}.")
-        except Exception as e:
-            self.logger.error(f"Error forwarding reply to Santa: {e}", exc_info=True)
-
-        try:
-            await message.channel.send("✅ Your reply has been sent to your Secret Santa.")
-        except Exception as e:
-            self.logger.error(f"Error sending acknowledgment to giftee: {e}", exc_info=True)
+    @deadline_check.before_loop
+    async def _before_deadline_loop(self):
+        await self.bot.wait_until_ready()
 
     def cog_unload(self):
-        self.logger.info("SecretSantaCog has been unloaded.")
+        """Cleanup on cog unload"""
+        if self._backup_task:
+            self._backup_task.cancel()
+        self.deadline_check.cancel()
+        self.bot.logger.info("SecretSantaCog unloaded")
 
-    def generate_integers(self, n, min, max, optional_data=None):
-        try:
-            response = self.random_client.generate_signed_integers(n, min, max, replacement=False, user_data=optional_data)
-            integers = response["random"]["data"]
-            link = self.random_client.create_url(response["random"], response["signature"])
-            self.signed_random_links.append(link)
-            self.logger.info(f'Random.org used. Link: {link}')
-            return integers
-        except Exception as e:
-            self.logger.info(f"Random.org API failed, using Python random instead.\n{e}")
-            return random.sample(range(min, max + 1), k=n)
 
-    def create_shuffled_list(self, x):
-        x_len = len(x)
-        new_order = self.generate_integers(x_len, 0, x_len - 1, optional_data=x)
-
-        shuffled_x = [None] * x_len
-        for i in range(x_len):
-            shuffled_x[i] = x[new_order[i]]
-
-        return shuffled_x
-
-def setup(bot):
+def setup(bot: commands.Bot):
     bot.add_cog(SecretSantaCog(bot))
