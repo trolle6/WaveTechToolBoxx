@@ -465,58 +465,78 @@ class VoiceProcessingCog(commands.Cog):
                                     before: disnake.VoiceState,
                                     after: disnake.VoiceState):
         """Handle voice state changes"""
-        # Only handle the bot's own voice state changes
-        if member.id != self.bot.user.id:
-            return
-
         guild_id = member.guild.id
 
-        # Bot was disconnected
+        # Handle bot's own voice state changes
+        if member.id == self.bot.user.id:
+            # Bot was disconnected
+            if before.channel and not after.channel:
+                self.logger.info(f"Bot was disconnected from voice in guild {guild_id}")
+                # Clean up queue if bot is disconnected
+                if guild_id in self.guild_queues:
+                    self.guild_queues[guild_id].clear()
+                # Remove from tracked voice clients
+                if guild_id in self.voice_clients:
+                    del self.voice_clients[guild_id]
+            return
+
+        # Handle other members leaving voice channels
         if before.channel and not after.channel:
-            self.logger.info(f"Bot was disconnected from voice in guild {guild_id}")
-            # Clean up queue if bot is disconnected
-            if guild_id in self.guild_queues:
-                self.guild_queues[guild_id].clear()
-            # Remove from tracked voice clients
+            # Check if the bot is in the channel that someone left
             if guild_id in self.voice_clients:
-                del self.voice_clients[guild_id]
+                vc = self.voice_clients[guild_id]
+                if vc and vc.channel and vc.channel.id == before.channel.id:
+                    # Check if only the bot remains in the channel
+                    if len(before.channel.members) == 1 and before.channel.members[0].id == self.bot.user.id:
+                        self.logger.info(f"Voice channel empty, scheduling leave in 10 seconds")
+                        # Schedule to leave after delay
+                        await asyncio.sleep(10)  # 10 second delay
 
-                # Add this to the cog class
-                # Move the debug command outside of the on_voice_state_update method
-                @commands.slash_command(name="voice_debug", description="Debug voice connection")
-                async def voice_debug(self, inter: disnake.ApplicationCommandInteraction):
-                    """Debug voice connection status"""
-                    if not inter.guild:
-                        return await inter.response.send_message("This command only works in servers")
+                        # Check again if still alone
+                        if (vc and vc.is_connected() and vc.channel and
+                                len(vc.channel.members) == 1 and
+                                vc.channel.members[0].id == self.bot.user.id):
+                            self.logger.info(f"Leaving empty voice channel")
+                            await vc.disconnect()
+                            if guild_id in self.voice_clients:
+                                del self.voice_clients[guild_id]
+                            if guild_id in self.guild_queues:
+                                self.guild_queues[guild_id].clear()
 
-                    vc = self.voice_clients.get(inter.guild.id)
-                    if vc:
-                        status = (
-                            f"Connected: {vc.is_connected()}\n"
-                            f"Playing: {vc.is_playing()}\n"
-                            f"Channel: {vc.channel.name if vc.channel else 'None'}\n"
-                            f"Queue size: {len(self.guild_queues.get(inter.guild.id, []))}"
-                        )
-                    else:
-                        status = "No voice client"
+    # Add debug commands here (outside of the event listener)
+    @commands.slash_command(name="voice_debug", description="Debug voice connection")
+    async def voice_debug(self, inter: disnake.ApplicationCommandInteraction):
+        """Debug voice connection status"""
+        if not inter.guild:
+            return await inter.response.send_message("This command only works in servers")
 
-                    await inter.response.send_message(f"Voice status:\n{status}")
+        vc = self.voice_clients.get(inter.guild.id)
+        if vc:
+            status = (
+                f"Connected: {vc.is_connected()}\n"
+                f"Playing: {vc.is_playing()}\n"
+                f"Channel: {vc.channel.name if vc.channel else 'None'}\n"
+                f"Queue size: {len(self.guild_queues.get(inter.guild.id, []))}"
+            )
+        else:
+            status = "No voice client"
 
-                # Add a test TTS command
-                @commands.slash_command(name="test_tts", description="Test TTS API connection")
-                async def test_tts(self, inter: disnake.ApplicationCommandInteraction, text: str = "Test message"):
-                    """Test TTS API connection"""
-                    await inter.response.defer()
+        await inter.response.send_message(f"Voice status:\n{status}")
 
-                    # Get voice ID
-                    voice_id = self.user_voice_map.get(str(inter.author.id)) or self.default_voice
+    @commands.slash_command(name="test_tts", description="Test TTS API connection")
+    async def test_tts(self, inter: disnake.ApplicationCommandInteraction, text: str = "Test message"):
+        """Test TTS API connection"""
+        await inter.response.defer()
 
-                    # Test TTS call
-                    audio = await self._call_tts(text, voice_id)
-                    if audio:
-                        await inter.followup.send("✅ TTS API is working!")
-                    else:
-                        await inter.followup.send("❌ TTS API failed. Check your API key and configuration.")
+        # Get voice ID
+        voice_id = self.user_voice_map.get(str(inter.author.id)) or self.default_voice
+
+        # Test TTS call
+        audio = await self._call_tts(text, voice_id)
+        if audio:
+            await inter.followup.send("✅ TTS API is working!")
+        else:
+            await inter.followup.send("❌ TTS API failed. Check your API key and configuration.")
     # Cleanup
     def cog_unload(self):
         """Clean up resources"""
