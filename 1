@@ -1,0 +1,176 @@
+2024-11-02 16:15:16,078 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:15:19,506 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:15:19,507 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:15:19,507 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:15:19,507 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:15:19,508 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:15:47,391 - bot_logger - INFO - Processing TTS for message from random789 in channel ID 926896065410637874
+2024-11-02 16:15:47,392 - bot_logger - INFO - Message from random789 queued for TTS in guild WaveTech.
+2024-11-02 16:15:47,394 - bot_logger - INFO - Assigned voice 'shimmer' to user random789.
+2024-11-02 16:15:47,737 - bot_logger - INFO - Connected to voice channel: Moderation in guild: WaveTech
+2024-11-02 16:15:53,239 - bot_logger - INFO - TTS audio successfully generated.
+2024-11-02 16:15:53,240 - bot_logger - INFO - TTS audio generated and saved to C:\Users\simon\PycharmProjects\WaveTechToolBox\temp_audio_file.mp3
+2024-11-02 16:15:54,042 - bot_logger - ERROR - Failed to play audio: Not connected to voice.
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\voice_processing_cog.py", line 198, in process_tts
+    voice_client.play(
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\voice_client.py", line 577, in play
+    raise ClientException("Not connected to voice.")
+disnake.errors.ClientException: Not connected to voice.
+2024-11-02 16:15:54,350 - bot_logger - ERROR - Failed to remove temporary audio file: C:\Users\simon\PycharmProjects\WaveTechToolBox\temp_audio_file.mp3. Error: [WinError 32] Det går inte att komma åt filen eftersom den
+används av en annan process: 'C:\\Users\\simon\\PycharmProjects\\WaveTechToolBox\\temp_audio_file.mp3'
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\voice_processing_cog.py", line 198, in process_tts
+    voice_client.play(
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\voice_client.py", line 577, in play
+    raise ClientException("Not connected to voice.")
+disnake.errors.ClientException: Not connected to voice.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\voice_processing_cog.py", line 268, in delete_audio_file
+    os.remove(self.audio_path)
+PermissionError: [WinError 32] Det går inte att komma åt filen eftersom den
+används av en annan process: 'C:\\Users\\simon\\PycharmProjects\\WaveTechToolBox\\temp_audio_file.mp3'
+2024-11-02 16:16:18,260 - bot_logger - ERROR - Error in slash command 'start_santa': The check functions for command 'start_santa' failed.
+NoneType: None
+2024-11-02 16:16:27,600 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:16:27,601 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:16:27,612 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:16:27,612 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:16:27,613 - bot_logger - ERROR - Failed to remove fixed audio file: C:\Users\simon\PycharmProjects\WaveTechToolBox\temp_audio_file.mp3. Error: [WinError 32] Det går inte att komma åt filen eftersom den
+används av en annan process: 'C:\\Users\\simon\\PycharmProjects\\WaveTechToolBox\\temp_audio_file.mp3'
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\voice_processing_cog.py", line 354, in cog_unload
+    os.remove(self.audio_path)
+PermissionError: [WinError 32] Det går inte att komma åt filen eftersom den
+används av en annan process: 'C:\\Users\\simon\\PycharmProjects\\WaveTechToolBox\\temp_audio_file.mp3'
+2024-11-02 16:16:27,614 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:16:27,615 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:18:42,447 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:18:46,099 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:18:46,100 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:18:46,101 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:18:46,102 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:18:46,102 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:19:01,302 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:19:01,303 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:19:01,303 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:19:01,306 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:19:01,308 - bot_logger - INFO - Removed fixed audio file: C:\Users\simon\PycharmProjects\WaveTechToolBox\temp_audio_file.mp3
+2024-11-02 16:19:01,309 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:19:01,312 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:19:17,788 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:19:21,718 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:19:21,719 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:19:21,719 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:19:21,720 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:19:21,721 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:19:47,590 - bot_logger - ERROR - Error in slash command 'end_santa': The check functions for command 'end_santa' failed.
+NoneType: None
+2024-11-02 16:19:47,840 - bot_logger - ERROR - Error in on_slash_command_error
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\interactions\base.py", line 1023, in send_message
+    await adapter.create_interaction_response(
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\webhook\async_.py", line 208, in request
+    raise NotFound(response, data)
+disnake.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\client.py", line 703, in _run_event
+    await coro(*args, **kwargs)
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\main.py", line 140, in on_slash_command_error
+    await inter.send(f"❌ An error occurred: {error}", ephemeral=True)
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\interactions\base.py", line 695, in send
+    await sender(
+  File "C:\Users\simon\PycharmProjects\WaveTechToolBox\venv\Lib\site-packages\disnake\interactions\base.py", line 1033, in send_message
+    raise InteractionTimedOut(self._parent) from e
+disnake.errors.InteractionTimedOut: Interaction took more than 3 seconds to be responded to. Please defer it using "interaction.response.defer" on the start of your command. Later you may send a response by editing the deferred message using "interaction.edit_original_response"
+Note: This might also be caused by a misconfiguration in the components make sure you do not respond twice in case this is a component.
+2024-11-02 16:19:58,795 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:19:58,795 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:19:58,797 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:19:58,799 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:19:58,802 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:19:58,804 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:21:57,791 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:22:01,376 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:22:01,377 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:22:01,377 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:22:01,378 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:22:01,378 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:22:21,770 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:22:21,770 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:22:21,770 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:22:21,772 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:22:21,773 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:22:21,774 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:53:58,763 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:54:02,107 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:54:02,108 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:54:02,108 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:54:02,109 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:54:02,109 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:54:38,129 - bot_logger - ERROR - Error in slash command 'end_santa': The check functions for command 'end_santa' failed.
+NoneType: None
+2024-11-02 16:54:51,142 - bot_logger - ERROR - Error in slash command 'start_santa': The check functions for command 'start_santa' failed.
+NoneType: None
+2024-11-02 16:55:30,644 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:55:30,644 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:55:30,645 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:55:30,646 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:55:30,646 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:55:30,647 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:56:32,050 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:56:35,452 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:56:35,453 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:56:35,454 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:56:35,454 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:56:35,455 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:56:51,980 - bot_logger - ERROR - Announcement message not found when attempting to start the event.
+2024-11-02 16:57:21,790 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:57:21,791 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:57:21,791 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:57:21,791 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:57:21,792 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:57:21,793 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:57:25,691 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:57:29,239 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:57:29,239 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:57:29,240 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:57:29,241 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:57:29,241 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 16:57:31,645 - bot_logger - ERROR - Announcement message not found when attempting to start the event.
+2024-11-02 16:59:34,788 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 16:59:34,789 - bot_logger - INFO - Shutting down bot...
+2024-11-02 16:59:34,789 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 16:59:34,790 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 16:59:34,791 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 16:59:34,792 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 16:59:38,044 - bot_logger - INFO - Bot is starting...
+2024-11-02 16:59:41,462 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 16:59:41,462 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 16:59:41,463 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 16:59:41,464 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 16:59:41,464 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 1 not found.
+2024-11-02 17:16:55,523 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 17:16:55,524 - bot_logger - INFO - Shutting down bot...
+2024-11-02 17:16:55,524 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 17:16:55,525 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 17:16:55,526 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 17:16:55,527 - bot_logger - INFO - process_queue task has been cancelled.
+2024-11-02 17:17:02,572 - bot_logger - INFO - Bot is starting...
+2024-11-02 17:17:06,010 - bot_logger - INFO - Secret Santa data loaded from C:\Users\simon\PycharmProjects\WaveTechToolBox\cogs\secret_santa_data.json.
+2024-11-02 17:17:06,010 - bot_logger - INFO - Logged in as WaveTechTTS#6934 (ID: 1091055465938559107)
+2024-11-02 17:17:06,011 - bot_logger - INFO - Bot is ready and running.
+2024-11-02 17:17:06,011 - bot_logger - INFO - Discord log handler has been added.
+2024-11-02 17:17:06,011 - bot_logger - ERROR - DiscordLogHandler: Channel with ID 2 not found.
+2024-11-02 17:17:48,233 - bot_logger - INFO - Received exit signal SIGINT...
+2024-11-02 17:17:48,234 - bot_logger - INFO - Shutting down bot...
+2024-11-02 17:17:48,234 - bot_logger - INFO - SecretSantaCog has been unloaded.
+2024-11-02 17:17:48,235 - bot_logger - INFO - VoiceProcessingCog is being unloaded.
+2024-11-02 17:17:48,236 - bot_logger - INFO - DALLECog is being unloaded.
+2024-11-02 17:17:48,237 - bot_logger - INFO - process_queue task has been cancelled.

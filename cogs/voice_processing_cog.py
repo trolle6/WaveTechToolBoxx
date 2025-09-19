@@ -22,6 +22,7 @@ HISTORY_PATH = os.path.join(os.path.dirname(__file__), "tts_history.json")
 MAX_QUEUE_SIZE = 100
 PRIORITY_USERS = []
 
+
 def sanitize_emojis(text: str) -> str:
     """Convert custom emojis to text"""
     return EMOJI_REGEX.sub(lambda m: m.group(1), text)
@@ -91,12 +92,17 @@ class VoiceProcessingCog(commands.Cog):
         self.text_channel_id = d_cfg.channel_id
         self.no_mic_role_id = d_cfg.no_mic_role_id
 
-        # Runtime state
+        # Runtime state - optimized
         self.http = None
         self.guild_queues = {}
         self.guild_locks = {}
         self._shutdown_event = asyncio.Event()
         self.active_channels = set()
+
+        # Audio cache to avoid re-processing the same text
+        self.audio_cache = {}
+        self.cache_size = 100
+        self.cache_lock = asyncio.Lock()
 
     async def _get_http(self) -> aiohttp.ClientSession:
         """Get or create HTTP session"""
@@ -104,7 +110,7 @@ class VoiceProcessingCog(commands.Cog):
             return self.http
 
         self.http = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=10),  # Reduced timeout
             connector=aiohttp.TCPConnector(limit_per_host=10)
         )
         return self.http
@@ -116,6 +122,7 @@ class VoiceProcessingCog(commands.Cog):
 
         if user_key not in self.last_requests:
             self.last_requests[user_key] = []
+            return True
 
         # Remove old requests
         self.last_requests[user_key] = [
@@ -150,21 +157,14 @@ class VoiceProcessingCog(commands.Cog):
                     await vc.move_to(channel)
                 return vc
 
-            # Clean up any existing connection
-            if vc:
-                try:
-                    await vc.disconnect(force=True)
-                except:
-                    pass
-
-            # Create new connection
+            # Create new connection with optimized settings
             vc = await channel.connect(
-                timeout=30.0,
+                timeout=15.0,  # Reduced timeout
                 reconnect=True
             )
 
-            # Wait for connection to be ready
-            await asyncio.sleep(1)
+            # Wait briefly for connection
+            await asyncio.sleep(0.5)
 
             # Self-deafen
             await vc.guild.change_voice_state(channel=channel, self_deaf=True)
@@ -189,7 +189,7 @@ class VoiceProcessingCog(commands.Cog):
                 self.guild_queues[guild_id] = deque(maxlen=MAX_QUEUE_SIZE)
                 self.guild_locks[guild_id] = asyncio.Lock()
 
-            # Add to queue
+            # Add to queue with timestamp for ordering
             priority = 1 if member.id in PRIORITY_USERS else 0
             queue_entry = (time.monotonic(), priority, msg)
             self.guild_queues[guild_id].append(queue_entry)
@@ -220,11 +220,11 @@ class VoiceProcessingCog(commands.Cog):
                     # Remove the processed message
                     self.guild_queues[guild_id].remove(sorted_queue[0])
 
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)  # Reduced sleep time
 
             except Exception as e:
                 self.logger.error(f"Queue processing error: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)  # Reduced error sleep time
 
         self.active_channels.discard(guild_id)
 
@@ -267,10 +267,27 @@ class VoiceProcessingCog(commands.Cog):
             if not text:
                 return
 
-            # Generate audio
-            audio = await self._retry_tts(text, voice_id)
+            # Check cache first
+            cache_key = f"{voice_id}:{text[:100]}"
+            audio = None
+
+            async with self.cache_lock:
+                if cache_key in self.audio_cache:
+                    audio = self.audio_cache[cache_key]
+                    self.logger.info(f"Using cached audio for: {text[:50]}...")
+
+            # Generate audio if not in cache
             if not audio:
-                return
+                audio = await self._retry_tts(text, voice_id)
+                if not audio:
+                    return
+
+                # Add to cache
+                async with self.cache_lock:
+                    if len(self.audio_cache) >= self.cache_size:
+                        # Remove oldest item
+                        self.audio_cache.pop(next(iter(self.audio_cache)))
+                    self.audio_cache[cache_key] = audio
 
             # Add to history
             add_to_history(member.id, text, voice_id)
@@ -286,16 +303,6 @@ class VoiceProcessingCog(commands.Cog):
 
         except Exception as e:
             self.logger.error(f"Message handling failed: {e}")
-
-    def _after_playback(self, error, temp_path):
-        """Handle playback completion"""
-        if error:
-            self.logger.error(f"Playback error: {error}")
-        # Clean up temporary file
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
 
     async def _play_audio(self, vc: disnake.VoiceClient, audio: bytes):
         """Play audio with temporary file"""
@@ -313,20 +320,12 @@ class VoiceProcessingCog(commands.Cog):
                 tmp_file.write(audio)
                 temp_path = tmp_file.name
 
-            try:
-                source = disnake.FFmpegPCMAudio(
-                    source=temp_path,
-                    before_options='-nostdin',
-                    options='-vn -acodec pcm_s16le -ac 2 -ar 48000 -f s16le -loglevel warning'
-                )
-            except Exception as e:
-                self.logger.error(f"FFmpeg initialization failed: {e}")
-                try:
-                    if temp_path:
-                        os.unlink(temp_path)
-                except:
-                    pass
-                return
+            # Use optimized FFmpeg options
+            source = disnake.FFmpegPCMAudio(
+                source=temp_path,
+                before_options='-nostdin -threads 2',  # Limit threads to reduce overhead
+                options='-vn -acodec pcm_s16le -ac 2 -ar 48000 -f s16le -loglevel warning'
+            )
 
             playback_done = asyncio.Future()
 
@@ -392,12 +391,9 @@ class VoiceProcessingCog(commands.Cog):
                 else:
                     error_text = await resp.text()
                     self.logger.error(f"TTS API error {resp.status}: {error_text}")
-                    # Log the headers to debug API key issues
-                    self.logger.debug(f"Request headers: {headers}")
         except aiohttp.ClientError as e:
             self.logger.error(f"TTS network error: {e}")
         except Exception as e:
-            # Add more detailed error logging
             self.logger.error(f"TTS unexpected error: {e}", exc_info=True)
         return None
 
@@ -441,10 +437,9 @@ class VoiceProcessingCog(commands.Cog):
         # Bot was disconnected
         if before.channel and not after.channel:
             self.logger.info(f"Bot was disconnected from voice in guild {guild_id}")
-            # Don't immediately cleanup, try to reconnect if needed
+            # Clean up queue if bot is disconnected
             if guild_id in self.guild_queues:
-                # Keep the queue but mark for reconnection
-                self.logger.info("Queue preserved, will reconnect when needed")
+                self.guild_queues[guild_id].clear()
 
     # Cleanup
     def cog_unload(self):
@@ -476,6 +471,40 @@ class VoiceProcessingCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"HTTP close error: {e}")
 
+            # In voice_processing_cog.py, add this method:
+            async def _safe_play_audio(self, vc: disnake.VoiceClient, audio: bytes):
+                """Safely play audio with additional error handling"""
+                try:
+                    await self._play_audio(vc, audio)
+                except Exception as e:
+                    self.logger.error(f"Audio playback failed: {e}")
+                    # Try to reconnect if playback fails
+                    if vc and vc.is_connected():
+                        try:
+                            await vc.disconnect()
+                        except:
+                            pass
+
+
+# In your voice_processing_cog.py, update the cog_unload method:
+
+def cog_unload(self):
+    """Clean up resources"""
+    self._shutdown_event.set()
+
+    # Cancel backup task
+    if self._backup_task:
+        self._backup_task.cancel()
+
+    # Disconnect all voice clients
+    for vc in self.bot.voice_clients:
+        asyncio.create_task(self._safe_disconnect(vc))
+
+    # Close HTTP session
+    if self.http and not self.http.closed:
+        asyncio.create_task(self._safe_close_http())
+
+    self.logger.info("VoiceProcessingCog unloaded.")
 
 def setup(bot: commands.Bot):
     bot.add_cog(VoiceProcessingCog(bot))

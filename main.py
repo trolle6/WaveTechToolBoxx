@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 # --- Constants ---
 MAX_MESSAGE_LENGTH = 1990
 
-
 # --- Configuration Dataclasses ---
 @dataclass
 class DiscordConfig:
@@ -27,7 +26,6 @@ class DiscordConfig:
     announcement_message_id: int
     no_mic_role_id: int
     log_file_path: str = "bot.log"
-
 
 @dataclass
 class TtsConfig:
@@ -42,16 +40,10 @@ class TtsConfig:
     voices: Dict[str, Any] = field(default_factory=dict)
     default_voice: str = "GenericVoice"
 
-
-# Suppress the RuntimeWarning about never awaited coroutines
-warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
-
-
 @dataclass
 class DalleConfig:
     api_url: str
     size: str = "1024x1024"
-
 
 @dataclass
 class Config:
@@ -62,10 +54,11 @@ class Config:
     dalle: DalleConfig
     prefix: str = "!"
 
+# Suppress the RuntimeWarning about never awaited coroutines
+warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
 
 # --- Load and validate environment ---
 load_dotenv("config.env")
-
 
 def get_env_or_exit(var: str, default: Optional[str] = None) -> str:
     value = os.getenv(var, default)
@@ -73,7 +66,6 @@ def get_env_or_exit(var: str, default: Optional[str] = None) -> str:
         print(f"Error: Environment variable '{var}' is required.")
         sys.exit(1)
     return value
-
 
 def get_int_env_or_exit(var: str) -> int:
     val = get_env_or_exit(var)
@@ -83,10 +75,8 @@ def get_int_env_or_exit(var: str) -> int:
         print(f"Error: '{var}' must be an integer, got '{val}'")
         sys.exit(1)
 
-
 def load_config() -> Config:
     try:
-        # Load TTS-specific configs
         tts_voices_list = [v.strip() for v in os.getenv("OPENAI_VOICES", "").split(",") if v.strip()]
         tts_user_map = {
             kv.split("=")[0]: kv.split("=")[1]
@@ -125,11 +115,9 @@ def load_config() -> Config:
             prefix=os.getenv("BOT_PREFIX", "!"),
         )
     except SystemExit:
-        sys.exit(1)  # Re-raise if any required variables are missing
-
+        sys.exit(1)
 
 config = load_config()
-
 
 # --- Logging Setup ---
 def setup_logger(cfg: Config) -> logging.Logger:
@@ -139,7 +127,6 @@ def setup_logger(cfg: Config) -> logging.Logger:
     level = logging.DEBUG if cfg.debug else logging.INFO
     logger.setLevel(level)
 
-    # Rotating file handler
     file_handler = RotatingFileHandler(
         cfg.discord.log_file_path, maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )
@@ -147,14 +134,12 @@ def setup_logger(cfg: Config) -> logging.Logger:
     file_handler.setFormatter(fmt)
     logger.addHandler(file_handler)
 
-    # Console handler
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(level)
     console.setFormatter(fmt)
     logger.addHandler(console)
 
     return logger
-
 
 logger = setup_logger(config)
 logger.debug("Logger initialized.")
@@ -164,7 +149,6 @@ intents = disnake.Intents.all()
 bot = commands.InteractionBot(intents=intents)
 bot.config = config
 bot.logger = logger
-
 
 # --- Discord Log Handler ---
 class DiscordLogHandler(logging.Handler):
@@ -195,7 +179,6 @@ class DiscordLogHandler(logging.Handler):
                 await channel.send(f"```{message[i:i + MAX_MESSAGE_LENGTH]}```")
             self.queue.task_done()
 
-
 @bot.event
 async def on_ready() -> None:
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
@@ -206,11 +189,18 @@ async def on_ready() -> None:
     handler.start()
     logger.info("Discord log handler started.")
 
+@bot.event
+async def on_interaction(inter: disnake.Interaction):
+    """Global interaction handler to prevent TTS from intercepting Santa commands"""
+    if inter.type == disnake.InteractionType.application_command:
+        cmd_name = inter.application_command.qualified_name
+        if cmd_name.startswith("santa"):
+            return  # Let Santa commands handle themselves
+    # Let other interactions be handled normally
 
 @bot.event
 async def on_error(event_method: str, *args: Any, **kwargs: Any) -> None:
     logger.error(f"Unhandled error in {event_method}", exc_info=True)
-
 
 @bot.event
 async def on_slash_command_error(
@@ -223,7 +213,6 @@ async def on_slash_command_error(
     except disnake.InteractionResponded:
         logger.warning("Already responded to error.")
 
-
 @bot.event
 async def on_guild_join(guild: disnake.Guild) -> None:
     if guild.id != config.discord.guild_id:
@@ -231,23 +220,29 @@ async def on_guild_join(guild: disnake.Guild) -> None:
         await guild.leave()
 
 
+# In main.py, enhance the shutdown function:
+# In main.py, restore the original shutdown function and add the enhancement:
 async def shutdown():
     logger.info("Shutdown initiated.")
 
+    # Close all HTTP sessions in cogs (NEW)
+    for cog_name, cog in bot.cogs.items():
+        if hasattr(cog, 'http_session') and cog.http_session and not cog.http_session.closed:
+            await cog.http_session.close()
+        if hasattr(cog, 'http') and cog.http and not cog.http.closed:
+            await cog.http.close()
+
     try:
-        # Disconnect all voice clients
         for vc in bot.voice_clients:
             try:
                 await vc.disconnect(force=True)
             except Exception as e:
                 logger.error(f"Error disconnecting voice client: {e}")
 
-        # Cancel all tasks except the current one
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in tasks:
             task.cancel()
 
-        # Wait for tasks to complete with timeout
         try:
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10.0)
         except asyncio.TimeoutError:
@@ -262,7 +257,6 @@ async def shutdown():
 # Signal handlers
 for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, lambda *_: asyncio.create_task(shutdown()))
-
 
 # --- Load Cogs with better error handling ---
 def load_cogs_safely():
@@ -282,24 +276,42 @@ def load_cogs_safely():
             logger.info(f"Successfully loaded {cog}")
         except Exception as e:
             logger.error(f"Failed to load {cog}: {e}")
-            # Don't exit immediately, try to load other cogs
             continue
 
     return loaded_cogs
 
 
+# Add this function to your main.py
+def validate_environment():
+    required_vars = [
+        "DISCORD_TOKEN",
+        "DISCORD_GUILD_ID",
+        "DISCORD_CHANNEL_ID",
+        "TTS_BEARER_TOKEN",
+        "TTS_API_URL"
+    ]
+
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    if missing_vars:
+        logger.critical(f"Missing required environment variables: {', '.join(missing_vars)}")
+        sys.exit(1)
+
+
+# Call it in your main function:
+if __name__ == "__main__":
+    validate_environment()
+    logger.info("Starting bot...")
+
 async def keep_alive():
     """Prevent the bot from exiting unexpectedly"""
     while True:
-        await asyncio.sleep(3600)  # Sleep for 1 hour
+        await asyncio.sleep(3600)
         logger.debug("Keep-alive ping")
-
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
 
     try:
-        # Load cogs first
         loaded_cogs = load_cogs_safely()
 
         if not loaded_cogs:
@@ -308,13 +320,10 @@ if __name__ == "__main__":
 
         logger.info(f"Loaded {len(loaded_cogs)} cogs: {', '.join(loaded_cogs)}")
 
-        # Get token
         token = get_env_or_exit("DISCORD_TOKEN")
 
-        # Start keep-alive task using bot's event loop
         bot.keep_alive_task = bot.loop.create_task(keep_alive())
 
-        # Run the bot
         bot.run(token)
 
     except Exception as e:
