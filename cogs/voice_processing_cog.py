@@ -73,6 +73,7 @@ class VoiceProcessingCog(commands.Cog):
         self.bot = bot
         self.cfg = bot.config
         self.logger = bot.logger
+        self.voice_client_states = {}
 
         # TTS config
         tts_cfg = self.cfg.tts
@@ -109,13 +110,11 @@ class VoiceProcessingCog(commands.Cog):
         self.voice_clients = {}
 
         # Add audio format configuration
-        self.audio_format = "mp3"  # Changed from default format
-        # Fix FFmpeg options
+        self.audio_format = "mp3"
         self.ffmpeg_options = {
             'before_options': '-nostdin',
             'options': '-vn -filter:a "volume=0.8"'
         }
-
 
     async def _get_http(self) -> aiohttp.ClientSession:
         """Get or create HTTP session"""
@@ -137,7 +136,6 @@ class VoiceProcessingCog(commands.Cog):
             self.last_requests[user_key] = []
             return True
 
-        # Remove old requests
         self.last_requests[user_key] = [
             t for t in self.last_requests[user_key]
             if now - t < 60
@@ -152,8 +150,9 @@ class VoiceProcessingCog(commands.Cog):
     async def _validate_voice_client(self, vc: disnake.VoiceClient) -> bool:
         """Validate voice client connection"""
         try:
-            return vc and vc.is_connected() and not vc.is_playing()
-        except Exception:
+            return vc and vc.is_connected()
+        except Exception as e:
+            self.logger.error(f"Voice client validation error: {e}")
             return False
 
     async def _ensure_voice_client(self, guild_id: int, channel: disnake.VoiceChannel):
@@ -163,40 +162,35 @@ class VoiceProcessingCog(commands.Cog):
             if not guild:
                 return None
 
-            # Check if we already have a voice client for this guild
-            if guild_id in self.voice_clients:
-                vc = self.voice_clients[guild_id]
-                if await self._validate_voice_client(vc):
-                    if vc.channel and vc.channel.id != channel.id:
-                        await vc.move_to(channel)
-                    return vc
-                else:
-                    # Remove invalid voice client
-                    del self.voice_clients[guild_id]
-
-            vc = disnake.utils.get(self.bot.voice_clients, guild=guild)
-
-            if vc and await self._validate_voice_client(vc):
-                if vc.channel and vc.channel.id != channel.id:
-                    await vc.move_to(channel)
-                self.voice_clients[guild_id] = vc
+            # Check if we already have a valid connection to this channel
+            vc = self.voice_clients.get(guild_id)
+            if vc and await self._validate_voice_client(vc) and vc.channel and vc.channel.id == channel.id:
                 return vc
 
-            # Create new connection with optimized settings
-            vc = await channel.connect(
-                timeout=15.0,
-                reconnect=True
-            )
+            # Clean up any existing voice client
+            existing_vc = guild.voice_client
+            if existing_vc and existing_vc.is_connected():
+                await existing_vc.disconnect(force=True)
+                await asyncio.sleep(0.5)
 
-            # Wait briefly for connection
-            await asyncio.sleep(0.5)
+            try:
+                vc = await channel.connect(timeout=10.0, reconnect=True)
+            except Exception as e:
+                self.logger.error(f"Voice connection failed: {e}")
+                return None
 
-            # Self-deafen
-            await vc.guild.change_voice_state(channel=channel, self_deaf=True)
+            # Wait for connection to stabilize
+            await asyncio.sleep(1)
 
-            # Store the voice client
+            if not await self._validate_voice_client(vc):
+                self.logger.warning("Voice connection failed validation")
+                try:
+                    await vc.disconnect(force=True)
+                except:
+                    pass
+                return None
+
             self.voice_clients[guild_id] = vc
-
             return vc
 
         except Exception as e:
@@ -212,17 +206,14 @@ class VoiceProcessingCog(commands.Cog):
             if not (member.voice and member.voice.channel):
                 return
 
-            # Get or create guild queue
             if guild_id not in self.guild_queues:
                 self.guild_queues[guild_id] = deque(maxlen=MAX_QUEUE_SIZE)
                 self.guild_locks[guild_id] = asyncio.Lock()
 
-            # Add to queue with timestamp for ordering
             priority = 1 if member.id in PRIORITY_USERS else 0
             queue_entry = (time.monotonic(), priority, msg)
             self.guild_queues[guild_id].append(queue_entry)
 
-            # Start processor if not running
             if guild_id not in self.active_channels:
                 self.active_channels.add(guild_id)
                 asyncio.create_task(self._process_guild_queue(guild_id))
@@ -239,11 +230,9 @@ class VoiceProcessingCog(commands.Cog):
                         await asyncio.sleep(0.1)
                         continue
 
-                    # Get the highest priority message
                     sorted_queue = sorted(self.guild_queues[guild_id], key=lambda x: (-x[1], x[0]))
                     _, _, msg = sorted_queue[0]
 
-                    # Remove the message from queue before processing
                     self.guild_queues[guild_id] = deque(
                         [item for item in self.guild_queues[guild_id] if item[2].id != msg.id],
                         maxlen=MAX_QUEUE_SIZE
@@ -263,9 +252,13 @@ class VoiceProcessingCog(commands.Cog):
         try:
             member = msg.author
             guild_id = msg.guild.id
+
+            # Check if member is still in a voice channel
+            if not (member.voice and member.voice.channel):
+                return
+
             channel = member.voice.channel
 
-            # Add no-mic role if needed
             if role := msg.guild.get_role(self.no_mic_role_id):
                 try:
                     if role not in member.roles:
@@ -273,7 +266,6 @@ class VoiceProcessingCog(commands.Cog):
                 except Exception as e:
                     self.logger.warning(f"Failed to add no-mic role: {e}")
 
-            # Check rate limit
             if not self._check_rate_limit(member.id):
                 self.logger.warning(f"Rate limit exceeded for user {member.id}")
                 try:
@@ -286,18 +278,15 @@ class VoiceProcessingCog(commands.Cog):
                     pass
                 return
 
-            # Get voice ID
             voice_id = self.user_voice_map.get(str(member.id))
             if not voice_id:
                 voice_id = random.choice(self.available_voices) if self.available_voices else self.default_voice
                 self.user_voice_map[str(member.id)] = voice_id
 
-            # Process text
             text = sanitize_emojis(msg.content.strip())
             if not text:
                 return
 
-            # Check cache first
             cache_key = f"{voice_id}:{text[:100]}"
             audio = None
 
@@ -306,50 +295,46 @@ class VoiceProcessingCog(commands.Cog):
                     audio = self.audio_cache[cache_key]
                     self.logger.info(f"Using cached audio for: {text[:50]}...")
 
-            # Generate audio if not in cache
             if not audio:
                 audio = await self._retry_tts(text, voice_id)
                 if not audio:
                     return
 
-                # Add to cache
                 async with self.cache_lock:
                     if len(self.audio_cache) >= self.cache_size:
-                        # Remove oldest item using LRU strategy
                         oldest_key = next(iter(self.audio_cache))
                         self.audio_cache.pop(oldest_key)
                     self.audio_cache[cache_key] = audio
 
-            # Add to history
             add_to_history(member.id, text, voice_id)
 
-            # Get voice client
             vc = await self._ensure_voice_client(guild_id, channel)
             if not vc:
                 self.logger.error("Failed to get voice client")
                 return
 
-            # Play audio
-            await self._play_audio(vc, audio)
+            await self._play_audio(vc, audio, guild_id, channel)
 
         except Exception as e:
             self.logger.error(f"Message handling failed: {e}")
 
-    async def _play_audio(self, vc: disnake.VoiceClient, audio: bytes):
-        """Play audio with in-memory streaming"""
-        if not vc or not vc.is_connected():
-            self.logger.error("Voice client not valid for playback")
-            return
+    async def _play_audio(self, vc: disnake.VoiceClient, audio: bytes, guild_id: int, channel: disnake.VoiceChannel):
+        """Play audio with in-memory streaming and reconnection support"""
+        # Validate voice client before playback
+        if not await self._validate_voice_client(vc):
+            self.logger.warning("Voice client invalid, attempting to reconnect...")
+            vc = await self._ensure_voice_client(guild_id, channel)
+            if not vc:
+                self.logger.error("Failed to reconnect voice client")
+                return
 
         self.logger.info(f"Starting playback. Audio size: {len(audio)} bytes")
 
         try:
-            # Create temporary file to avoid pipe issues
             with tempfile.NamedTemporaryFile(suffix=f'.{self.audio_format}', delete=False) as tmp_file:
                 tmp_file.write(audio)
                 tmp_file.flush()
 
-                # Create audio source from file
                 source = disnake.FFmpegPCMAudio(
                     source=tmp_file.name,
                     **self.ffmpeg_options
@@ -358,7 +343,6 @@ class VoiceProcessingCog(commands.Cog):
             playback_done = asyncio.Future()
 
             def after_playback(error):
-                # Clean up temp file
                 try:
                     os.unlink(tmp_file.name)
                 except:
@@ -369,7 +353,7 @@ class VoiceProcessingCog(commands.Cog):
                 if not playback_done.done():
                     playback_done.set_result(None)
 
-            # Check connection before playing
+            # Final validation before playback
             if not await self._validate_voice_client(vc):
                 self.logger.error("Voice client disconnected right before playback")
                 return
@@ -382,23 +366,15 @@ class VoiceProcessingCog(commands.Cog):
                 self.logger.warning("Playback timed out")
                 vc.stop()
 
-            # Additional delay between messages
             if self.delay_between:
                 await asyncio.sleep(self.delay_between)
 
         except Exception as e:
             self.logger.error(f"Playback failed: {e}")
-            # Clean up temp file on error
             try:
                 os.unlink(tmp_file.name)
             except:
                 pass
-
-                # Remove from tracked voice clients
-                for guild_id, client in list(self.voice_clients.items()):
-                    if client == vc:
-                        del self.voice_clients[guild_id]
-                        break
 
     async def _call_tts(self, text: str, voice_id: str) -> Optional[bytes]:
         """Call TTS API with retries"""
@@ -417,7 +393,6 @@ class VoiceProcessingCog(commands.Cog):
 
         http = await self._get_http()
         try:
-            # Increase timeout for TTS requests
             timeout = aiohttp.ClientTimeout(total=30)
             async with http.post(self.tts_url, json=payload, headers=headers, timeout=timeout) as resp:
                 if resp.status == 200:
@@ -446,7 +421,6 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.error("All TTS attempts failed")
         return None
 
-    # Listeners
     @commands.Cog.listener()
     async def on_message(self, msg: disnake.Message):
         """Add messages to processing"""
@@ -466,29 +440,28 @@ class VoiceProcessingCog(commands.Cog):
                                     after: disnake.VoiceState):
         """Handle voice state changes"""
         if member.id == self.bot.user.id:
-            # Handle bot's own disconnections
             if before.channel and not after.channel:
                 guild_id = member.guild.id
-                self.logger.info(f"Bot disconnected from voice in guild {guild_id}")
                 if guild_id in self.voice_clients:
                     del self.voice_clients[guild_id]
-                if guild_id in self.guild_queues:
-                    self.guild_queues[guild_id].clear()
+                # Don't clear the queue when bot disconnects, just remove the voice client
+                # This allows the queue to continue processing when someone rejoins
+                self.logger.info(f"Bot disconnected from voice in guild {guild_id}")
             return
 
-        # Handle user leaving voice channels
+        # Handle user leaving voice channel
         if before.channel and not after.channel:
             guild_id = member.guild.id
             if guild_id in self.voice_clients:
                 vc = self.voice_clients[guild_id]
                 if vc and vc.channel and vc.channel.id == before.channel.id:
-                    # Check current channel members (not using before.channel which might be stale)
                     current_channel = vc.channel
+                    # Check if only the bot remains in the channel
                     if len(current_channel.members) == 1 and current_channel.members[0].id == self.bot.user.id:
                         self.logger.info("Scheduling leave from empty channel")
-                        await asyncio.sleep(10)  # Wait 10 seconds
+                        await asyncio.sleep(10)
 
-                        # Re-check condition
+                        # Re-check after delay
                         if (vc and vc.is_connected() and vc.channel and
                                 len(vc.channel.members) == 1 and
                                 vc.channel.members[0].id == self.bot.user.id):
@@ -496,10 +469,16 @@ class VoiceProcessingCog(commands.Cog):
                             await vc.disconnect()
                             if guild_id in self.voice_clients:
                                 del self.voice_clients[guild_id]
-                            if guild_id in self.guild_queues:
-                                self.guild_queues[guild_id].clear()
 
-    # Add debug commands here (outside of the event listener)
+        # Handle user joining voice channel (bot might need to reconnect)
+        elif after.channel and (not before.channel or before.channel.id != after.channel.id):
+            guild_id = member.guild.id
+            # If there are messages in the queue and the bot isn't connected, restart processing
+            if (guild_id in self.guild_queues and self.guild_queues[guild_id] and
+                    guild_id not in self.active_channels):
+                self.active_channels.add(guild_id)
+                asyncio.create_task(self._process_guild_queue(guild_id))
+
     @commands.slash_command(name="voice_debug", description="Debug voice connection")
     async def voice_debug(self, inter: disnake.ApplicationCommandInteraction):
         """Debug voice connection status"""
@@ -512,7 +491,8 @@ class VoiceProcessingCog(commands.Cog):
                 f"Connected: {vc.is_connected()}\n"
                 f"Playing: {vc.is_playing()}\n"
                 f"Channel: {vc.channel.name if vc.channel else 'None'}\n"
-                f"Queue size: {len(self.guild_queues.get(inter.guild.id, []))}"
+                f"Queue size: {len(self.guild_queues.get(inter.guild.id, []))}\n"
+                f"Active channels: {self.active_channels}"
             )
         else:
             status = "No voice client"
@@ -524,25 +504,21 @@ class VoiceProcessingCog(commands.Cog):
         """Test TTS API connection"""
         await inter.response.defer()
 
-        # Get voice ID
         voice_id = self.user_voice_map.get(str(inter.author.id)) or self.default_voice
 
-        # Test TTS call
         audio = await self._call_tts(text, voice_id)
         if audio:
             await inter.followup.send("✅ TTS API is working!")
         else:
             await inter.followup.send("❌ TTS API failed. Check your API key and configuration.")
-    # Cleanup
+
     def cog_unload(self):
         """Clean up resources"""
         self._shutdown_event.set()
 
-        # Disconnect all voice clients
         for vc in self.bot.voice_clients:
             asyncio.create_task(self._safe_disconnect(vc))
 
-        # Close HTTP session
         if self.http and not self.http.closed:
             asyncio.create_task(self._safe_close_http())
 

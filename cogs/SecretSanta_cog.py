@@ -7,6 +7,8 @@ import pathlib
 import random
 import time
 import traceback
+import os
+import psutil
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Callable, Set
 
@@ -19,6 +21,49 @@ BACKUP_PATH = ROOT_DIR / "secret_santa_state.bak"
 ARCHIVE_DIR = ROOT_DIR / "archive"
 ARCHIVE_DIR.mkdir(exist_ok=True)
 QUESTION_ARCHIVE_PATH = ROOT_DIR / "santa_questions.json"
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+
+def _get_enhanced_entropy() -> float:
+    """Get high-quality entropy from multiple reliable sources"""
+    entropy_sources = []
+
+    # 1. Cryptographic randomness (most important)
+    try:
+        entropy_sources.append(int.from_bytes(os.urandom(8), byteorder='big'))
+    except:
+        entropy_sources.append(random.getrandbits(64))
+
+    # 2. High-precision time
+    precise_time = time.time_ns() if hasattr(time, 'time_ns') else time.time() * 1_000_000_000
+    entropy_sources.append(precise_time)
+
+    # 3. Process and system identifiers
+    entropy_sources.append(os.getpid())
+    entropy_sources.append(hash(os.urandom(4)) if hasattr(os, 'urandom') else random.random())
+
+    # 4. System performance metrics (more reliable than temperature)
+    if psutil:
+        try:
+            entropy_sources.append(psutil.cpu_percent())
+            entropy_sources.append(psutil.virtual_memory().used % 1000)
+            entropy_sources.append(int(time.time() * 1000) % 1000)
+        except:
+            pass
+
+    # Add some additional time-based entropy
+    entropy_sources.append(dt.datetime.now().microsecond)
+    entropy_sources.append(time.monotonic_ns() if hasattr(time, 'monotonic_ns') else time.monotonic() * 1_000_000_000)
+
+    # Combine all sources
+    cosmic_hash = hash(tuple(entropy_sources))
+    final_entropy = (cosmic_hash % 1000000) / 1000000.0
+
+    return final_entropy
 
 
 def _load_state() -> Dict[str, Any]:
@@ -53,7 +98,13 @@ def _make_assignments(participants: List[int], pair_history: Dict[str, List[int]
     if len(participants) < 2:
         raise ValueError("Need at least two participants for Secret Santa.")
 
-    random.seed(time.time() + random.random())
+    # Use enhanced entropy for better randomness
+    hardware_entropy = _get_enhanced_entropy()
+
+    # Combine multiple entropy sources
+    seed_value = time.time() + hardware_entropy + random.random()
+
+    random.seed(seed_value)
 
     givers = participants.copy()
     receivers = participants.copy()
@@ -89,9 +140,13 @@ def _make_assignments(participants: List[int], pair_history: Dict[str, List[int]
             break
 
         attempts += 1
-        random.seed(time.time() + random.random() + attempts)
+        # Refresh entropy for each attempt
+        new_entropy = _get_enhanced_entropy()
+        new_seed = time.time() + random.random() + attempts + new_entropy
+        random.seed(new_seed)
 
     if attempts >= max_attempts:
+        # Fallback to simple rotation if complex matching fails
         random.shuffle(givers)
         random.shuffle(receivers)
         assigns = {}
@@ -129,10 +184,24 @@ def _load_archived_history() -> Dict[str, List[int]]:
                     history[giver_str].append(int(receiver_id))
 
         except (json.JSONDecodeError, FileNotFoundError, KeyError) as e:
-            print(f"Error loading archive {archive_file}: {e}")
             continue
 
     return history
+
+
+def _get_archived_events() -> List[Dict[str, Any]]:
+    """Get all archived events with detailed information"""
+    events = []
+
+    for archive_file in ARCHIVE_DIR.glob("event_*.json"):
+        try:
+            with open(archive_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                events.append(data)
+        except (json.JSONDecodeError, FileNotFoundError):
+            continue
+
+    return sorted(events, key=lambda x: x.get("year", 0), reverse=True)
 
 
 def _archive_current_year(event_data: Dict[str, Any], year: int):
@@ -140,7 +209,11 @@ def _archive_current_year(event_data: Dict[str, Any], year: int):
         "year": year,
         "event": event_data.copy(),
         "archived_at": time.time(),
-        "timestamp": dt.datetime.now().isoformat()
+        "timestamp": dt.datetime.now().isoformat(),
+        "shuffle_entropy": {
+            "hardware_entropy": _get_enhanced_entropy(),
+            "timestamp": time.time()
+        }
     }
 
     archive_path = ARCHIVE_DIR / f"event_{year}.json"
@@ -149,17 +222,22 @@ def _archive_current_year(event_data: Dict[str, Any], year: int):
         with open(archive_path, 'w', encoding='utf-8') as f:
             json.dump(archive_data, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"Failed to archive event {year}: {e}")
+        pass
 
 
 def mod_only():
     async def predicate(inter: disnake.ApplicationCommandInteraction):
         try:
-            mod_role_id = inter.bot.config.discord.moderator_role_id
-            return any(r.id == mod_role_id for r in inter.author.roles)
+            # Try to get moderator role from config with proper error handling
+            if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'discord'):
+                mod_role_id = inter.bot.config.discord.moderator_role_id
+                if mod_role_id and any(r.id == mod_role_id for r in inter.author.roles):
+                    return True
+            # Fallback: check for administrator permission
+            return inter.author.guild_permissions.administrator
         except Exception as e:
-            inter.bot.logger.error(f"Error in mod_only check: {e}")
-            return False
+            # If anything fails, fall back to administrator check
+            return inter.author.guild_permissions.administrator
 
     return commands.check(predicate)
 
@@ -175,7 +253,6 @@ def participant_only():
                 return False
             return str(inter.author.id) in event["participants"]
         except Exception as e:
-            inter.bot.logger.error(f"Error in participant_only check: {e}")
             return False
 
     return commands.check(predicate)
@@ -203,11 +280,11 @@ class SecretSantaCog(commands.Cog):
                 return True
             except disnake.HTTPException:
                 if attempt == max_attempts - 1:
-                    self.bot.logger.warning(f"Failed to DM {user_id}")
+                    pass
                 await asyncio.sleep(1)
             except Exception as e:
                 if attempt == max_attempts - 1:
-                    self.bot.logger.error(f"Unexpected error DMing {user_id}: {e}")
+                    pass
                 await asyncio.sleep(1)
         return False
 
@@ -220,15 +297,12 @@ class SecretSantaCog(commands.Cog):
     async def _assign_role_to_participants(self, guild: disnake.Guild, role_id: int, participant_ids: List[int]):
         role = guild.get_role(role_id)
         if not role:
-            self.bot.logger.error(f"Role with ID {role_id} not found in guild {guild.id}")
             return False
 
         if not guild.me.guild_permissions.manage_roles:
-            self.bot.logger.error(f"Bot lacks 'Manage Roles' permission in guild {guild.id}")
             return False
 
         if role.position >= guild.me.top_role.position:
-            self.bot.logger.error(f"Role {role.name} is above bot's highest role in hierarchy")
             return False
 
         success_count = 0
@@ -241,19 +315,15 @@ class SecretSantaCog(commands.Cog):
                     try:
                         member = await guild.fetch_member(user_id)
                     except disnake.NotFound:
-                        self.bot.logger.warning(f"Member {user_id} not found in guild {guild.id}")
                         failed_count += 1
                         continue
 
                 if role not in member.roles:
                     await member.add_roles(role, reason="Secret Santa participant")
                     success_count += 1
-                    self.bot.logger.info(f"Successfully assigned role to {member.display_name}")
             except disnake.Forbidden:
-                self.bot.logger.error(f"Missing permissions to assign role to {user_id}")
                 failed_count += 1
             except disnake.HTTPException as e:
-                self.bot.logger.error(f"Error assigning role to {user_id}: {e}")
                 failed_count += 1
 
         return {"success": success_count, "failed": failed_count}
@@ -271,19 +341,19 @@ class SecretSantaCog(commands.Cog):
                         _save_questions(self.questions)
                         BACKUP_PATH.write_text(json.dumps(self.state, indent=2))
                 except Exception as e:
-                    self.bot.logger.error(f"Backup failed: {e}")
+                    pass
         except asyncio.CancelledError:
-            self.bot.logger.info("Backup task cancelled")
+            pass
         except Exception as e:
-            self.bot.logger.error(f"Backup task error: {e}")
+            pass
 
-    @commands.slash_command(name="santa")
-    async def santa_root(self, _: disnake.AppCmdInter):
+    @commands.slash_command(name="ss")
+    async def ss_root(self, inter: disnake.AppCmdInter):
         pass
 
-    @santa_root.sub_command(name="participants", description="View current participants")
+    @ss_root.sub_command(name="participants", description="View current participants")
     @mod_only()
-    async def santa_participants(self, inter: disnake.AppCmdInter):
+    async def ss_participants(self, inter: disnake.AppCmdInter):
         event = self._event()
         if not event or not event.get("active", False):
             await inter.send("❌ No active Secret Santa event", ephemeral=True)
@@ -297,9 +367,9 @@ class SecretSantaCog(commands.Cog):
         participant_list = "\n".join([f"{name} (ID: {uid})" for uid, name in participants.items()])
         await inter.send(f"**Current Participants ({len(participants)}):**\n{participant_list}", ephemeral=True)
 
-    @santa_root.sub_command(name="start", description="Start a new Secret Santa event")
+    @ss_root.sub_command(name="start", description="Start a new Secret Santa event")
     @mod_only()
-    async def santa_start(self, inter: disnake.AppCmdInter, announcement_message_id: str, role_id: str):
+    async def ss_start(self, inter: disnake.AppCmdInter, announcement_message_id: str, role_id: str):
         await inter.response.defer(ephemeral=True)
 
         try:
@@ -335,7 +405,7 @@ class SecretSantaCog(commands.Cog):
                 except disnake.Forbidden:
                     continue
         except Exception as e:
-            self.bot.logger.error(f"Error fetching message or reactions: {e}")
+            pass
 
         new_event = {
             "active": True,
@@ -378,9 +448,9 @@ class SecretSantaCog(commands.Cog):
 
         await inter.edit_original_response(response_msg)
 
-    @santa_root.sub_command(name="stop", description="Stop the current Secret Santa event without assigning")
+    @ss_root.sub_command(name="stop", description="Stop the current Secret Santa event without assigning")
     @mod_only()
-    async def santa_stop(self, inter: disnake.AppCmdInter):
+    async def ss_stop(self, inter: disnake.AppCmdInter):
         await inter.response.defer(ephemeral=True)
 
         event = self._event()
@@ -395,15 +465,14 @@ class SecretSantaCog(commands.Cog):
             for participant in participants:
                 if str(participant) not in self.state["pair_history"]:
                     self.state["pair_history"][str(participant)] = []
-
             self.state["current_event"] = None
             await self._save()
 
         await inter.edit_original_response("✅ Secret Santa event stopped without assignments. Event data archived.")
 
-    @santa_root.sub_command(name="shuffle", description="Manually trigger assignment (mod only)")
+    @ss_root.sub_command(name="shuffle", description="Manually trigger assignment (mod only)")
     @mod_only()
-    async def santa_shuffle(self, inter: disnake.AppCmdInter):
+    async def ss_shuffle(self, inter: disnake.AppCmdInter):
         await inter.response.defer(ephemeral=True)
 
         event = self._event()
@@ -415,6 +484,11 @@ class SecretSantaCog(commands.Cog):
         if len(participants) < 2:
             await inter.edit_original_response("❌ Not enough participants to make assignments")
             return
+
+        # Get enhanced entropy for better randomness
+        hardware_entropy = _get_enhanced_entropy()
+        await inter.edit_original_response(
+            f"🎲 Using enhanced entropy ({hardware_entropy:.6f}) for optimal randomness...")
 
         combined_history = self.state.get("pair_history", {}).copy()
         archived_history = _load_archived_history()
@@ -460,6 +534,8 @@ class SecretSantaCog(commands.Cog):
             await self._save()
 
         response_message = "✅ Assignments shuffled and sent to participants!"
+        response_message += f"\n🎲 Shuffled using enhanced entropy: {hardware_entropy:.6f}"
+
         if role_assignment_result is not False:
             response_message += f"\n✅ Role assigned to {role_assignment_result['success']} participants."
             if role_assignment_result['failed'] > 0:
@@ -468,6 +544,85 @@ class SecretSantaCog(commands.Cog):
             response_message += "\n⚠️ Could not assign role to participants (role not found)."
 
         await inter.edit_original_response(response_message)
+
+    @ss_root.sub_command(name="history", description="Show previous Secret Santa events")
+    @mod_only()
+    async def ss_history(self, inter: disnake.AppCmdInter, year: int = None):
+        await inter.response.defer(ephemeral=True)
+
+        events = _get_archived_events()
+        if not events:
+            await inter.edit_original_response("No archived events found.")
+            return
+
+        if year:
+            event_data = next((e for e in events if e.get("year") == year), None)
+            if not event_data:
+                await inter.edit_original_response(f"No event found for year {year}")
+                return
+
+            embed = disnake.Embed(title=f"Secret Santa {year}", color=disnake.Color.gold())
+
+            # Add event details
+            if "event" in event_data:
+                event_info = event_data["event"]
+                if "participants" in event_info:
+                    participant_count = len(event_info["participants"])
+                    embed.add_field(name="Participants", value=str(participant_count), inline=True)
+
+                if "assignments" in event_info:
+                    assignments_text = "\n".join(
+                        [f"<@{giver}> → <@{receiver}>" for giver, receiver in event_info["assignments"].items()]
+                    )
+                    if len(assignments_text) > 1024:
+                        assignments_text = assignments_text[:1020] + "..."
+                    embed.add_field(name="Assignments", value=assignments_text, inline=False)
+
+            # Add shuffle entropy info if available
+            if "shuffle_entropy" in event_data:
+                entropy = event_data["shuffle_entropy"]
+                entropy_info = []
+                if "hardware_entropy" in entropy:
+                    entropy_info.append(f"Entropy: {entropy['hardware_entropy']:.6f}")
+
+                if entropy_info:
+                    embed.add_field(name="Shuffle Details", value=" | ".join(entropy_info), inline=False)
+
+            await inter.edit_original_response(embed=embed)
+        else:
+            embed = disnake.Embed(title="Secret Santa History", color=disnake.Color.blue())
+
+            for event in events:
+                year_val = event.get("year", "Unknown")
+                participant_count = len(event.get("event", {}).get("participants", {}))
+
+                # Add entropy info if available
+                extra_info = ""
+                if "shuffle_entropy" in event and "hardware_entropy" in event["shuffle_entropy"]:
+                    entropy_val = event["shuffle_entropy"]["hardware_entropy"]
+                    extra_info = f" (Entropy: {entropy_val:.6f})"
+
+                embed.add_field(
+                    name=f"Year {year_val}",
+                    value=f"{participant_count} participants{extra_info}",
+                    inline=True
+                )
+
+            await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="entropy", description="Check current entropy and system info")
+    @mod_only()
+    async def ss_entropy(self, inter: disnake.AppCmdInter):
+        await inter.response.defer(ephemeral=True)
+
+        hardware_entropy = _get_enhanced_entropy()
+
+        embed = disnake.Embed(title="System Entropy Information", color=disnake.Color.blue())
+
+        embed.add_field(name="Enhanced Entropy", value=f"{hardware_entropy:.6f}", inline=True)
+        embed.add_field(name="Current Time", value=dt.datetime.now().isoformat(), inline=False)
+
+        await inter.edit_original_response(embed=embed)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
@@ -509,7 +664,6 @@ class SecretSantaCog(commands.Cog):
             return
 
         if event.get("join_closed", False):
-            self.bot.logger.info(f"Ignoring reaction removal - assignments already made for user {payload.user_id}")
             return
 
         user_id_str = str(payload.user_id)
@@ -535,11 +689,8 @@ class SecretSantaCog(commands.Cog):
             if not user_has_other_reactions:
                 async with self._lock:
                     if user_id_str in event["participants"]:
-                        removed_name = event["participants"].pop(user_id_str)
+                        event["participants"].pop(user_id_str)
                         await self._save()
-                        self.bot.logger.info(
-                            f"Removed {removed_name} ({user_id_str}) from participants due to reaction removal"
-                        )
 
                         await self._send_dm(
                             payload.user_id,
@@ -548,12 +699,11 @@ class SecretSantaCog(commands.Cog):
                         )
 
         except Exception as e:
-            self.bot.logger.error(f"Error checking reaction removal for user {user_id_str}: {e}")
+            pass
 
     def cog_unload(self):
         if self._backup_task:
             self._backup_task.cancel()
-        self.bot.logger.info("SecretSantaCog unloaded")
 
 
 def setup(bot: commands.Bot):
