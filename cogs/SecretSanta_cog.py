@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Callable, Set
 import disnake
 from disnake.ext import commands, tasks
 
-# Constants
 ROOT_DIR = pathlib.Path(__file__).parent
 STATE_PATH = ROOT_DIR / "secret_santa_state.json"
 BACKUP_PATH = ROOT_DIR / "secret_santa_state.bak"
@@ -22,7 +21,6 @@ ARCHIVE_DIR.mkdir(exist_ok=True)
 QUESTION_ARCHIVE_PATH = ROOT_DIR / "santa_questions.json"
 
 
-# State helpers
 def _load_state() -> Dict[str, Any]:
     for path in [STATE_PATH, BACKUP_PATH]:
         if path.exists():
@@ -55,54 +53,62 @@ def _make_assignments(participants: List[int], pair_history: Dict[str, List[int]
     if len(participants) < 2:
         raise ValueError("Need at least two participants for Secret Santa.")
 
-    # Add atmospheric randomness by shuffling with a time-based seed
     random.seed(time.time() + random.random())
 
     givers = participants.copy()
-    random.shuffle(givers)
     receivers = participants.copy()
+    random.shuffle(givers)
     random.shuffle(receivers)
 
     assigns: Dict[int, int] = {}
     attempts = 0
-    max_attempts = 100  # Prevent infinite loops
+    max_attempts = 1000
 
     while givers and attempts < max_attempts:
-        giver = givers[0]
-        valid_receivers = [
-            r for r in receivers
-            if r != giver and r not in pair_history.get(str(giver), [])
-        ]
+        givers_attempt = givers.copy()
+        receivers_attempt = receivers.copy()
+        assigns_attempt = {}
+        valid = True
 
-        if not valid_receivers:
-            # If no valid receivers, reset and try again with fresh randomness
-            random.seed(time.time() + random.random())
-            random.shuffle(givers)
-            random.shuffle(receivers)
-            attempts += 1
-            continue
+        for giver in givers_attempt:
+            valid_receivers = [
+                r for r in receivers_attempt
+                if r != giver and r not in pair_history.get(str(giver), [])
+            ]
 
-        # Weight random selection towards less frequent pairings
-        receiver = random.choice(valid_receivers)
-        assigns[giver] = receiver
+            if not valid_receivers:
+                valid = False
+                break
 
-        # Update history
+            receiver = random.choice(valid_receivers)
+            assigns_attempt[giver] = receiver
+            receivers_attempt.remove(receiver)
+
+        if valid:
+            assigns = assigns_attempt
+            break
+
+        attempts += 1
+        random.seed(time.time() + random.random() + attempts)
+
+    if attempts >= max_attempts:
+        random.shuffle(givers)
+        random.shuffle(receivers)
+        assigns = {}
+
+        for i, giver in enumerate(givers):
+            receiver_idx = (i + 1) % len(receivers)
+            assigns[giver] = receivers[receiver_idx]
+
+    for giver, receiver in assigns.items():
         if str(giver) not in pair_history:
             pair_history[str(giver)] = []
         pair_history[str(giver)].append(receiver)
-
-        givers.remove(giver)
-        receivers.remove(receiver)
-        attempts = 0
-
-    if attempts >= max_attempts:
-        raise ValueError("Could not create valid assignments after multiple attempts")
 
     return assigns
 
 
 def _load_archived_history() -> Dict[str, List[int]]:
-    """Load pairing history from all archived events"""
     history = {}
 
     for archive_file in ARCHIVE_DIR.glob("event_*.json"):
@@ -110,17 +116,13 @@ def _load_archived_history() -> Dict[str, List[int]]:
             with open(archive_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-                # Handle both old and new archive formats
                 if "event" in data and "assignments" in data["event"]:
-                    # New format: {"event": {"assignments": {...}}}
                     assignments = data["event"]["assignments"]
                 elif "assignments" in data:
-                    # Old format: {"assignments": {...}}
                     assignments = data["assignments"]
                 else:
                     continue
 
-                # Add to history
                 for giver_str, receiver_id in assignments.items():
                     if giver_str not in history:
                         history[giver_str] = []
@@ -134,7 +136,6 @@ def _load_archived_history() -> Dict[str, List[int]]:
 
 
 def _archive_current_year(event_data: Dict[str, Any], year: int):
-    """Archive the current year to a separate file"""
     archive_data = {
         "year": year,
         "event": event_data.copy(),
@@ -194,25 +195,68 @@ class SecretSantaCog(commands.Cog):
     async def _save(self):
         _save_state(self.state)
 
+    async def _send_dm(self, user_id: int, message: str, max_attempts: int = 3):
+        for attempt in range(max_attempts):
+            try:
+                user = await self.bot.fetch_user(user_id)
+                await user.send(message)
+                return True
+            except disnake.HTTPException:
+                if attempt == max_attempts - 1:
+                    self.bot.logger.warning(f"Failed to DM {user_id}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                if attempt == max_attempts - 1:
+                    self.bot.logger.error(f"Unexpected error DMing {user_id}: {e}")
+                await asyncio.sleep(1)
+        return False
+
     async def _dm_assignment(self, giver_id: int, receiver_id: int, message: str = None):
         if message is None:
             receiver_name = self._event()["participants"].get(str(receiver_id), f"User {receiver_id}")
             message = f"🎅 You are Secret Santa for {receiver_name} this year!"
+        await self._send_dm(giver_id, message)
 
-        for attempt in range(3):
+    async def _assign_role_to_participants(self, guild: disnake.Guild, role_id: int, participant_ids: List[int]):
+        role = guild.get_role(role_id)
+        if not role:
+            self.bot.logger.error(f"Role with ID {role_id} not found in guild {guild.id}")
+            return False
+
+        if not guild.me.guild_permissions.manage_roles:
+            self.bot.logger.error(f"Bot lacks 'Manage Roles' permission in guild {guild.id}")
+            return False
+
+        if role.position >= guild.me.top_role.position:
+            self.bot.logger.error(f"Role {role.name} is above bot's highest role in hierarchy")
+            return False
+
+        success_count = 0
+        failed_count = 0
+
+        for user_id in participant_ids:
             try:
-                user = await self.bot.fetch_user(giver_id)
-                receiver_name = self._event()["participants"].get(str(receiver_id), f"User {receiver_id}")
-                await user.send(message)
-                return
-            except disnake.HTTPException:
-                if attempt == 2:
-                    self.bot.logger.warning(f"Failed to DM {giver_id}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                if attempt == 2:
-                    self.bot.logger.error(f"Unexpected error DMing {giver_id}: {e}")
-                await asyncio.sleep(1)
+                member = guild.get_member(user_id)
+                if not member:
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except disnake.NotFound:
+                        self.bot.logger.warning(f"Member {user_id} not found in guild {guild.id}")
+                        failed_count += 1
+                        continue
+
+                if role not in member.roles:
+                    await member.add_roles(role, reason="Secret Santa participant")
+                    success_count += 1
+                    self.bot.logger.info(f"Successfully assigned role to {member.display_name}")
+            except disnake.Forbidden:
+                self.bot.logger.error(f"Missing permissions to assign role to {user_id}")
+                failed_count += 1
+            except disnake.HTTPException as e:
+                self.bot.logger.error(f"Error assigning role to {user_id}: {e}")
+                failed_count += 1
+
+        return {"success": success_count, "failed": failed_count}
 
     async def cog_load(self):
         self._backup_task = asyncio.create_task(self._start_backup_task())
@@ -237,16 +281,32 @@ class SecretSantaCog(commands.Cog):
     async def santa_root(self, _: disnake.AppCmdInter):
         pass
 
+    @santa_root.sub_command(name="participants", description="View current participants")
+    @mod_only()
+    async def santa_participants(self, inter: disnake.AppCmdInter):
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.send("❌ No active Secret Santa event", ephemeral=True)
+            return
+
+        participants = event["participants"]
+        if not participants:
+            await inter.send("❌ No participants yet", ephemeral=True)
+            return
+
+        participant_list = "\n".join([f"{name} (ID: {uid})" for uid, name in participants.items()])
+        await inter.send(f"**Current Participants ({len(participants)}):**\n{participant_list}", ephemeral=True)
+
     @santa_root.sub_command(name="start", description="Start a new Secret Santa event")
     @mod_only()
-    async def santa_start(self, inter: disnake.AppCmdInter, announcement_message_id: str):
-        """Start a new Secret Santa event with the given message ID"""
+    async def santa_start(self, inter: disnake.AppCmdInter, announcement_message_id: str, role_id: str):
         await inter.response.defer(ephemeral=True)
 
         try:
             message_id = int(announcement_message_id)
+            role_id_int = int(role_id)
         except ValueError:
-            await inter.edit_original_response("❌ Invalid message ID. Please provide a valid numeric message ID.")
+            await inter.edit_original_response("❌ Invalid message ID or role ID. Please provide valid numeric IDs.")
             return
 
         current_event = self._event()
@@ -254,11 +314,35 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response("❌ There's already an active Secret Santa event")
             return
 
+        participants = {}
+        message_channel_id = "UNKNOWN"
+        try:
+            for channel in inter.guild.text_channels:
+                try:
+                    message = await channel.fetch_message(message_id)
+                    message_channel_id = channel.id
+                    for reaction in message.reactions:
+                        async for user in reaction.users():
+                            if user.id == self.bot.user.id:
+                                continue
+                            if str(user.id) not in participants:
+                                member = inter.guild.get_member(user.id)
+                                name = member.display_name if member else user.name
+                                participants[str(user.id)] = name
+                    break
+                except disnake.NotFound:
+                    continue
+                except disnake.Forbidden:
+                    continue
+        except Exception as e:
+            self.bot.logger.error(f"Error fetching message or reactions: {e}")
+
         new_event = {
             "active": True,
             "join_closed": False,
             "announcement_message_id": message_id,
-            "participants": {},
+            "role_id": role_id_int,
+            "participants": participants,
             "assignments": {},
             "guild_id": inter.guild.id
         }
@@ -268,15 +352,35 @@ class SecretSantaCog(commands.Cog):
             self.state["current_year"] = dt.date.today().year
             await self._save()
 
-        await inter.edit_original_response(
+        confirmation_tasks = []
+        for user_id_str in participants:
+            user_id = int(user_id_str)
+            confirmation_tasks.append(
+                self._send_dm(user_id, "✅ You've joined Secret Santa! 🎁")
+            )
+            await asyncio.sleep(0.5)
+
+        results = await asyncio.gather(*confirmation_tasks, return_exceptions=True)
+
+        successful_dms = sum(1 for result in results if result is True)
+        failed_dms = len(results) - successful_dms
+
+        response_msg = (
             f"✅ Secret Santa {self.state['current_year']} started!\n"
-            f"Participants can react to [this message](https://discord.com/channels/{inter.guild.id}/{inter.channel.id}/{message_id}) to join."
+            f"Role ID: {role_id_int}\n"
+            f"Participants can react to [this message](https://discord.com/channels/{inter.guild.id}/{message_channel_id}/{message_id}) to join.\n"
+            f"Found {len(participants)} existing participants from reactions.\n"
+            f"Sent confirmation DMs to {successful_dms} participants."
         )
+
+        if failed_dms > 0:
+            response_msg += f"\n⚠️ Failed to send DMs to {failed_dms} participants."
+
+        await inter.edit_original_response(response_msg)
 
     @santa_root.sub_command(name="stop", description="Stop the current Secret Santa event without assigning")
     @mod_only()
     async def santa_stop(self, inter: disnake.AppCmdInter):
-        """Stop the current Secret Santa event without making assignments"""
         await inter.response.defer(ephemeral=True)
 
         event = self._event()
@@ -284,17 +388,14 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response("❌ No active Secret Santa event")
             return
 
-        # Archive to separate file
         _archive_current_year(event, self.state["current_year"])
 
         async with self._lock:
-            # Update pair history with current participants for algorithm
             participants = list(map(int, event["participants"].keys()))
             for participant in participants:
                 if str(participant) not in self.state["pair_history"]:
                     self.state["pair_history"][str(participant)] = []
 
-            # Clear current event
             self.state["current_event"] = None
             await self._save()
 
@@ -303,21 +404,21 @@ class SecretSantaCog(commands.Cog):
     @santa_root.sub_command(name="shuffle", description="Manually trigger assignment (mod only)")
     @mod_only()
     async def santa_shuffle(self, inter: disnake.AppCmdInter):
+        await inter.response.defer(ephemeral=True)
+
         event = self._event()
         if not event or not event.get("active", False):
-            await inter.send("❌ No active Secret Santa event", ephemeral=True)
+            await inter.edit_original_response("❌ No active Secret Santa event")
             return
 
         participants = list(map(int, event["participants"].keys()))
         if len(participants) < 2:
-            await inter.send("❌ Not enough participants to make assignments", ephemeral=True)
+            await inter.edit_original_response("❌ Not enough participants to make assignments")
             return
 
-        # Load both current and archived history
         combined_history = self.state.get("pair_history", {}).copy()
         archived_history = _load_archived_history()
 
-        # Merge histories
         for giver, receivers in archived_history.items():
             if giver not in combined_history:
                 combined_history[giver] = []
@@ -326,10 +427,13 @@ class SecretSantaCog(commands.Cog):
         try:
             assigns = _make_assignments(participants, combined_history)
         except ValueError as e:
-            await inter.send(f"❌ {e}", ephemeral=True)
+            await inter.edit_original_response(f"❌ {e}")
             return
 
-        # Send DMs with some festive randomness
+        role_assignment_result = await self._assign_role_to_participants(
+            inter.guild, event["role_id"], participants
+        )
+
         festive_messages = [
             "🎅 Ho ho ho! You've been assigned to gift {receiver} this year!",
             "🎄 The elves have spoken! You're gifting {receiver} this Christmas!",
@@ -337,23 +441,33 @@ class SecretSantaCog(commands.Cog):
             "🦌 Rudolph's nose glows for {receiver}! You're their Secret Santa!"
         ]
 
+        dm_tasks = []
         for giver, receiver in assigns.items():
             message = random.choice(festive_messages).format(
                 receiver=event["participants"].get(str(receiver), f"User {receiver}")
             )
-            await self._dm_assignment(giver, receiver, message)
+            dm_tasks.append(self._dm_assignment(giver, receiver, message))
+
+        await asyncio.gather(*dm_tasks)
 
         async with self._lock:
             event["assignments"] = {str(k): v for k, v in assigns.items()}
             event["join_closed"] = True
-            # Update the actual history with new assignments
             for giver, receiver in assigns.items():
                 if str(giver) not in self.state["pair_history"]:
                     self.state["pair_history"][str(giver)] = []
                 self.state["pair_history"][str(giver)].append(receiver)
             await self._save()
 
-        await inter.send("✅ Assignments shuffled and sent to participants!")
+        response_message = "✅ Assignments shuffled and sent to participants!"
+        if role_assignment_result is not False:
+            response_message += f"\n✅ Role assigned to {role_assignment_result['success']} participants."
+            if role_assignment_result['failed'] > 0:
+                response_message += f"\n⚠️ Failed to assign role to {role_assignment_result['failed']} participants (permission issues)."
+        else:
+            response_message += "\n⚠️ Could not assign role to participants (role not found)."
+
+        await inter.edit_original_response(response_message)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
@@ -382,11 +496,59 @@ class SecretSantaCog(commands.Cog):
             event["participants"][str(payload.user_id)] = name
             await self._save()
 
+        await self._send_dm(payload.user_id, "✅ You've joined Secret Santa! 🎁")
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: disnake.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return
+
+        event = self._event()
+        if (not event or not event.get("active", False) or
+                payload.message_id != event.get("announcement_message_id")):
+            return
+
+        if event.get("join_closed", False):
+            self.bot.logger.info(f"Ignoring reaction removal - assignments already made for user {payload.user_id}")
+            return
+
+        user_id_str = str(payload.user_id)
+        if user_id_str not in event["participants"]:
+            return
+
         try:
-            user = await self.bot.fetch_user(payload.user_id)
-            await user.send("✅ You've joined Secret Santa! 🎁")
-        except disnake.HTTPException:
-            pass
+            channel = self.bot.get_channel(payload.channel_id)
+            if not channel:
+                return
+
+            message = await channel.fetch_message(payload.message_id)
+
+            user_has_other_reactions = False
+            for reaction in message.reactions:
+                async for user in reaction.users():
+                    if user.id == payload.user_id:
+                        user_has_other_reactions = True
+                        break
+                if user_has_other_reactions:
+                    break
+
+            if not user_has_other_reactions:
+                async with self._lock:
+                    if user_id_str in event["participants"]:
+                        removed_name = event["participants"].pop(user_id_str)
+                        await self._save()
+                        self.bot.logger.info(
+                            f"Removed {removed_name} ({user_id_str}) from participants due to reaction removal"
+                        )
+
+                        await self._send_dm(
+                            payload.user_id,
+                            "❌ You've been removed from Secret Santa because you removed your reaction. "
+                            "If this was a mistake, please react to the announcement message again to rejoin!"
+                        )
+
+        except Exception as e:
+            self.bot.logger.error(f"Error checking reaction removal for user {user_id_str}: {e}")
 
     def cog_unload(self):
         if self._backup_task:

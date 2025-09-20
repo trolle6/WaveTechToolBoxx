@@ -465,38 +465,34 @@ class VoiceProcessingCog(commands.Cog):
                                     before: disnake.VoiceState,
                                     after: disnake.VoiceState):
         """Handle voice state changes"""
-        guild_id = member.guild.id
-
-        # Handle bot's own voice state changes
         if member.id == self.bot.user.id:
-            # Bot was disconnected
+            # Handle bot's own disconnections
             if before.channel and not after.channel:
-                self.logger.info(f"Bot was disconnected from voice in guild {guild_id}")
-                # Clean up queue if bot is disconnected
-                if guild_id in self.guild_queues:
-                    self.guild_queues[guild_id].clear()
-                # Remove from tracked voice clients
+                guild_id = member.guild.id
+                self.logger.info(f"Bot disconnected from voice in guild {guild_id}")
                 if guild_id in self.voice_clients:
                     del self.voice_clients[guild_id]
+                if guild_id in self.guild_queues:
+                    self.guild_queues[guild_id].clear()
             return
 
-        # Handle other members leaving voice channels
+        # Handle user leaving voice channels
         if before.channel and not after.channel:
-            # Check if the bot is in the channel that someone left
+            guild_id = member.guild.id
             if guild_id in self.voice_clients:
                 vc = self.voice_clients[guild_id]
                 if vc and vc.channel and vc.channel.id == before.channel.id:
-                    # Check if only the bot remains in the channel
-                    if len(before.channel.members) == 1 and before.channel.members[0].id == self.bot.user.id:
-                        self.logger.info(f"Voice channel empty, scheduling leave in 10 seconds")
-                        # Schedule to leave after delay
-                        await asyncio.sleep(10)  # 10 second delay
+                    # Check current channel members (not using before.channel which might be stale)
+                    current_channel = vc.channel
+                    if len(current_channel.members) == 1 and current_channel.members[0].id == self.bot.user.id:
+                        self.logger.info("Scheduling leave from empty channel")
+                        await asyncio.sleep(10)  # Wait 10 seconds
 
-                        # Check again if still alone
+                        # Re-check condition
                         if (vc and vc.is_connected() and vc.channel and
                                 len(vc.channel.members) == 1 and
                                 vc.channel.members[0].id == self.bot.user.id):
-                            self.logger.info(f"Leaving empty voice channel")
+                            self.logger.info("Leaving empty voice channel")
                             await vc.disconnect()
                             if guild_id in self.voice_clients:
                                 del self.voice_clients[guild_id]

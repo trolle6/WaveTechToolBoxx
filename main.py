@@ -4,6 +4,8 @@ import sys
 import signal
 import asyncio
 import logging
+import time
+import psutil
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Optional, List
 from dataclasses import dataclass, field
@@ -12,10 +14,8 @@ import disnake
 from disnake.ext import commands
 from dotenv import load_dotenv
 
-# --- Constants ---
 MAX_MESSAGE_LENGTH = 1990
 
-# --- Configuration Dataclasses ---
 @dataclass
 class DiscordConfig:
     guild_id: int
@@ -54,10 +54,8 @@ class Config:
     dalle: DalleConfig
     prefix: str = "!"
 
-# Suppress the RuntimeWarning about never awaited coroutines
 warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
 
-# --- Load and validate environment ---
 load_dotenv("config.env")
 
 def get_env_or_exit(var: str, default: Optional[str] = None) -> str:
@@ -119,7 +117,6 @@ def load_config() -> Config:
 
 config = load_config()
 
-# --- Logging Setup ---
 def setup_logger(cfg: Config) -> logging.Logger:
     logger = logging.getLogger("bot_logger")
     if logger.handlers:
@@ -144,13 +141,11 @@ def setup_logger(cfg: Config) -> logging.Logger:
 logger = setup_logger(config)
 logger.debug("Logger initialized.")
 
-# --- Bot Initialization ---
 intents = disnake.Intents.all()
 bot = commands.InteractionBot(intents=intents)
 bot.config = config
 bot.logger = logger
 
-# --- Discord Log Handler ---
 class DiscordLogHandler(logging.Handler):
     def __init__(self, bot: commands.Bot, channel_id: int):
         super().__init__()
@@ -191,12 +186,10 @@ async def on_ready() -> None:
 
 @bot.event
 async def on_interaction(inter: disnake.Interaction):
-    """Global interaction handler to prevent TTS from intercepting Santa commands"""
     if inter.type == disnake.InteractionType.application_command:
         cmd_name = inter.application_command.qualified_name
         if cmd_name.startswith("santa"):
-            return  # Let Santa commands handle themselves
-    # Let other interactions be handled normally
+            return
 
 @bot.event
 async def on_error(event_method: str, *args: Any, **kwargs: Any) -> None:
@@ -219,48 +212,50 @@ async def on_guild_join(guild: disnake.Guild) -> None:
         logger.warning(f"Joined unauthorized guild {guild.id}, leaving.")
         await guild.leave()
 
-
-# In main.py, enhance the shutdown function:
-# In main.py, restore the original shutdown function and add the enhancement:
 async def shutdown():
     logger.info("Shutdown initiated.")
 
-    # Close all HTTP sessions in cogs (NEW)
+    tasks = []
+
     for cog_name, cog in bot.cogs.items():
         if hasattr(cog, 'http_session') and cog.http_session and not cog.http_session.closed:
-            await cog.http_session.close()
+            tasks.append(cog.http_session.close())
         if hasattr(cog, 'http') and cog.http and not cog.http.closed:
-            await cog.http.close()
+            tasks.append(cog.http.close())
 
-    try:
-        for vc in bot.voice_clients:
-            try:
-                await vc.disconnect(force=True)
-            except Exception as e:
-                logger.error(f"Error disconnecting voice client: {e}")
+    for vc in bot.voice_clients:
+        tasks.append(vc.disconnect(force=True))
 
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
+    for task in asyncio.all_tasks():
+        if task is not asyncio.current_task():
             task.cancel()
 
-        try:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10.0)
-        except asyncio.TimeoutError:
-            logger.warning("Some tasks didn't complete in time during shutdown")
-
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
     finally:
         await bot.close()
 
+@bot.slash_command(name="health", description="Check bot health status")
+async def health_check(inter: disnake.ApplicationCommandInteraction):
+    status = {
+        "uptime": time.time() - bot.start_time if hasattr(bot, 'start_time') else "unknown",
+        "cogs_loaded": len(bot.cogs),
+        "voice_clients": len(bot.voice_clients),
+        "memory_usage": f"{psutil.Process().memory_info().rss / 1024 / 1024:.2f} MB" if 'psutil' in globals() else "N/A"
+    }
 
-# Signal handlers
+    embed = disnake.Embed(title="🤖 Bot Health Status", color=disnake.Color.green())
+    for key, value in status.items():
+        embed.add_field(name=key.replace('_', ' ').title(), value=str(value), inline=True)
+
+    await inter.response.send_message(embed=embed)
+
 for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, lambda *_: asyncio.create_task(shutdown()))
 
-# --- Load Cogs with better error handling ---
 def load_cogs_safely():
-    """Load cogs with proper error handling"""
     cogs_to_load = [
         "cogs.SecretSanta_cog",
         "cogs.voice_processing_cog",
@@ -280,8 +275,6 @@ def load_cogs_safely():
 
     return loaded_cogs
 
-
-# Add this function to your main.py
 def validate_environment():
     required_vars = [
         "DISCORD_TOKEN",
@@ -296,14 +289,11 @@ def validate_environment():
         logger.critical(f"Missing required environment variables: {', '.join(missing_vars)}")
         sys.exit(1)
 
-
-# Call it in your main function:
 if __name__ == "__main__":
     validate_environment()
     logger.info("Starting bot...")
 
 async def keep_alive():
-    """Prevent the bot from exiting unexpectedly"""
     while True:
         await asyncio.sleep(3600)
         logger.debug("Keep-alive ping")
