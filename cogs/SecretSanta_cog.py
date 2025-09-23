@@ -21,6 +21,8 @@ BACKUP_PATH = ROOT_DIR / "secret_santa_state.bak"
 ARCHIVE_DIR = ROOT_DIR / "archive"
 ARCHIVE_DIR.mkdir(exist_ok=True)
 QUESTION_ARCHIVE_PATH = ROOT_DIR / "santa_questions.json"
+# Use only ARCHIVE_DIR, remove HISTORY_DIR completely
+HISTORY_DIR = ARCHIVE_DIR
 
 try:
     import psutil
@@ -94,6 +96,26 @@ def _save_questions(questions: Dict[str, Any]) -> None:
     temp_path.replace(QUESTION_ARCHIVE_PATH)
 
 
+def _load_historical_assignments() -> Dict[str, Dict[str, Any]]:
+    """Load all historical assignments from archive directory"""
+    historical_data = {}
+
+    for history_file in ARCHIVE_DIR.glob("*.json"):
+        try:
+            year = history_file.stem
+            # Only load year files (not event files)
+            if not year.isdigit() or history_file.name.startswith('event_'):
+                continue
+
+            with open(history_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                historical_data[year] = data
+        except (json.JSONDecodeError, FileNotFoundError):
+            continue
+
+    return historical_data
+
+
 def _make_assignments(participants: List[int], pair_history: Dict[str, List[int]]) -> Dict[int, int]:
     if len(participants) < 2:
         raise ValueError("Need at least two participants for Secret Santa.")
@@ -164,6 +186,7 @@ def _make_assignments(participants: List[int], pair_history: Dict[str, List[int]
 
 
 def _load_archived_history() -> Dict[str, List[int]]:
+    """Load historical assignments from archived events - FIXED VERSION"""
     history = {}
 
     for archive_file in ARCHIVE_DIR.glob("event_*.json"):
@@ -171,37 +194,65 @@ def _load_archived_history() -> Dict[str, List[int]]:
             with open(archive_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
+                # Handle different archive formats
+                assignments = None
+
+                # Format 1: New format with event wrapper
                 if "event" in data and "assignments" in data["event"]:
                     assignments = data["event"]["assignments"]
+                # Format 2: Direct assignments in event file
                 elif "assignments" in data:
                     assignments = data["assignments"]
                 else:
                     continue
 
-                for giver_str, receiver_id in assignments.items():
-                    if giver_str not in history:
-                        history[giver_str] = []
-                    history[giver_str].append(int(receiver_id))
+                # Handle both dictionary and list formats
+                if isinstance(assignments, dict):
+                    # Dictionary format: {giver_id: receiver_id}
+                    for giver_str, receiver_id in assignments.items():
+                        if giver_str not in history:
+                            history[giver_str] = []
+                        history[giver_str].append(int(receiver_id))
+                elif isinstance(assignments, list):
+                    # List format: [{giver_id: ..., receiver_id: ...}]
+                    for assignment in assignments:
+                        # Skip special assignments with multiple givers
+                        if "giver_ids" in assignment:
+                            continue
 
-        except (json.JSONDecodeError, FileNotFoundError, KeyError) as e:
+                        if "giver_id" in assignment and "receiver_id" in assignment:
+                            giver_str = str(assignment["giver_id"])
+                            receiver_id = assignment["receiver_id"]
+
+                            if giver_str not in history:
+                                history[giver_str] = []
+                            history[giver_str].append(int(receiver_id))
+
+        except (json.JSONDecodeError, FileNotFoundError, KeyError, TypeError, ValueError) as e:
             continue
 
     return history
 
 
 def _get_archived_events() -> List[Dict[str, Any]]:
-    """Get all archived events with detailed information"""
+    """Get all archived events with detailed information - FIXED VERSION"""
     events = []
 
     for archive_file in ARCHIVE_DIR.glob("event_*.json"):
         try:
             with open(archive_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+
+                # Extract year from filename as fallback
+                filename_year = archive_file.stem.replace("event_", "")
+                if filename_year.isdigit():
+                    data["filename_year"] = int(filename_year)
+
                 events.append(data)
         except (json.JSONDecodeError, FileNotFoundError):
             continue
 
-    return sorted(events, key=lambda x: x.get("year", 0), reverse=True)
+    return sorted(events, key=lambda x: x.get("year", x.get("filename_year", 0)), reverse=True)
 
 
 def _archive_current_year(event_data: Dict[str, Any], year: int):
@@ -223,6 +274,36 @@ def _archive_current_year(event_data: Dict[str, Any], year: int):
             json.dump(archive_data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         pass
+
+
+def _save_historical_gift(year: int, giver_id: str, giver_name: str, receiver_id: str, receiver_name: str,
+                          gift_description: str):
+    """Save gift submission to historical records"""
+    year_file = ARCHIVE_DIR / f"{year}.json"
+
+    try:
+        if year_file.exists():
+            with open(year_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            data = {"year": year, "assignments": {}}
+
+        assignment_key = f"{giver_id}_{receiver_id}"
+        data["assignments"][assignment_key] = {
+            "giver_id": giver_id,
+            "giver_name": giver_name,
+            "receiver_id": receiver_id,
+            "receiver_name": receiver_name,
+            "gift": gift_description,
+            "submitted_at": time.time(),
+            "timestamp": dt.datetime.now().isoformat()
+        }
+
+        with open(year_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        print(f"Error saving historical gift: {e}")
 
 
 def mod_only():
@@ -263,6 +344,7 @@ class SecretSantaCog(commands.Cog):
         self.bot = bot
         self.state = _load_state()
         self.questions = _load_questions()
+        self.historical_data = _load_historical_assignments()
         self._lock = asyncio.Lock()
         self._backup_task = None
 
@@ -291,7 +373,9 @@ class SecretSantaCog(commands.Cog):
     async def _dm_assignment(self, giver_id: int, receiver_id: int, message: str = None):
         if message is None:
             receiver_name = self._event()["participants"].get(str(receiver_id), f"User {receiver_id}")
-            message = f"🎅 You are Secret Santa for {receiver_name} this year!"
+            # Use Discord mention format which shows as a blue link with user popup
+            receiver_mention = f"<@{receiver_id}>"
+            message = f"🎅 You are Secret Santa for {receiver_mention} ({receiver_name}) this year!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!"
         await self._send_dm(giver_id, message)
 
     async def _assign_role_to_participants(self, guild: disnake.Guild, role_id: int, participant_ids: List[int]):
@@ -384,6 +468,11 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response("❌ There's already an active Secret Santa event")
             return
 
+        # Check if we should start a new year
+        current_year = dt.date.today().year
+        if current_year != self.state.get("current_year", current_year):
+            self.state["current_year"] = current_year
+
         participants = {}
         message_channel_id = "UNKNOWN"
         try:
@@ -414,19 +503,20 @@ class SecretSantaCog(commands.Cog):
             "role_id": role_id_int,
             "participants": participants,
             "assignments": {},
-            "guild_id": inter.guild.id
+            "guild_id": inter.guild.id,
+            "gift_submissions": {}  # New field for gift submissions
         }
 
         async with self._lock:
             self.state["current_event"] = new_event
-            self.state["current_year"] = dt.date.today().year
             await self._save()
 
         confirmation_tasks = []
         for user_id_str in participants:
             user_id = int(user_id_str)
             confirmation_tasks.append(
-                self._send_dm(user_id, "✅ You've joined Secret Santa! 🎁")
+                self._send_dm(user_id,
+                              f"✅ You've joined Secret Santa {current_year}! 🎁\n\nReact to the announcement message to join or leave the event.")
             )
             await asyncio.sleep(0.5)
 
@@ -436,7 +526,7 @@ class SecretSantaCog(commands.Cog):
         failed_dms = len(results) - successful_dms
 
         response_msg = (
-            f"✅ Secret Santa {self.state['current_year']} started!\n"
+            f"✅ Secret Santa {current_year} started!\n"
             f"Role ID: {role_id_int}\n"
             f"Participants can react to [this message](https://discord.com/channels/{inter.guild.id}/{message_channel_id}/{message_id}) to join.\n"
             f"Found {len(participants)} existing participants from reactions.\n"
@@ -509,17 +599,17 @@ class SecretSantaCog(commands.Cog):
         )
 
         festive_messages = [
-            "🎅 Ho ho ho! You've been assigned to gift {receiver} this year!",
-            "🎄 The elves have spoken! You're gifting {receiver} this Christmas!",
-            "✨ The magic of Christmas pairs you with {receiver}!",
-            "🦌 Rudolph's nose glows for {receiver}! You're their Secret Santa!"
+            "🎅 Ho ho ho! You've been assigned to gift {receiver_mention} this year!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
+            "🎄 The elves have spoken! You're gifting {receiver_mention} this Christmas!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
+            "✨ The magic of Christmas pairs you with {receiver_mention}!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
+            "🦌 Rudolph's nose glows for {receiver_mention}! You're their Secret Santa!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!"
         ]
 
         dm_tasks = []
         for giver, receiver in assigns.items():
-            message = random.choice(festive_messages).format(
-                receiver=event["participants"].get(str(receiver), f"User {receiver}")
-            )
+            receiver_name = event["participants"].get(str(receiver), f"User {receiver}")
+            receiver_mention = f"<@{receiver}>"
+            message = random.choice(festive_messages).format(receiver_mention=receiver_mention)
             dm_tasks.append(self._dm_assignment(giver, receiver, message))
 
         await asyncio.gather(*dm_tasks)
@@ -545,66 +635,207 @@ class SecretSantaCog(commands.Cog):
 
         await inter.edit_original_response(response_message)
 
-    @ss_root.sub_command(name="history", description="Show previous Secret Santa events")
+    @ss_root.sub_command(name="submit_gift", description="Submit your gift description for historical records")
+    @participant_only()
+    async def ss_submit_gift(self, inter: disnake.AppCmdInter, gift_description: str):
+        """Submit your gift description to be recorded in the historical archives"""
+        await inter.response.defer(ephemeral=True)
+
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.edit_original_response("❌ No active Secret Santa event")
+            return
+
+        user_id = str(inter.author.id)
+
+        # Check if user has an assignment
+        if user_id not in event.get("assignments", {}):
+            await inter.edit_original_response("❌ You don't have a Secret Santa assignment yet!")
+            return
+
+        receiver_id = event["assignments"][user_id]
+        receiver_name = event["participants"].get(str(receiver_id), f"User {receiver_id}")
+        giver_name = event["participants"].get(user_id, f"User {user_id}")
+
+        # Save to historical records
+        _save_historical_gift(
+            self.state["current_year"],
+            user_id,
+            giver_name,
+            str(receiver_id),
+            receiver_name,
+            gift_description
+        )
+
+        # Also save to current event for moderation purposes
+        async with self._lock:
+            if "gift_submissions" not in event:
+                event["gift_submissions"] = {}
+            event["gift_submissions"][user_id] = {
+                "gift": gift_description,
+                "submitted_at": time.time(),
+                "timestamp": dt.datetime.now().isoformat(),
+                "receiver_id": receiver_id,
+                "receiver_name": receiver_name
+            }
+            await self._save()
+
+        await inter.edit_original_response(
+            f"✅ Gift submitted successfully!\n\n"
+            f"**Your Gift for {receiver_name}:**\n"
+            f"{gift_description}\n\n"
+            f"This has been recorded in the Secret Santa {self.state['current_year']} archives!"
+        )
+
+    @ss_root.sub_command(name="view_gifts", description="View submitted gifts for this year")
     @mod_only()
+    async def ss_view_gifts(self, inter: disnake.AppCmdInter):
+        """View all gift submissions for the current year"""
+        await inter.response.defer(ephemeral=True)
+
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.edit_original_response("❌ No active Secret Santa event")
+            return
+
+        submissions = event.get("gift_submissions", {})
+        if not submissions:
+            await inter.edit_original_response("❌ No gifts have been submitted yet.")
+            return
+
+        embed = disnake.Embed(
+            title=f"Secret Santa {self.state['current_year']} - Gift Submissions",
+            color=disnake.Color.green()
+        )
+
+        for submitter_id, submission in submissions.items():
+            submitter_name = event["participants"].get(submitter_id, f"User {submitter_id}")
+            receiver_name = submission.get("receiver_name", "Unknown")
+
+            gift_text = submission["gift"]
+            if len(gift_text) > 500:
+                gift_text = gift_text[:497] + "..."
+
+            embed.add_field(
+                name=f"🎁 {submitter_name} → {receiver_name}",
+                value=gift_text,
+                inline=False
+            )
+
+        await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="history", description="Show previous Secret Santa events")
     async def ss_history(self, inter: disnake.AppCmdInter, year: int = None):
         await inter.response.defer(ephemeral=True)
 
+        # Load both archived events and historical gift data
         events = _get_archived_events()
-        if not events:
+        historical_data = _load_historical_assignments()
+
+        if not events and not historical_data:
             await inter.edit_original_response("No archived events found.")
             return
 
         if year:
-            event_data = next((e for e in events if e.get("year") == year), None)
-            if not event_data:
+            # Try to find event data
+            event_data = next((e for e in events if e.get("year") == year or e.get("filename_year") == year), None)
+            historical_year_data = historical_data.get(str(year))
+
+            if not event_data and not historical_year_data:
                 await inter.edit_original_response(f"No event found for year {year}")
                 return
 
             embed = disnake.Embed(title=f"Secret Santa {year}", color=disnake.Color.gold())
 
-            # Add event details
-            if "event" in event_data:
-                event_info = event_data["event"]
-                if "participants" in event_info:
-                    participant_count = len(event_info["participants"])
+            # Add event details if available
+            participant_count = 0
+            if event_data:
+                # Handle different event formats
+                if "event" in event_data and "participants" in event_data["event"]:
+                    participant_count = len(event_data["event"]["participants"])
+                elif "assignments" in event_data and isinstance(event_data["assignments"], list):
+                    # Count unique participants from assignments list
+                    participants_set = set()
+                    for assignment in event_data["assignments"]:
+                        if "giver_id" in assignment:
+                            participants_set.add(assignment["giver_id"])
+                        if "receiver_id" in assignment:
+                            participants_set.add(assignment["receiver_id"])
+                    participant_count = len(participants_set)
+
+                if participant_count > 0:
                     embed.add_field(name="Participants", value=str(participant_count), inline=True)
 
-                if "assignments" in event_info:
-                    assignments_text = "\n".join(
-                        [f"<@{giver}> → <@{receiver}>" for giver, receiver in event_info["assignments"].items()]
-                    )
-                    if len(assignments_text) > 1024:
-                        assignments_text = assignments_text[:1020] + "..."
-                    embed.add_field(name="Assignments", value=assignments_text, inline=False)
-
-            # Add shuffle entropy info if available
-            if "shuffle_entropy" in event_data:
-                entropy = event_data["shuffle_entropy"]
-                entropy_info = []
-                if "hardware_entropy" in entropy:
-                    entropy_info.append(f"Entropy: {entropy['hardware_entropy']:.6f}")
-
-                if entropy_info:
-                    embed.add_field(name="Shuffle Details", value=" | ".join(entropy_info), inline=False)
+            # Add gift assignments from historical data
+            gift_text = ""
+            if historical_year_data and "assignments" in historical_year_data:
+                assignments = historical_year_data["assignments"]
+                if assignments:
+                    gifts_text = "\n".join([
+                        f"<@{data['giver_id']}> → <@{data['receiver_id']}>: {data['gift']}"
+                        for data in assignments.values()
+                    ])
+                    if len(gifts_text) > 1024:
+                        gifts_text = gifts_text[:1020] + "..."
+                    embed.add_field(name="🎁 Gift Assignments", value=gifts_text, inline=False)
+            elif event_data and "assignments" in event_data:
+                # Handle event file assignments
+                assignments = event_data["assignments"]
+                if isinstance(assignments, list):
+                    gifts_text = "\n".join([
+                        f"<@{assignment['giver_id']}> → <@{assignment['receiver_id']}>: {assignment['gift']}"
+                        for assignment in assignments
+                        if "giver_id" in assignment and "receiver_id" in assignment and "gift" in assignment
+                    ])
+                    if gifts_text and len(gifts_text) > 1024:
+                        gifts_text = gifts_text[:1020] + "..."
+                    if gifts_text:
+                        embed.add_field(name="🎁 Gift Assignments", value=gifts_text, inline=False)
 
             await inter.edit_original_response(embed=embed)
         else:
             embed = disnake.Embed(title="Secret Santa History", color=disnake.Color.blue())
 
-            for event in events:
-                year_val = event.get("year", "Unknown")
-                participant_count = len(event.get("event", {}).get("participants", {}))
+            # Combine events from both sources
+            all_years = set()
+            if events:
+                for event in events:
+                    year_val = event.get("year") or event.get("filename_year")
+                    if year_val:
+                        all_years.add(year_val)
+            if historical_data:
+                all_years.update([int(y) for y in historical_data.keys() if y.isdigit()])
 
-                # Add entropy info if available
-                extra_info = ""
-                if "shuffle_entropy" in event and "hardware_entropy" in event["shuffle_entropy"]:
-                    entropy_val = event["shuffle_entropy"]["hardware_entropy"]
-                    extra_info = f" (Entropy: {entropy_val:.6f})"
+            for year_val in sorted(all_years, reverse=True):
+                year_str = str(year_val)
+
+                # Get participant count from events
+                participant_count = 0
+                event_for_year = next(
+                    (e for e in events if e.get("year") == year_val or e.get("filename_year") == year_val), None)
+                if event_for_year:
+                    if "event" in event_for_year and "participants" in event_for_year["event"]:
+                        participant_count = len(event_for_year["event"].get("participants", {}))
+                    elif "assignments" in event_for_year and isinstance(event_for_year["assignments"], list):
+                        participants_set = set()
+                        for assignment in event_for_year["assignments"]:
+                            if "giver_id" in assignment:
+                                participants_set.add(assignment["giver_id"])
+                            if "receiver_id" in assignment:
+                                participants_set.add(assignment["receiver_id"])
+                        participant_count = len(participants_set)
+
+                # Get gift count from historical data
+                gift_count = 0
+                if year_str in historical_data and "assignments" in historical_data[year_str]:
+                    gift_count = len(historical_data[year_str]["assignments"])
+                elif event_for_year and "assignments" in event_for_year:
+                    if isinstance(event_for_year["assignments"], list):
+                        gift_count = len([a for a in event_for_year["assignments"] if "gift" in a])
 
                 embed.add_field(
                     name=f"Year {year_val}",
-                    value=f"{participant_count} participants{extra_info}",
+                    value=f"👥 {participant_count} participants | 🎁 {gift_count} gifts recorded",
                     inline=True
                 )
 
@@ -621,8 +852,45 @@ class SecretSantaCog(commands.Cog):
 
         embed.add_field(name="Enhanced Entropy", value=f"{hardware_entropy:.6f}", inline=True)
         embed.add_field(name="Current Time", value=dt.datetime.now().isoformat(), inline=False)
+        embed.add_field(name="Current Year", value=str(self.state["current_year"]), inline=True)
 
         await inter.edit_original_response(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: disnake.Message):
+        """Handle DM questions between Secret Santa participants"""
+        # Ignore messages from bots
+        if message.author.bot:
+            return
+
+        # Only process DMs
+        if not isinstance(message.channel, disnake.DMChannel):
+            return
+
+        event = self._event()
+        if not event or not event.get("active", False):
+            return
+
+        # Check if the sender is a participant
+        sender_id = str(message.author.id)
+        if sender_id not in event.get("participants", {}):
+            return
+
+        # Check if the sender has an assignment (is a giver)
+        if sender_id not in event.get("assignments", {}):
+            return
+
+        # Get the receiver ID (the giftee)
+        receiver_id = event["assignments"][sender_id]
+        receiver_user = await self.bot.fetch_user(receiver_id)
+
+        # Forward the message to the giftee
+        try:
+            sender_name = event["participants"].get(sender_id, f"User {sender_id}")
+            await receiver_user.send(f"**Question from your Secret Santa ({sender_name}):**\n{message.content}")
+            await message.author.send("✅ Your question has been sent to your giftee!")
+        except Exception as e:
+            await message.author.send("❌ Failed to send your question. Your giftee might have DMs disabled.")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
@@ -651,7 +919,8 @@ class SecretSantaCog(commands.Cog):
             event["participants"][str(payload.user_id)] = name
             await self._save()
 
-        await self._send_dm(payload.user_id, "✅ You've joined Secret Santa! 🎁")
+        await self._send_dm(payload.user_id,
+                            f"✅ You've joined Secret Santa {self.state['current_year']}! 🎁\n\nYou'll receive your assignment when the event starts!")
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: disnake.RawReactionActionEvent):

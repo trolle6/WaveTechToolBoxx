@@ -1,27 +1,54 @@
 {
   "year": 2021,
-  "event": {
-    "active": false,
-    "join_closed": true,
-    "announcement_message_id": 918900249693663272,
-    "participants": {
-      "251835504654286852": "trolle",
-      "185834053558075392": "jkm",
-      "188187888289054720": "m³",
-      "306569126141493249": "huntoon",
-      "436968543796592650": "eagler",
-      "725334060666192004": "eagle"
+  "assignments": [
+    {
+      "giver_id": "251835504654286852",
+      "giver_name": "trolle",
+      "receiver_id": "436968543796592650",
+      "receiver_name": "eagler",
+      "gift": "3x3 mapart"
     },
-    "assignments": {
-      "251835504654286852": 436968543796592650,
-      "436968543796592650": 725334060666192004,
-      "185834053558075392": 188187888289054720,
-      "188187888289054720": 251835504654286852,
-      "306569126141493249": 185834053558075392,
-      "725334060666192004": 306569126141493249
+    {
+      "giver_id": "436968543796592650",
+      "giver_name": "eagler",
+      "receiver_id": "725334060666192004",
+      "receiver_name": "eagle",
+      "gift": "Eagle statue"
     },
-    "guild_id": 601161964688900117
-  },
-  "archived_at": 1640380800,
-  "timestamp": "2021-12-24T00:00:00"
+    {
+      "giver_id": "725334060666192004",
+      "giver_name": "eagle",
+      "receiver_id": "306569126141493249",
+      "receiver_name": "huntoon",
+      "gift": "Nice message"
+    },
+    {
+      "giver_id": "306569126141493249",
+      "giver_name": "huntoon",
+      "receiver_id": "905124701284737034",
+      "receiver_name": "twiti",
+      "gift": "Shulker of netherite hoes"
+    },
+    {
+      "giver_id": "905124701284737034",
+      "giver_name": "twiti",
+      "receiver_id": "185834053558075392",
+      "receiver_name": "jkm",
+      "gift": "Giant traffic cone"
+    },
+    {
+      "giver_id": "185834053558075392",
+      "giver_name": "jkm",
+      "receiver_id": "188187888289054720",
+      "receiver_name": "m³",
+      "gift": "9 netherite blocks and 2 maparts"
+    },
+    {
+      "giver_id": "188187888289054720",
+      "giver_name": "m³",
+      "receiver_id": "251835504654286852",
+      "receiver_name": "trolle",
+      "gift": "Redstone box maker"
+    }
+  ]
 }
