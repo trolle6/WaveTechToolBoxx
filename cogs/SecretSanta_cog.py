@@ -72,8 +72,13 @@ def _load_state() -> Dict[str, Any]:
     for path in [STATE_PATH, BACKUP_PATH]:
         if path.exists():
             try:
-                return json.loads(path.read_text())
-            except json.JSONDecodeError:
+                content = path.read_text().strip()
+                if not content:  # Handle empty files
+                    print(f"Warning: {path} is empty, using default state")
+                    continue
+                return json.loads(content)
+            except json.JSONDecodeError as e:
+                print(f"Warning: {path} contains invalid JSON: {e}, trying backup")
                 continue
     return {"pair_history": {}, "current_year": dt.date.today().year, "current_event": None}
 
@@ -86,7 +91,13 @@ def _save_state(state: Dict[str, Any]) -> None:
 
 def _load_questions() -> Dict[str, Any]:
     if QUESTION_ARCHIVE_PATH.exists():
-        return json.loads(QUESTION_ARCHIVE_PATH.read_text())
+        try:
+            content = QUESTION_ARCHIVE_PATH.read_text().strip()
+            if not content:  # Handle empty files
+                return {"questions": {}}
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"Warning: {QUESTION_ARCHIVE_PATH} contains invalid JSON: {e}, using default")
     return {"questions": {}}
 
 
@@ -107,9 +118,12 @@ def _load_historical_assignments() -> Dict[str, Dict[str, Any]]:
             if not year.isdigit() or history_file.name.startswith('event_'):
                 continue
 
-            with open(history_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                historical_data[year] = data
+            content = history_file.read_text().strip()
+            if not content:  # Skip empty files
+                continue
+
+            data = json.loads(content)
+            historical_data[year] = data
         except (json.JSONDecodeError, FileNotFoundError):
             continue
 
@@ -375,7 +389,7 @@ class SecretSantaCog(commands.Cog):
             receiver_name = self._event()["participants"].get(str(receiver_id), f"User {receiver_id}")
             # Use Discord mention format which shows as a blue link with user popup
             receiver_mention = f"<@{receiver_id}>"
-            message = f"🎅 You are Secret Santa for {receiver_mention} ({receiver_name}) this year!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!"
+            message = f"🎅 You are Secret Santa for {receiver_mention} ({receiver_name}) this year!\n\n💬 **You can ask anonymous questions to your giftee using `/ss ask_giftee`!**\n📨 **Your giftee can reply using `/ss reply_santa`!**\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!"
         await self._send_dm(giver_id, message)
 
     async def _assign_role_to_participants(self, guild: disnake.Guild, role_id: int, participant_ids: List[int]):
@@ -504,7 +518,8 @@ class SecretSantaCog(commands.Cog):
             "participants": participants,
             "assignments": {},
             "guild_id": inter.guild.id,
-            "gift_submissions": {}  # New field for gift submissions
+            "gift_submissions": {},  # New field for gift submissions
+            "communications": {}  # Track ongoing communications
         }
 
         async with self._lock:
@@ -599,10 +614,10 @@ class SecretSantaCog(commands.Cog):
         )
 
         festive_messages = [
-            "🎅 Ho ho ho! You've been assigned to gift {receiver_mention} this year!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
-            "🎄 The elves have spoken! You're gifting {receiver_mention} this Christmas!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
-            "✨ The magic of Christmas pairs you with {receiver_mention}!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
-            "🦌 Rudolph's nose glows for {receiver_mention}! You're their Secret Santa!\n\n💬 **You can ask any questions to your giftee in this DM!**\nThey'll be able to reply here as well.\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!"
+            "🎅 Ho ho ho! You've been assigned to gift {receiver_mention} this year!\n\n💬 **You can ask anonymous questions to your giftee using `/ss ask_giftee`!**\n📨 **Your giftee can reply using `/ss reply_santa`!**\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
+            "🎄 The elves have spoken! You're gifting {receiver_mention} this Christmas!\n\n💬 **You can ask anonymous questions to your giftee using `/ss ask_giftee`!**\n📨 **Your giftee can reply using `/ss reply_santa`!**\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
+            "✨ The magic of Christmas pairs you with {receiver_mention}!\n\n💬 **You can ask anonymous questions to your giftee using `/ss ask_giftee`!**\n📨 **Your giftee can reply using `/ss reply_santa`!**\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!",
+            "🦌 Rudolph's nose glows for {receiver_mention}! You're their Secret Santa!\n\n💬 **You can ask anonymous questions to your giftee using `/ss ask_giftee`!**\n📨 **Your giftee can reply using `/ss reply_santa`!**\n\n📝 **After you've gifted**, use `/ss submit_gift` to record what you gave for the historical archives!"
         ]
 
         dm_tasks = []
@@ -634,6 +649,101 @@ class SecretSantaCog(commands.Cog):
             response_message += "\n⚠️ Could not assign role to participants (role not found)."
 
         await inter.edit_original_response(response_message)
+
+    @ss_root.sub_command(name="ask_giftee", description="Ask your giftee an anonymous question")
+    @participant_only()
+    async def ss_ask_giftee(self, inter: disnake.AppCmdInter, question: str):
+        """Ask your giftee a question anonymously"""
+        await inter.response.defer(ephemeral=True)
+
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.edit_original_response("❌ No active Secret Santa event")
+            return
+
+        user_id = str(inter.author.id)
+
+        # Check if user has an assignment (is a Santa)
+        if user_id not in event.get("assignments", {}):
+            await inter.edit_original_response("❌ You don't have a Secret Santa assignment yet!")
+            return
+
+        receiver_id = event["assignments"][user_id]
+        receiver_name = event["participants"].get(str(receiver_id), f"User {receiver_id}")
+
+        # Send the question to the giftee
+        try:
+            receiver_user = await self.bot.fetch_user(receiver_id)
+            await receiver_user.send(
+                f"🎅 **Anonymous question from your Secret Santa:**\n\n{question}\n\n"
+                f"💬 *You can reply using `/ss reply_santa`*"
+            )
+
+            # Store the communication thread
+            async with self._lock:
+                if "communications" not in event:
+                    event["communications"] = {}
+                if user_id not in event["communications"]:
+                    event["communications"][user_id] = {"giftee_id": receiver_id, "thread": []}
+                event["communications"][user_id]["thread"].append({
+                    "type": "question",
+                    "message": question,
+                    "timestamp": time.time()
+                })
+                await self._save()
+
+            await inter.edit_original_response(f"✅ Your anonymous question has been sent to your giftee!")
+        except Exception as e:
+            await inter.edit_original_response("❌ Failed to send question. Your giftee might have DMs disabled.")
+
+    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa's question")
+    @participant_only()
+    async def ss_reply_santa(self, inter: disnake.AppCmdInter, reply: str):
+        """Reply to your Santa's question anonymously"""
+        await inter.response.defer(ephemeral=True)
+
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.edit_original_response("❌ No active Secret Santa event")
+            return
+
+        user_id = str(inter.author.id)
+
+        # Find who is the Santa for this user (reverse lookup)
+        santa_id = None
+        for santa, giftee in event.get("assignments", {}).items():
+            if giftee == int(user_id):
+                santa_id = santa
+                break
+
+        if not santa_id:
+            await inter.edit_original_response("❌ No Santa has asked you a question yet!")
+            return
+
+        # Send the reply to the Santa
+        try:
+            santa_user = await self.bot.fetch_user(int(santa_id))
+            await santa_user.send(
+                f"📨 **Anonymous reply from your giftee:**\n\n{reply}\n\n"
+                f"💬 *You can ask more questions using `/ss ask_giftee`*"
+            )
+
+            # Store the communication thread
+            async with self._lock:
+                if "communications" not in event:
+                    event["communications"] = {}
+                if santa_id not in event["communications"]:
+                    event["communications"][santa_id] = {"giftee_id": user_id, "thread": []}
+                event["communications"][santa_id]["thread"].append({
+                    "type": "reply",
+                    "message": reply,
+                    "timestamp": time.time()
+                })
+                await self._save()
+
+            await inter.edit_original_response(f"✅ Your anonymous reply has been sent to your Secret Santa!")
+        except Exception as e:
+            await inter.edit_original_response("❌ Failed to send reply. Your Santa might have DMs disabled.")
 
     @ss_root.sub_command(name="submit_gift", description="Submit your gift description for historical records")
     @participant_only()
@@ -719,6 +829,49 @@ class SecretSantaCog(commands.Cog):
             embed.add_field(
                 name=f"🎁 {submitter_name} → {receiver_name}",
                 value=gift_text,
+                inline=False
+            )
+
+        await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="view_communications", description="View communication threads (mod only)")
+    @mod_only()
+    async def ss_view_communications(self, inter: disnake.AppCmdInter):
+        """View all communication threads between Santas and giftees"""
+        await inter.response.defer(ephemeral=True)
+
+        event = self._event()
+        if not event or not event.get("active", False):
+            await inter.edit_original_response("❌ No active Secret Santa event")
+            return
+
+        communications = event.get("communications", {})
+        if not communications:
+            await inter.edit_original_response("❌ No communications have occurred yet.")
+            return
+
+        embed = disnake.Embed(
+            title=f"Secret Santa {self.state['current_year']} - Communications",
+            color=disnake.Color.blue()
+        )
+
+        for santa_id, comm_data in communications.items():
+            santa_name = event["participants"].get(santa_id, f"User {santa_id}")
+            giftee_id = comm_data.get("giftee_id")
+            giftee_name = event["participants"].get(str(giftee_id), f"User {giftee_id}")
+
+            thread_text = ""
+            for msg in comm_data.get("thread", [])[:5]:  # Show last 5 messages
+                msg_type = "🎅 Santa" if msg["type"] == "question" else "📨 Giftee"
+                timestamp = dt.datetime.fromtimestamp(msg["timestamp"]).strftime("%m/%d %H:%M")
+                thread_text += f"{msg_type} ({timestamp}): {msg['message'][:100]}...\n"
+
+            if not thread_text:
+                thread_text = "No messages yet"
+
+            embed.add_field(
+                name=f"💬 {santa_name} → {giftee_name}",
+                value=thread_text,
                 inline=False
             )
 
@@ -855,42 +1008,6 @@ class SecretSantaCog(commands.Cog):
         embed.add_field(name="Current Year", value=str(self.state["current_year"]), inline=True)
 
         await inter.edit_original_response(embed=embed)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: disnake.Message):
-        """Handle DM questions between Secret Santa participants"""
-        # Ignore messages from bots
-        if message.author.bot:
-            return
-
-        # Only process DMs
-        if not isinstance(message.channel, disnake.DMChannel):
-            return
-
-        event = self._event()
-        if not event or not event.get("active", False):
-            return
-
-        # Check if the sender is a participant
-        sender_id = str(message.author.id)
-        if sender_id not in event.get("participants", {}):
-            return
-
-        # Check if the sender has an assignment (is a giver)
-        if sender_id not in event.get("assignments", {}):
-            return
-
-        # Get the receiver ID (the giftee)
-        receiver_id = event["assignments"][sender_id]
-        receiver_user = await self.bot.fetch_user(receiver_id)
-
-        # Forward the message to the giftee
-        try:
-            sender_name = event["participants"].get(sender_id, f"User {sender_id}")
-            await receiver_user.send(f"**Question from your Secret Santa ({sender_name}):**\n{message.content}")
-            await message.author.send("✅ Your question has been sent to your giftee!")
-        except Exception as e:
-            await message.author.send("❌ Failed to send your question. Your giftee might have DMs disabled.")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
