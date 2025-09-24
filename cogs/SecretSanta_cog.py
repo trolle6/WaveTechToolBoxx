@@ -919,34 +919,79 @@ class SecretSantaCog(commands.Cog):
                 if participant_count > 0:
                     embed.add_field(name="Participants", value=str(participant_count), inline=True)
 
-            # Add gift assignments from historical data
-            gift_text = ""
+            # Enhanced gift display with special formatting
+            gifts_text = ""
+
+            # First try historical data
             if historical_year_data and "assignments" in historical_year_data:
                 assignments = historical_year_data["assignments"]
+                if isinstance(assignments, dict):
+                    # Convert dictionary format to list for consistent processing
+                    assignment_list = []
+                    for key, data in assignments.items():
+                        if isinstance(data, dict) and "giver_id" in data and "receiver_id" in data:
+                            assignment_list.append(data)
+                    assignments = assignment_list
+
                 if assignments:
-                    gifts_text = "\n".join([
-                        f"<@{data['giver_id']}> → <@{data['receiver_id']}>: {data['gift']}"
-                        for data in assignments.values()
-                    ])
-                    if len(gifts_text) > 1024:
-                        gifts_text = gifts_text[:1020] + "..."
-                    embed.add_field(name="🎁 Gift Assignments", value=gifts_text, inline=False)
+                    normal_gifts = []
+                    server_gifts = []
+
+                    for assignment in assignments:
+                        if "giver_ids" in assignment:
+                            # Server-wide gift (multiple givers)
+                            giver_mentions = " & ".join([f"<@{gid}>" for gid in assignment["giver_ids"]])
+                            receiver_name = assignment.get("receiver_name", "Entire Server")
+                            server_gifts.append(f"🎊 **{giver_mentions}** → 🏰 **{receiver_name}**: {assignment['gift']}")
+                        elif "giver_id" in assignment and "receiver_id" in assignment and "gift" in assignment:
+                            # Normal one-to-one gift
+                            giver_mention = f"<@{assignment['giver_id']}>"
+                            receiver_mention = f"<@{assignment['receiver_id']}>"
+                            normal_gifts.append(f"🎁 {giver_mention} → {receiver_mention}: {assignment['gift']}")
+
+                    # Combine gifts with server gifts first
+                    if server_gifts:
+                        gifts_text += "**🎊 Server-Wide Gifts**\n" + "\n".join(server_gifts) + "\n\n"
+                    if normal_gifts:
+                        gifts_text += "**🎁 Individual Gifts**\n" + "\n".join(normal_gifts)
+
+            # If no gifts from historical data, try event data
             elif event_data and "assignments" in event_data:
-                # Handle event file assignments
                 assignments = event_data["assignments"]
                 if isinstance(assignments, list):
-                    gifts_text = "\n".join([
-                        f"<@{assignment['giver_id']}> → <@{assignment['receiver_id']}>: {assignment['gift']}"
-                        for assignment in assignments
-                        if "giver_id" in assignment and "receiver_id" in assignment and "gift" in assignment
-                    ])
-                    if gifts_text and len(gifts_text) > 1024:
-                        gifts_text = gifts_text[:1020] + "..."
-                    if gifts_text:
-                        embed.add_field(name="🎁 Gift Assignments", value=gifts_text, inline=False)
+                    normal_gifts = []
+                    server_gifts = []
+
+                    for assignment in assignments:
+                        if "giver_ids" in assignment:
+                            # Server-wide gift
+                            giver_mentions = " & ".join([f"<@{gid}>" for gid in assignment["giver_ids"]])
+                            receiver_name = assignment.get("receiver_name", "Entire Server")
+                            server_gifts.append(f"🎊 **{giver_mentions}** → 🏰 **{receiver_name}**: {assignment['gift']}")
+                        elif "giver_id" in assignment and "receiver_id" in assignment and "gift" in assignment:
+                            # Normal gift
+                            giver_mention = f"<@{assignment['giver_id']}>"
+                            receiver_mention = f"<@{assignment['receiver_id']}>"
+                            normal_gifts.append(f"🎁 {giver_mention} → {receiver_mention}: {assignment['gift']}")
+
+                    # Combine gifts with server gifts first
+                    if server_gifts:
+                        gifts_text += "**🎊 Server-Wide Gifts**\n" + "\n".join(server_gifts) + "\n\n"
+                    if normal_gifts:
+                        gifts_text += "**🎁 Individual Gifts**\n" + "\n".join(normal_gifts)
+
+            # Add gifts to embed if we have any
+            if gifts_text:
+                if len(gifts_text) > 1024:
+                    gifts_text = gifts_text[:1020] + "..."
+                embed.add_field(name="Gift Assignments", value=gifts_text, inline=False)
+            else:
+                embed.add_field(name="Gift Assignments", value="No gifts recorded for this year.", inline=False)
 
             await inter.edit_original_response(embed=embed)
+
         else:
+            # List all years
             embed = disnake.Embed(title="Secret Santa History", color=disnake.Color.blue())
 
             # Combine events from both sources
