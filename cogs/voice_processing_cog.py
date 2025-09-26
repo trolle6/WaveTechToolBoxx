@@ -17,12 +17,26 @@ from disnake.ext import commands
 # Constants
 EMOJI_REGEX = re.compile(r"<:(\w+):\d+>")
 MAX_RETRIES = 3
-RETRY_DELAY = 0.5
+RETRY_DELAY = 0.2
 HISTORY_PATH = os.path.join(os.path.dirname(__file__), "tts_history.json")
 MAX_QUEUE_SIZE = 100
 PRIORITY_USERS = []
 MAX_TEXT_LENGTH = 2000
 CACHE_SIZE = 200
+
+
+class QueuedMessage:
+    """Represents a message with its processing state and order"""
+
+    def __init__(self, message: disnake.Message, text: str):
+        self.message = message
+        self.text = text
+        self.audio_data = None
+        self.processed = asyncio.Event()
+        self.processing = False
+        self.timestamp = time.time()
+        self.message_id = message.id
+        self.created_at = message.created_at.timestamp()
 
 
 def sanitize_emojis(text: str) -> str:
@@ -32,143 +46,135 @@ def sanitize_emojis(text: str) -> str:
 
 def sanitize_text(text: str) -> str:
     """Sanitize text for TTS"""
-    # Remove excessive whitespace and special characters that might break TTS
     text = re.sub(r'\s+', ' ', text.strip())
-    # Remove or replace problematic characters
     text = text.replace('@', 'at ').replace('#', 'hash ')
     return text[:MAX_TEXT_LENGTH]
 
 
-def load_tts_history() -> Dict[str, List[Dict]]:
-    """Load TTS history from file"""
-    if os.path.exists(HISTORY_PATH):
-        try:
-            with open(HISTORY_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            return {}
-    return {}
-
-
-def save_tts_history(history: Dict[str, List[Dict]]):
-    """Save TTS history to file"""
-    try:
-        with open(HISTORY_PATH, 'w', encoding='utf-8') as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Failed to save TTS history: {e}")
-
-
-def add_to_history(user_id: int, text: str, voice: str):
-    """Add TTS request to history"""
-    try:
-        history = load_tts_history()
-        user_key = str(user_id)
-
-        if user_key not in history:
-            history[user_key] = []
-
-        history[user_key].append({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "text": text[:500],
-            "voice": voice
-        })
-
-        # Keep only last 50 entries per user
-        if len(history[user_key]) > 50:
-            history[user_key] = history[user_key][-50:]
-
-        save_tts_history(history)
-    except Exception as e:
-        print(f"Failed to add to history: {e}")
-
-
 class VoiceClientManager:
-    """Manages voice client connections with connection pooling"""
+    """Simplified voice connection manager"""
 
     def __init__(self, bot: commands.Bot, logger):
         self.bot = bot
         self.logger = logger
         self.voice_clients: Dict[int, disnake.VoiceClient] = {}
-        self.connection_lock = asyncio.Lock()
-        self.connection_timeout = 10.0
+        self.connection_locks: Dict[int, asyncio.Lock] = {}
+
+    def _get_connection_lock(self, guild_id: int) -> asyncio.Lock:
+        """Get or create connection lock for guild"""
+        if guild_id not in self.connection_locks:
+            self.connection_locks[guild_id] = asyncio.Lock()
+        return self.connection_locks[guild_id]
 
     async def get_voice_client(self, guild_id: int, channel: disnake.VoiceChannel) -> Optional[disnake.VoiceClient]:
-        """Get or create voice client for guild"""
-        async with self.connection_lock:
-            # Check if we have a valid existing connection
-            if guild_id in self.voice_clients:
-                vc = self.voice_clients[guild_id]
-                if (vc and vc.is_connected() and vc.channel and
-                        vc.channel.id == channel.id):
-                    return vc
+        """Get or create voice client"""
+        lock = self._get_connection_lock(guild_id)
+
+        async with lock:
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                self.logger.error(f"Guild {guild_id} not found")
+                return None
+
+            # Check existing connection
+            existing_vc = self.voice_clients.get(guild_id)
+            if existing_vc and existing_vc.is_connected():
+                if existing_vc.channel and existing_vc.channel.id == channel.id:
+                    self.logger.info(f"✅ Using existing connection to {channel.name}")
+                    return existing_vc
                 else:
-                    # Clean up invalid connection
-                    if vc and vc.is_connected():
-                        try:
-                            await vc.disconnect(force=True)
-                        except:
-                            pass
-                    del self.voice_clients[guild_id]
+                    try:
+                        await existing_vc.move_to(channel)
+                        self.logger.info(f"🔀 Moved to {channel.name}")
+                        return existing_vc
+                    except Exception as e:
+                        self.logger.warning(f"Failed to move: {e}")
+
+            # Clean up stale connection
+            if guild_id in self.voice_clients:
+                stale_vc = self.voice_clients[guild_id]
+                if stale_vc and stale_vc.is_connected():
+                    try:
+                        await stale_vc.disconnect(force=True)
+                    except Exception as e:
+                        self.logger.debug(f"Error cleaning: {e}")
+                del self.voice_clients[guild_id]
 
             # Create new connection
             try:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    return None
+                self.logger.info(f"🔊 Connecting to {channel.name}...")
 
-                # Clean up any existing voice client for this guild
+                # Use guild's voice_client if available
                 if guild.voice_client and guild.voice_client.is_connected():
-                    try:
-                        await guild.voice_client.disconnect(force=True)
-                        await asyncio.sleep(0.5)
-                    except:
-                        pass
+                    vc = guild.voice_client
+                    await vc.move_to(channel)
+                    self.voice_clients[guild_id] = vc
+                    self.logger.info(f"🔀 Moved existing client to {channel.name}")
+                    return vc
 
-                # Connect to voice channel
-                vc = await channel.connect(
-                    timeout=self.connection_timeout,
-                    reconnect=True
-                )
+                # Create brand new connection
+                vc = await channel.connect(timeout=10.0, reconnect=True)
 
-                # Wait for connection to be ready
-                for _ in range(50):  # 5 second timeout
+                # Wait for connection
+                for _ in range(20):  # 2 second timeout
                     if vc.is_connected():
                         break
                     await asyncio.sleep(0.1)
                 else:
-                    raise TimeoutError("Voice client failed to connect")
+                    raise TimeoutError("Voice connection timeout")
 
                 self.voice_clients[guild_id] = vc
-                self.logger.info(f"Connected to voice channel: {channel.name}")
+                self.logger.info(f"✅ Connected to {channel.name}")
                 return vc
 
             except Exception as e:
-                self.logger.error(f"Failed to connect to voice channel: {e}")
+                self.logger.error(f"❌ Connection failed: {e}")
                 return None
 
     async def disconnect(self, guild_id: int):
         """Disconnect from voice channel"""
-        async with self.connection_lock:
+        lock = self._get_connection_lock(guild_id)
+
+        async with lock:
             if guild_id in self.voice_clients:
                 vc = self.voice_clients[guild_id]
                 try:
                     if vc.is_connected():
                         await vc.disconnect(force=True)
+                    del self.voice_clients[guild_id]
+                    self.logger.info(f"🔇 Disconnected from guild {guild_id}")
                 except Exception as e:
                     self.logger.error(f"Error disconnecting: {e}")
-                finally:
-                    del self.voice_clients[guild_id]
+                    if guild_id in self.voice_clients:
+                        del self.voice_clients[guild_id]
 
     async def disconnect_all(self):
         """Disconnect all voice clients"""
-        async with self.connection_lock:
-            for guild_id in list(self.voice_clients.keys()):
-                await self.disconnect(guild_id)
+        for guild_id in list(self.voice_clients.keys()):
+            await self.disconnect(guild_id)
 
 
-class TTSProcessor:
-    """Handles TTS API calls and audio processing"""
+def enhance_short_messages(text: str) -> str:
+    """Add context for short messages"""
+    words = text.strip().split()
+
+    if len(words) <= 2:
+        if len(words) == 1:
+            short_responses = {
+                'yes': 'yes.', 'no': 'no.', 'ok': 'okay.', 'k': 'okay.',
+                'lol': 'laughing out loud', 'lmao': 'laughing my ass off',
+                'brb': 'be right back', 'omg': 'oh my god'
+            }
+            if words[0].lower() in short_responses:
+                return short_responses[words[0].lower()]
+            return f"{words[0]}."
+        elif len(words) == 2:
+            return f"{text}."
+    return text
+
+
+class EnhancedTTSProcessor:
+    """TTS processor"""
 
     def __init__(self, config, logger):
         self.tts_url = config.tts.api_url
@@ -184,54 +190,46 @@ class TTSProcessor:
         self.cache_lock = asyncio.Lock()
 
     async def get_http_session(self) -> aiohttp.ClientSession:
-        """Get HTTP session with connection pooling"""
+        """Get HTTP session"""
         if self.http_session is None or self.http_session.closed:
-            timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
-            connector = aiohttp.TCPConnector(limit_per_host=4, keepalive_timeout=30)
-            self.http_session = aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector,
-                headers={"User-Agent": "Discord-TTS-Bot/2.0"}
-            )
+            timeout = aiohttp.ClientTimeout(total=30)
+            self.http_session = aiohttp.ClientSession(timeout=timeout)
         return self.http_session
 
     async def generate_audio(self, text: str, user_id: int) -> Optional[bytes]:
-        """Generate audio from text with caching"""
-        # Get voice for user
+        """Generate TTS audio"""
+        enhanced_text = self._optimize_text_for_tts(text)
         voice_id = self.user_voice_map.get(str(user_id), self.default_voice)
         if not voice_id and self.available_voices:
             voice_id = random.choice(self.available_voices)
 
-        # Create cache key
-        text_hash = hashlib.md5(f"{voice_id}:{text}".encode()).hexdigest()
+        # Cache check
+        text_hash = hashlib.md5(f"{voice_id}:{enhanced_text}".encode()).hexdigest()
         cache_key = f"{voice_id}:{text_hash}"
 
-        # Check cache
         async with self.cache_lock:
             if cache_key in self.audio_cache:
-                self.logger.info(f"Using cached audio for: {text[:50]}...")
+                self.logger.debug(f"⚡ Cache hit for: {enhanced_text[:30]}...")
                 return self.audio_cache[cache_key]
 
         # Generate new audio
-        audio_data = await self._call_tts_api(text, voice_id)
+        audio_data = await self._call_tts_api(enhanced_text, voice_id)
+
         if audio_data:
-            # Cache the result
             async with self.cache_lock:
                 if len(self.audio_cache) >= CACHE_SIZE:
-                    # Remove oldest entry
-                    self.audio_cache.pop(next(iter(self.audio_cache)))
+                    # Remove oldest
+                    oldest_key = next(iter(self.audio_cache))
+                    del self.audio_cache[oldest_key]
                 self.audio_cache[cache_key] = audio_data
-
-            add_to_history(user_id, text, voice_id)
 
         return audio_data
 
     async def _call_tts_api(self, text: str, voice_id: str) -> Optional[bytes]:
-        """Make TTS API call with retry logic"""
+        """Call TTS API"""
         headers = {
             "Authorization": f"Bearer {self.tts_token}",
             "Content-Type": "application/json",
-            "Accept": "audio/mpeg"
         }
 
         payload = {
@@ -239,35 +237,20 @@ class TTSProcessor:
             "input": text,
             "model": self.tts_model,
             "response_format": "mp3",
-            "speed": 1.0
+            "speed": 1.0,
         }
 
         for attempt in range(self.retry_limit + 1):
             try:
                 http = await self.get_http_session()
-
-                async with http.post(
-                        self.tts_url,
-                        json=payload,
-                        headers=headers,
-                        raise_for_status=True
-                ) as response:
-
+                async with http.post(self.tts_url, json=payload, headers=headers) as response:
                     if response.status == 200:
                         audio_data = await response.read()
-                        self.logger.info(f"TTS generated: {text[:50]}... ({len(audio_data)} bytes)")
+                        self.logger.info(f"TTS generated: {text[:50]}...")
                         return audio_data
+                    else:
+                        self.logger.error(f"TTS API error {response.status}: {await response.text()}")
 
-            except aiohttp.ClientResponseError as e:
-                if e.status == 429:  # Rate limited
-                    wait_time = int(e.headers.get('Retry-After', 5))
-                    self.logger.warning(f"Rate limited, waiting {wait_time}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    self.logger.error(f"TTS API error {e.status}: {e.message}")
-            except asyncio.TimeoutError:
-                self.logger.error(f"TTS request timeout (attempt {attempt + 1})")
             except Exception as e:
                 self.logger.error(f"TTS error (attempt {attempt + 1}): {e}")
 
@@ -277,397 +260,258 @@ class TTSProcessor:
         self.logger.error("All TTS attempts failed")
         return None
 
+    def _optimize_text_for_tts(self, text: str) -> str:
+        """Optimize text for TTS"""
+        text = text.strip()
+        if not any(text.endswith(p) for p in ['.', '!', '?']):
+            text += '.'
+        text = enhance_short_messages(text)
+        return text
+
     async def close(self):
-        """Clean up resources"""
+        """Clean up"""
         if self.http_session and not self.http_session.closed:
             await self.http_session.close()
 
 
-class AudioPlayer:
-    """Handles audio playback with proper resource management"""
-
-    def __init__(self, logger, delay_between: float = 0.5):
-        self.logger = logger
-        self.delay_between = delay_between
-        self.ffmpeg_options = {
-            'before_options': '-nostdin',
-            'options': '-vn -af "volume=0.8" -threads 1'
-        }
-
-    async def play_audio(self, vc: disnake.VoiceClient, audio_data: bytes) -> bool:
-        """Play audio through voice client"""
-        if not vc or not vc.is_connected():
-            self.logger.error("Voice client not connected for playback")
-            return False
-
-        tmp_file = None
-        try:
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
-                f.write(audio_data)
-                tmp_file = f.name
-
-            # Create audio source
-            source = disnake.FFmpegPCMAudio(tmp_file, **self.ffmpeg_options)
-
-            # Play with completion tracking
-            play_future = asyncio.Future()
-
-            def after_playing(error):
-                # Clean up temp file
-                try:
-                    if tmp_file and os.path.exists(tmp_file):
-                        os.unlink(tmp_file)
-                except Exception as e:
-                    self.logger.warning(f"Temp file cleanup error: {e}")
-
-                if error:
-                    if not play_future.done():
-                        play_future.set_exception(error)
-                else:
-                    if not play_future.done():
-                        play_future.set_result(True)
-
-            # Start playback
-            vc.play(source, after=after_playing)
-
-            # Wait for completion with timeout
-            audio_duration = len(audio_data) / 16000  # Rough estimate
-            timeout = min(max(audio_duration * 3, 10), 60)  # 10-60 second timeout
-
-            try:
-                await asyncio.wait_for(play_future, timeout=timeout)
-                self.logger.info("Playback completed successfully")
-                return True
-
-            except asyncio.TimeoutError:
-                self.logger.warning("Playback timeout")
-                if vc.is_playing():
-                    vc.stop()
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Playback error: {e}")
-            # Clean up temp file on error
-            try:
-                if tmp_file and os.path.exists(tmp_file):
-                    os.unlink(tmp_file)
-            except:
-                pass
-            return False
-        finally:
-            # Small delay between messages
-            if self.delay_between > 0:
-                await asyncio.sleep(self.delay_between)
-
-
 class VoiceProcessingCog(commands.Cog):
-    """Optimized and reliable TTS Processing System"""
+    """Simplified TTS Processing System"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.cfg = bot.config
         self.logger = bot.logger
 
-        # Discord config
-        d_cfg = self.cfg.discord
-        self.guild_id = d_cfg.guild_id
-        self.text_channel_id = d_cfg.channel_id
-        self.no_mic_role_id = d_cfg.no_mic_role_id
-
         # Initialize components
         self.voice_manager = VoiceClientManager(bot, self.logger)
-        self.tts_processor = TTSProcessor(self.cfg, self.logger)
-        self.audio_player = AudioPlayer(self.logger, self.cfg.tts.delay_between_messages)
+        self.tts_processor = EnhancedTTSProcessor(self.cfg, self.logger)
 
         # Queue management
-        self.message_queues: Dict[int, Deque[disnake.Message]] = {}
-        self.queue_locks: Dict[int, asyncio.Lock] = {}
-        self.active_queues: set[int] = set()
-        self.queue_processor_tasks: Dict[int, asyncio.Task] = {}
+        self.message_queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
+        self.is_processing = False
+        self.processing_task: Optional[asyncio.Task] = None
 
         # Rate limiting
-        self.rate_limits: Dict[int, List[float]] = {}
+        self.user_requests: Dict[int, List[float]] = {}
         self.rate_limit = 10  # messages per minute
-        self.rate_limit_window = 60
-
-        # Shutdown flag
-        self._shutting_down = False
+        self.rate_window = 60
 
         self.logger.info("VoiceProcessingCog initialized")
 
     def _check_rate_limit(self, user_id: int) -> bool:
-        """Check if user is rate limited"""
+        """Check rate limit"""
         now = time.time()
-        user_key = str(user_id)
-
-        if user_key not in self.rate_limits:
-            self.rate_limits[user_key] = []
-            return True
+        if user_id not in self.user_requests:
+            self.user_requests[user_id] = []
 
         # Clean old requests
-        self.rate_limits[user_key] = [
-            t for t in self.rate_limits[user_key]
-            if now - t < self.rate_limit_window
-        ]
+        self.user_requests[user_id] = [t for t in self.user_requests[user_id] if now - t < self.rate_window]
 
-        if len(self.rate_limits[user_key]) < self.rate_limit:
-            self.rate_limits[user_key].append(now)
+        if len(self.user_requests[user_id]) < self.rate_limit:
+            self.user_requests[user_id].append(now)
             return True
-
         return False
 
-    async def _add_to_queue(self, message: disnake.Message):
-        """Add message to processing queue"""
-        guild_id = message.guild.id
+    async def _process_message(self, message: disnake.Message):
+        """Process a single message"""
+        try:
+            # Sanitize text
+            text = sanitize_text(sanitize_emojis(message.content))
+            if not text or len(text.strip()) < 1:
+                return
 
-        # Initialize queue and lock for guild if needed
-        if guild_id not in self.message_queues:
-            self.message_queues[guild_id] = deque(maxlen=MAX_QUEUE_SIZE)
-            self.queue_locks[guild_id] = asyncio.Lock()
+            # Rate limit check
+            if not self._check_rate_limit(message.author.id):
+                self.logger.warning(f"Rate limit exceeded for user {message.author.id}")
+                return
 
-        async with self.queue_locks[guild_id]:
-            self.message_queues[guild_id].append(message)
+            # Check if user is in voice channel
+            if not message.author.voice or not message.author.voice.channel:
+                self.logger.error(f"User {message.author} not in voice channel")
+                await message.reply("❌ You need to be in a voice channel to use TTS!", ephemeral=True)
+                return
 
-        # Start queue processor if not already running
-        if guild_id not in self.active_queues and not self._shutting_down:
-            self.active_queues.add(guild_id)
-            self.queue_processor_tasks[guild_id] = asyncio.create_task(
-                self._process_guild_queue(guild_id),
-                name=f"tts_queue_{guild_id}"
-            )
-            self.logger.info(f"Started queue processor for guild {guild_id}")
+            # Get voice client
+            voice_channel = message.author.voice.channel
+            vc = await self.voice_manager.get_voice_client(message.guild.id, voice_channel)
+            if not vc:
+                self.logger.error("Failed to connect to voice channel")
+                await message.reply("❌ Failed to connect to voice channel.", ephemeral=True)
+                return
 
-    async def _process_guild_queue(self, guild_id: int):
-        """Process messages for a specific guild with persistent monitoring"""
-        self.logger.info(f"Starting persistent queue processor for guild {guild_id}")
+            # Generate TTS audio
+            self.logger.info(f"🔄 Generating TTS for: {text[:50]}...")
+            audio_data = await self.tts_processor.generate_audio(text, message.author.id)
+            if not audio_data:
+                self.logger.error("TTS generation failed")
+                await message.reply("❌ Failed to generate TTS audio.", ephemeral=True)
+                return
 
-        consecutive_failures = 0
-        max_failures = 5
-        empty_queue_count = 0
-        max_empty_checks = 60  # Wait up to 5 minutes before stopping (5s intervals)
+            # Wait for current playback to finish
+            if vc.is_playing():
+                self.logger.debug("Waiting for current playback...")
+                for _ in range(60):  # 6 second timeout
+                    if not vc.is_playing():
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    self.logger.warning("Playback timeout, stopping audio")
+                    vc.stop()
 
-        while (not self._shutting_down and
-               consecutive_failures < max_failures and
-               guild_id in self.active_queues):
+            # Play audio
+            self.logger.info(f"🎵 Playing TTS: {text[:50]}...")
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+                f.write(audio_data)
+                tmp_file = f.name
 
             try:
-                # Check if we have messages to process
-                async with self.queue_locks[guild_id]:
-                    has_messages = bool(self.message_queues.get(guild_id))
+                source = disnake.FFmpegPCMAudio(tmp_file)
+                play_complete = asyncio.Event()
 
-                if not has_messages:
-                    empty_queue_count += 1
-                    # Stop if queue has been empty for too long
-                    if empty_queue_count >= max_empty_checks:
-                        self.logger.info(f"Queue empty for too long, stopping processor for guild {guild_id}")
-                        break
+                def after_playing(error):
+                    try:
+                        if os.path.exists(tmp_file):
+                            os.unlink(tmp_file)
+                    except:
+                        pass
+                    play_complete.set()
 
-                    # Wait briefly before checking again
-                    await asyncio.sleep(5)
-                    continue
+                vc.play(source, after=after_playing)
 
-                # Reset empty counter since we found messages
-                empty_queue_count = 0
-
-                # Get next message from queue
-                async with self.queue_locks[guild_id]:
-                    if not self.message_queues[guild_id]:
-                        continue
-                    message = self.message_queues[guild_id].popleft()
-
-                # Process the message with timeout
+                # Wait for playback completion
                 try:
-                    await asyncio.wait_for(
-                        self._process_single_message(message),
-                        timeout=45.0
-                    )
-                    consecutive_failures = 0
-
+                    await asyncio.wait_for(play_complete.wait(), timeout=30.0)
+                    self.logger.info("✅ Playback completed")
                 except asyncio.TimeoutError:
-                    self.logger.error(f"Message processing timeout for guild {guild_id}")
-                    consecutive_failures += 1
-                    await asyncio.sleep(1)
+                    self.logger.warning("Playback timeout")
+                    if vc.is_playing():
+                        vc.stop()
 
             except Exception as e:
-                self.logger.error(f"Queue processing error: {e}")
-                consecutive_failures += 1
+                self.logger.error(f"Playback error: {e}")
+                try:
+                    if os.path.exists(tmp_file):
+                        os.unlink(tmp_file)
+                except:
+                    pass
+
+        except Exception as e:
+            self.logger.error(f"Error processing message: {e}")
+
+    async def _queue_processor(self):
+        """Process messages from queue"""
+        self.logger.info("🚀 Starting queue processor")
+        while True:
+            try:
+                message = await self.message_queue.get()
+                await self._process_message(message)
+                self.message_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Queue processor error: {e}")
                 await asyncio.sleep(1)
 
-        # Clean up
-        self.active_queues.discard(guild_id)
-        if guild_id in self.queue_processor_tasks:
-            del self.queue_processor_tasks[guild_id]
+    async def _add_to_queue(self, message: disnake.Message):
+        """Add message to queue"""
+        try:
+            self.message_queue.put_nowait(message)
+            self.logger.info(f"📥 Added message to queue: {message.content[:50]}...")
 
-        self.logger.info(f"Queue processor stopped for guild {guild_id}")
+            # Start processor if not running
+            if not self.is_processing or self.processing_task is None or self.processing_task.done():
+                self.is_processing = True
+                self.processing_task = asyncio.create_task(self._queue_processor())
 
-    async def _process_single_message(self, message: disnake.Message):
-        """Process a single TTS message"""
-        member = message.author
-        guild_id = message.guild.id
-
-        # Basic validation
-        if not member or not member.voice or not member.voice.channel:
-            return
-
-        # Rate limiting
-        if not self._check_rate_limit(member.id):
-            self.logger.warning(f"Rate limit exceeded for user {member.id}")
-            try:
-                await message.channel.send(
-                    f"{member.mention} Please wait before sending more messages.",
-                    delete_after=5
-                )
-            except:
-                pass
-            return
-
-        # Add no-mic role if configured
-        if self.no_mic_role_id:
-            try:
-                role = message.guild.get_role(self.no_mic_role_id)
-                if role and role not in member.roles:
-                    await member.add_roles(role)
-            except Exception as e:
-                self.logger.warning(f"Failed to add no-mic role: {e}")
-
-        # Sanitize and validate text
-        text = sanitize_text(sanitize_emojis(message.content))
-        if not text or len(text.strip()) < 1:
-            return
-
-        # Generate audio
-        self.logger.info(f"Processing TTS for {member.display_name}: {text[:50]}...")
-        audio_data = await self.tts_processor.generate_audio(text, member.id)
-
-        if not audio_data:
-            self.logger.error("Failed to generate audio")
-            return
-
-        # Get voice client and play audio
-        voice_channel = member.voice.channel
-        vc = await self.voice_manager.get_voice_client(guild_id, voice_channel)
-
-        if not vc:
-            self.logger.error("Failed to get voice client")
-            return
-
-        # Play audio
-        success = await self.audio_player.play_audio(vc, audio_data)
-        if not success:
-            self.logger.warning("Audio playback failed")
+        except asyncio.QueueFull:
+            self.logger.warning("Queue is full, message dropped")
+        except Exception as e:
+            self.logger.error(f"Error adding to queue: {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message: disnake.Message):
-        """Handle new messages for TTS processing"""
-        if (self._shutting_down or message.author.bot or
-                not message.guild or message.guild.id != self.guild_id or
-                message.channel.id != self.text_channel_id or
-                not message.content.strip()):
+        """Handle new messages"""
+        # Basic filters
+        if message.author.bot:
+            return
+        if not message.guild:
             return
 
-        try:
-            await self._add_to_queue(message)
-        except Exception as e:
-            self.logger.error(f"Failed to add message to queue: {e}")
+        # Channel filter
+        if hasattr(self.cfg.discord, 'channel_id') and self.cfg.discord.channel_id:
+            if message.channel.id != self.cfg.discord.channel_id:
+                return
+
+        # Ignore commands
+        if message.content.startswith(('!', '/', '.')):
+            return
+
+        self.logger.info(f"📨 Received message from {message.author}: {message.content[:50]}...")
+        await self._add_to_queue(message)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: disnake.Member,
                                     before: disnake.VoiceState,
                                     after: disnake.VoiceState):
         """Handle voice state changes"""
-        if self._shutting_down:
+        if member.bot:
             return
 
         guild_id = member.guild.id
 
-        # Bot voice state changes
+        # Bot left voice
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
-                # Bot was disconnected
                 await self.voice_manager.disconnect(guild_id)
-                self.logger.info(f"Bot disconnected from voice in guild {guild_id}")
             return
 
-        # User left voice channel
+        # User left voice - check if channel is empty
         if before.channel and not after.channel:
             if guild_id in self.voice_manager.voice_clients:
                 vc = self.voice_manager.voice_clients[guild_id]
                 if vc and vc.channel and vc.channel.id == before.channel.id:
-                    # Check if channel is empty (only bot remains)
-                    if len(vc.channel.members) == 1:
-                        self.logger.info("Scheduling leave from empty channel")
-                        await asyncio.sleep(15)  # Wait to see if someone rejoins
-
-                        # Re-check after delay
+                    # Check if only bot remains
+                    human_members = [m for m in before.channel.members if not m.bot]
+                    if not human_members:
+                        self.logger.info("Channel empty, disconnecting")
+                        await asyncio.sleep(2)  # Brief delay
+                        # Re-check
                         if (vc.is_connected() and vc.channel and
-                                len(vc.channel.members) == 1):
-                            self.logger.info("Leaving empty voice channel")
+                                not [m for m in vc.channel.members if not m.bot]):
                             await self.voice_manager.disconnect(guild_id)
 
-    @commands.slash_command(name="voice_debug", description="Debug voice connection")
-    async def voice_debug(self, inter: disnake.ApplicationCommandInteraction):
-        """Debug voice connection status"""
-        if not inter.guild:
-            return await inter.response.send_message("This command only works in servers")
+    @commands.slash_command(name="join", description="Make the bot join your voice channel")
+    async def join_voice(self, inter: disnake.ApplicationCommandInteraction):
+        """Force join voice channel"""
+        if not inter.author.voice:
+            await inter.response.send_message("❌ You need to be in a voice channel!", ephemeral=True)
+            return
 
-        guild_id = inter.guild.id
-        vc = self.voice_manager.voice_clients.get(guild_id)
-
-        status_lines = [
-            f"**Voice Status for {inter.guild.name}**",
-            f"Connected: {vc is not None and vc.is_connected()}",
-            f"Playing: {vc is not None and vc.is_playing()}",
-            f"Channel: {vc.channel.name if vc and vc.channel else 'None'}",
-            f"Queue size: {len(self.message_queues.get(guild_id, []))}",
-            f"Active queues: {len(self.active_queues)}",
-            f"Voice clients: {len(self.voice_manager.voice_clients)}"
-        ]
-
-        await inter.response.send_message("\n".join(status_lines))
-
-    @commands.slash_command(name="test_tts", description="Test TTS API connection")
-    async def test_tts(self, inter: disnake.ApplicationCommandInteraction, text: str = "Test message"):
-        """Test TTS API connection"""
-        await inter.response.defer()
-
-        audio_data = await self.tts_processor.generate_audio(text, inter.author.id)
-        if audio_data:
-            await inter.followup.send("✅ TTS API is working correctly!")
+        vc = await self.voice_manager.get_voice_client(inter.guild.id, inter.author.voice.channel)
+        if vc:
+            await inter.response.send_message(f"✅ Joined {inter.author.voice.channel.name}", ephemeral=True)
         else:
-            await inter.followup.send("❌ TTS API failed. Check configuration.")
+            await inter.response.send_message("❌ Failed to join voice channel", ephemeral=True)
 
-    @commands.slash_command(name="clear_queue", description="Clear the TTS queue")
-    @commands.has_permissions(manage_messages=True)
-    async def clear_queue(self, inter: disnake.ApplicationCommandInteraction):
-        """Clear the TTS queue"""
-        guild_id = inter.guild.id
-        if guild_id in self.message_queues:
-            async with self.queue_locks[guild_id]:
-                queue_size = len(self.message_queues[guild_id])
-                self.message_queues[guild_id].clear()
-            await inter.response.send_message(f"✅ Cleared {queue_size} messages from queue")
-        else:
-            await inter.response.send_message("✅ Queue is already empty")
+    @commands.slash_command(name="leave", description="Make the bot leave voice channel")
+    async def leave_voice(self, inter: disnake.ApplicationCommandInteraction):
+        """Force leave voice channel"""
+        await self.voice_manager.disconnect(inter.guild.id)
+        await inter.response.send_message("✅ Left voice channel", ephemeral=True)
 
     async def cog_unload(self):
-        """Clean up resources on cog unload"""
-        self._shutting_down = True
+        """Clean shutdown"""
         self.logger.info("Shutting down VoiceProcessingCog...")
 
-        # Cancel all queue processor tasks
-        for task in self.queue_processor_tasks.values():
-            task.cancel()
+        # Cancel processing task
+        if self.processing_task and not self.processing_task.done():
+            self.processing_task.cancel()
+            try:
+                await self.processing_task
+            except asyncio.CancelledError:
+                pass
 
-        # Wait for tasks to complete
-        if self.queue_processor_tasks:
-            await asyncio.wait(
-                list(self.queue_processor_tasks.values()),
-                timeout=5.0,
-                return_when=asyncio.ALL_COMPLETED
-            )
-
-        # Disconnect all voice clients
+        # Disconnect voice clients
         await self.voice_manager.disconnect_all()
 
         # Close TTS processor
