@@ -15,7 +15,7 @@ class DALLECog(commands.Cog):
         self.bot = bot
         self.logger = logging.getLogger('dalle_cog')
         self.config = bot.config
-        self.http_session = None
+        self.api_key = self.config.openai_api_key
 
         # DALL-E config - using TTS bearer token
         self.api_url = self.config.dalle.api_url
@@ -23,6 +23,9 @@ class DALLECog(commands.Cog):
         self.size = self.config.dalle.size
         self.rate_limit = 5  # requests per minute per user
         self.last_requests = {}
+
+        # Initialize http_session to None
+        self.http_session = None  # ← ADD THIS LINE
 
     def _check_rate_limit(self, user_id: int) -> bool:
         """Check if user is rate limited"""
@@ -149,7 +152,7 @@ class DALLECog(commands.Cog):
 
     async def cog_unload(self):
         """Cleanup on cog unload"""
-        if self.http_session and not self.http_session.closed:
+        if hasattr(self, 'http_session') and self.http_session and not self.http_session.closed:
             await self.http_session.close()
         self.logger.info("DALLECog unloaded")
 

@@ -279,9 +279,10 @@ class EnhancedTTSProcessor:
                 self.logger.debug(f"⚡ Cache hit for: {enhanced_text[:30]}...")
                 return cached_audio
 
-        # Generate new audio
+        # Generate new audio - ACTUALLY CALL THE API FUNCTION
         audio_data = await self._call_tts_api(enhanced_text, voice_id)
 
+        # Cache the result if successful
         if audio_data:
             async with self.cache_lock:
                 self.audio_cache.set(cache_key, audio_data)
@@ -289,43 +290,49 @@ class EnhancedTTSProcessor:
         return audio_data
 
     async def _call_tts_api(self, text: str, voice_id: str) -> Optional[bytes]:
-        """Call TTS API"""
+        """Call TTS API - FIXED FOR OPENAI"""
+
+        self.logger.info(f"🔧 TTS DEBUG: URL={self.tts_url}, Voice={voice_id}, Text='{text[:50]}...'")
+
         headers = {
             "Authorization": f"Bearer {self.tts_token}",
             "Content-Type": "application/json",
         }
 
         payload = {
-            "voice": voice_id,
-            "input": text,
-            "model": self.tts_model,
-            "response_format": "mp3",
-            "speed": 1.0,
+            "model": self.tts_model,  # "tts-1" or "tts-1-hd"
+            "input": text,  # The text to convert
+            "voice": voice_id,  # "alloy", "shimmer", "echo", etc.
+            "response_format": "mp3",  # Output format
         }
+
+        self.logger.info(f"🔧 TTS DEBUG: Payload={payload}")
 
         for attempt in range(self.retry_limit + 1):
             try:
                 http = await self.get_http_session()
                 async with http.post(self.tts_url, json=payload, headers=headers) as response:
+                    self.logger.info(f"🔧 TTS DEBUG: Response Status={response.status}")
+
                     if response.status == 200:
                         audio_data = await response.read()
-                        self.logger.info(f"TTS generated: {text[:50]}...")
+                        self.logger.info(f"✅ TTS generated: {text[:50]}...")
                         return audio_data
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"TTS API error {response.status}: {error_text}")
+                        self.logger.error(f"❌ TTS API error {response.status}: {error_text}")
                         if 400 <= response.status < 500:
                             break
 
             except aiohttp.ClientError as e:
-                self.logger.error(f"TTS network error (attempt {attempt + 1}): {e}")
+                self.logger.error(f"🌐 TTS network error (attempt {attempt + 1}): {e}")
             except Exception as e:
-                self.logger.error(f"TTS unexpected error (attempt {attempt + 1}): {e}")
+                self.logger.error(f"💥 TTS unexpected error (attempt {attempt + 1}): {e}")
 
             if attempt < self.retry_limit:
                 await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
-        self.logger.error("All TTS attempts failed")
+        self.logger.error("💀 All TTS attempts failed")
         return None
 
     def _optimize_text_for_tts(self, text: str) -> str:
@@ -520,24 +527,37 @@ class VoiceProcessingCog(commands.Cog):
         """Clean up order queue and trigger next message"""
         async with self._get_guild_order_lock(guild_id):
             if guild_id in self.guild_message_order:
+                # Find and remove the current message
                 remaining_messages = []
-                trigger_next = False
+                found_current = False
 
                 for seq, fut in self.guild_message_order[guild_id]:
                     if seq == current_sequence_id:
-                        trigger_next = True
-                        continue
-                    elif trigger_next and not fut.done():
-                        fut.set_result(True)
-                        remaining_messages.append((seq, fut))
-                        trigger_next = False
-                        self.logger.info(f"🔓 Triggered next message {seq} after {current_sequence_id}")
+                        found_current = True
+                        continue  # Skip the current message
                     else:
                         remaining_messages.append((seq, fut))
 
+                # Update the queue
                 self.guild_message_order[guild_id] = remaining_messages
+
+                # Trigger the next message if there is one
+                if remaining_messages and not remaining_messages[0][1].done():
+                    next_seq, next_fut = remaining_messages[0]
+                    next_fut.set_result(True)
+                    self.logger.info(f"🔓 Triggered next message {next_seq} after {current_sequence_id}")
+
                 self.logger.info(
                     f"📋 Order queue updated for guild {guild_id}, {len(remaining_messages)} messages remaining")
+
+    async def _cleanup_playback(self, guild_id: int, sequence_id: int, error: Optional[Exception]):
+        """Handle playback completion cleanup"""
+        if error:
+            self.logger.error(f"Playback error for message {sequence_id}: {error}")
+        else:
+            self.logger.info(f"✅ Finished playing message {sequence_id}")
+
+        await self._cleanup_order_queue(guild_id, sequence_id)
 
     async def _process_guild_queue(self, guild_id: int):
         """Process messages for a specific guild"""
@@ -596,7 +616,7 @@ class VoiceProcessingCog(commands.Cog):
                     bot_loop = self.bot.loop
 
                     def after_playing(error):
-                        # Clean up temp file
+                        # Clean up temp file first
                         try:
                             if tmp_file and os.path.exists(tmp_file):
                                 os.unlink(tmp_file)
@@ -606,14 +626,9 @@ class VoiceProcessingCog(commands.Cog):
                         # Schedule cleanup in the bot's event loop
                         if bot_loop.is_running():
                             asyncio.run_coroutine_threadsafe(
-                                self._cleanup_order_queue(guild_id, sequence_id),
+                                self._cleanup_playback(guild_id, sequence_id, error),
                                 bot_loop
                             )
-
-                        if error:
-                            self.logger.error(f"Playback error for message {sequence_id}: {error}")
-                        else:
-                            self.logger.info(f"✅ Finished playing message {sequence_id}")
 
                     vc.play(source, after=after_playing)
                     self.logger.info(f"🎵 Playing message {sequence_id}: {text[:50]}...")
