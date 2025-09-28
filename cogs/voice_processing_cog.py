@@ -213,7 +213,7 @@ class LRUCache:
 
 
 class EnhancedTTSProcessor:
-    """TTS processor"""
+    """TTS processor with optimized audio format"""
 
     def __init__(self, config, logger):
         self.tts_url = config.tts.api_url
@@ -227,6 +227,10 @@ class EnhancedTTSProcessor:
         self.http_session = None
         self.audio_cache = LRUCache(CACHE_SIZE)
         self.cache_lock = asyncio.Lock()
+
+        # Use WAV format for better quality and Discord compatibility
+        self.preferred_format = "wav"
+        self.file_extension = ".wav"
 
         # Validate configuration
         self._validate_config()
@@ -287,7 +291,7 @@ class EnhancedTTSProcessor:
         return audio_data
 
     async def _call_tts_api(self, text: str, voice_id: str) -> Optional[bytes]:
-        """Call TTS API - FIXED FOR OPENAI"""
+        """Call TTS API - OPTIMIZED WITH WAV FORMAT"""
 
         self.logger.info(f"🔧 TTS DEBUG: URL={self.tts_url}, Voice={voice_id}, Text='{text[:50]}...'")
 
@@ -296,11 +300,12 @@ class EnhancedTTSProcessor:
             "Content-Type": "application/json",
         }
 
+        # Use WAV format for better quality and Discord compatibility
         payload = {
             "model": self.tts_model,  # "tts-1" or "tts-1-hd"
             "input": text,  # The text to convert
             "voice": voice_id,  # "alloy", "shimmer", "echo", etc.
-            "response_format": "mp3",  # Output format
+            "response_format": self.preferred_format,  # WAV format for better quality
         }
 
         self.logger.info(f"🔧 TTS DEBUG: Payload={payload}")
@@ -313,7 +318,7 @@ class EnhancedTTSProcessor:
 
                     if response.status == 200:
                         audio_data = await response.read()
-                        self.logger.info(f"✅ TTS generated: {text[:50]}...")
+                        self.logger.info(f"✅ TTS generated ({len(audio_data)} bytes): {text[:50]}...")
                         return audio_data
                     else:
                         error_text = await response.text()
@@ -353,7 +358,7 @@ class EnhancedTTSProcessor:
 
 
 class VoiceProcessingCog(commands.Cog):
-    """Simplified TTS Processing System"""
+    """Simplified TTS Processing System with Optimized Audio"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -387,7 +392,7 @@ class VoiceProcessingCog(commands.Cog):
         self.queue_stats: Dict[int, Dict[str, Any]] = {}
         self.health_monitor_task: Optional[asyncio.Task] = None
 
-        self.logger.info("VoiceProcessingCog initialized")
+        self.logger.info("VoiceProcessingCog initialized with optimized WAV audio format")
 
     def _validate_config(self):
         """Validate bot configuration"""
@@ -644,14 +649,19 @@ class VoiceProcessingCog(commands.Cog):
                         vc.stop()
                         await asyncio.sleep(0.5)
 
-                # Create temporary file and play
+                # FIXED: Use FFmpegPCMAudio for WAV files
                 tmp_file = None
                 try:
-                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+                    # Create temporary file
+                    tmp_file = tempfile.mktemp(suffix=self.tts_processor.file_extension)
+                    with open(tmp_file, 'wb') as f:
                         f.write(audio_data)
-                        tmp_file = f.name
 
-                    source = disnake.FFmpegPCMAudio(tmp_file)
+                    # Use FFmpegPCMAudio instead of PCMAudio for WAV files
+                    source = disnake.FFmpegPCMAudio(
+                        tmp_file,
+                        options="-loglevel warning"  # Reduce FFmpeg logging
+                    )
 
                     # Get the bot's event loop for the after_playing callback
                     bot_loop = self.bot.loop
@@ -672,7 +682,7 @@ class VoiceProcessingCog(commands.Cog):
                             )
 
                     vc.play(source, after=after_playing)
-                    self.logger.info(f"🎵 Playing message {sequence_id}: {text[:50]}...")
+                    self.logger.info(f"🎵 Playing message {sequence_id} (WAV format): {text[:50]}...")
 
                     # Wait briefly to ensure playback starts
                     await asyncio.sleep(0.5)
@@ -693,7 +703,6 @@ class VoiceProcessingCog(commands.Cog):
             except Exception as e:
                 self.logger.error(f"Guild queue processor error: {e}")
                 await asyncio.sleep(1)
-
     @commands.Cog.listener()
     async def on_message(self, message: disnake.Message):
         """Handle new messages"""
@@ -752,6 +761,7 @@ class VoiceProcessingCog(commands.Cog):
             "cache_hit_rate": f"{len(self.tts_processor.audio_cache)}/{CACHE_SIZE}",
             "total_ordered_messages": sum(len(q) for q in self.guild_message_order.values()),
             "rate_limited_users": len(self.user_requests),
+            "audio_format": self.tts_processor.preferred_format.upper(),
         }
         return stats
 
