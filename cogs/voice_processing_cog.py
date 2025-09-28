@@ -6,7 +6,7 @@ import random
 import re
 import tempfile
 import time
-from typing import Dict, Optional, List, Deque, Tuple
+from typing import Dict, Optional, List, Deque, Tuple, Any
 from collections import deque, OrderedDict
 import hashlib
 import uuid
@@ -71,7 +71,7 @@ class VoiceClientManager:
         return self.connection_locks[guild_id]
 
     async def get_voice_client(self, guild_id: int, channel: disnake.VoiceChannel) -> Optional[disnake.VoiceClient]:
-        """Get or create voice client with simplified approach"""
+        """Get or create voice client with better error recovery"""
         lock = self._get_connection_lock(guild_id)
 
         async with lock:
@@ -80,61 +80,58 @@ class VoiceClientManager:
                 self.logger.error(f"Guild {guild_id} not found")
                 return None
 
-            # Always check the guild's current voice client first
+            # Check existing connection with health verification
             if guild.voice_client and guild.voice_client.is_connected():
                 vc = guild.voice_client
-                if vc.channel.id == channel.id:
-                    self.logger.info(f"✅ Using existing guild connection to {channel.name}")
-                    self.voice_clients[guild_id] = vc
-                    return vc
-                else:
-                    try:
+                try:
+                    # Test if connection is actually alive
+                    if vc.channel.id == channel.id:
+                        self.logger.info(f"✅ Using existing guild connection to {channel.name}")
+                        self.voice_clients[guild_id] = vc
+                        return vc
+                    else:
                         await vc.move_to(channel)
                         self.logger.info(f"🔀 Moved to {channel.name}")
                         self.voice_clients[guild_id] = vc
                         return vc
-                    except Exception as e:
-                        self.logger.warning(f"Failed to move: {e}")
-
-            # Clean up any stale connections in our tracking
-            if guild_id in self.voice_clients:
-                stale_vc = self.voice_clients[guild_id]
-                if stale_vc and (not stale_vc.is_connected() or stale_vc != guild.voice_client):
-                    try:
-                        if stale_vc.is_connected():
-                            await stale_vc.disconnect(force=True)
-                    except:
-                        pass
-                    del self.voice_clients[guild_id]
-
-            # Create new connection
-            try:
-                self.logger.info(f"🔊 Connecting to {channel.name}...")
-
-                # Simple connection without complex timeout wrapping
-                vc = await channel.connect()
-
-                # Wait briefly for connection to establish
-                for i in range(20):  # 2 second timeout
-                    if vc.is_connected():
-                        break
-                    await asyncio.sleep(0.1)
-
-                if not vc.is_connected():
-                    self.logger.error("❌ Voice connection failed to establish")
+                except Exception as e:
+                    self.logger.warning(f"Existing connection issue: {e}, creating new connection")
                     try:
                         await vc.disconnect(force=True)
                     except:
                         pass
-                    return None
 
-                self.voice_clients[guild_id] = vc
-                self.logger.info(f"✅ Connected to {channel.name}")
-                return vc
+            # Clean up stale tracking
+            if guild_id in self.voice_clients:
+                stale_vc = self.voice_clients[guild_id]
+                if stale_vc and (stale_vc != guild.voice_client or not stale_vc.is_connected()):
+                    del self.voice_clients[guild_id]
 
-            except Exception as e:
-                self.logger.error(f"❌ Connection failed: {e}")
-                return None
+            # Create new connection with retry logic
+            for attempt in range(2):
+                try:
+                    self.logger.info(f"🔊 Connecting to {channel.name} (attempt {attempt + 1})...")
+                    vc = await channel.connect()
+
+                    # Wait for connection
+                    for i in range(30):  # 3 second timeout
+                        if vc.is_connected():
+                            break
+                        await asyncio.sleep(0.1)
+
+                    if vc.is_connected():
+                        self.voice_clients[guild_id] = vc
+                        self.logger.info(f"✅ Connected to {channel.name}")
+                        return vc
+                    else:
+                        await vc.disconnect(force=True)
+
+                except Exception as e:
+                    self.logger.error(f"❌ Connection attempt {attempt + 1} failed: {e}")
+                    if attempt == 0:
+                        await asyncio.sleep(1)  # Brief delay before retry
+
+            return None
 
     async def disconnect(self, guild_id: int):
         """Disconnect from voice channel"""
@@ -336,10 +333,16 @@ class EnhancedTTSProcessor:
         return None
 
     def _optimize_text_for_tts(self, text: str) -> str:
-        """Optimize text for TTS"""
+        """Optimize text for TTS - FIXED VERSION"""
         text = text.strip()
+
+        # Remove excessive punctuation first
+        text = re.sub(r'[.!?]+$', '', text)
+
+        # Add single appropriate punctuation if missing
         if not any(text.endswith(p) for p in ['.', '!', '?']):
             text += '.'
+
         text = enhance_short_messages(text)
         return text
 
@@ -379,6 +382,10 @@ class VoiceProcessingCog(commands.Cog):
         self.rate_limit = 10
         self.rate_window = 60
         self.rate_cleanup_task: Optional[asyncio.Task] = None
+
+        # Performance monitoring
+        self.queue_stats: Dict[int, Dict[str, Any]] = {}
+        self.health_monitor_task: Optional[asyncio.Task] = None
 
         self.logger.info("VoiceProcessingCog initialized")
 
@@ -428,6 +435,25 @@ class VoiceProcessingCog(commands.Cog):
                 break
             except Exception as e:
                 self.logger.error(f"Rate limit cleanup error: {e}")
+
+    async def _monitor_queue_health(self):
+        """Monitor queue health and auto-cleanup stuck queues"""
+        while True:
+            await asyncio.sleep(60)  # Check every minute
+            try:
+                current_time = time.time()
+                for guild_id in list(self.guild_processing_tasks.keys()):
+                    task = self.guild_processing_tasks.get(guild_id)
+                    if task and task.done():
+                        # Task finished unexpectedly, check if we should restart
+                        queue = self.guild_queues.get(guild_id)
+                        if queue and not queue.empty():
+                            self.logger.warning(f"🔄 Restarting finished queue processor for guild {guild_id}")
+                            self.guild_processing_tasks[guild_id] = asyncio.create_task(
+                                self._process_guild_queue(guild_id)
+                            )
+            except Exception as e:
+                self.logger.error(f"Queue health monitor error: {e}")
 
     def _get_guild_queue(self, guild_id: int) -> asyncio.Queue:
         """Get or create queue for guild"""
@@ -560,7 +586,7 @@ class VoiceProcessingCog(commands.Cog):
         await self._cleanup_order_queue(guild_id, sequence_id)
 
     async def _process_guild_queue(self, guild_id: int):
-        """Process messages for a specific guild"""
+        """Process messages for a specific guild with health checks"""
         queue = self._get_guild_queue(guild_id)
         self.guild_processing[guild_id] = True
 
@@ -568,8 +594,23 @@ class VoiceProcessingCog(commands.Cog):
 
         while True:
             try:
-                # Get the next message from the queue
-                message, text, audio_data, sequence_id = await queue.get()
+                # Health check - ensure we're still supposed to be processing
+                if not self.guild_processing.get(guild_id, False):
+                    break
+
+                # Get the next message from the queue with timeout
+                try:
+                    message, text, audio_data, sequence_id = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=30.0  # Prevent hanging if queue is empty
+                    )
+                except asyncio.TimeoutError:
+                    # No messages for 30 seconds, check if we should stop
+                    if queue.empty():
+                        self.logger.info(f"🛑 Stopping idle queue processor for guild {guild_id}")
+                        break
+                    continue
+
                 self.logger.info(f"🔊 Processing message {sequence_id} from queue: {text[:50]}...")
 
                 # Get voice client
@@ -703,41 +744,87 @@ class VoiceProcessingCog(commands.Cog):
                                 not [m for m in vc.channel.members if not m.bot]):
                             await self.voice_manager.disconnect(guild_id)
 
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics"""
+        stats = {
+            "active_guild_queues": len([q for q in self.guild_queues.values() if not q.empty()]),
+            "active_voice_connections": len(self.voice_manager.voice_clients),
+            "cache_hit_rate": f"{len(self.tts_processor.audio_cache)}/{CACHE_SIZE}",
+            "total_ordered_messages": sum(len(q) for q in self.guild_message_order.values()),
+            "rate_limited_users": len(self.user_requests),
+        }
+        return stats
+
+    @commands.slash_command(name="tts_stats", description="Check TTS system statistics")
+    async def tts_stats(self, inter: disnake.ApplicationCommandInteraction):
+        """Display TTS system statistics"""
+        stats = self.get_performance_stats()
+
+        embed = disnake.Embed(title="TTS System Statistics", color=disnake.Color.blue())
+        for key, value in stats.items():
+            embed.add_field(
+                name=key.replace('_', ' ').title(),
+                value=str(value),
+                inline=True
+            )
+
+        await inter.response.send_message(embed=embed)
+
     async def cog_load(self):
         """Start background tasks when cog loads"""
         self.rate_cleanup_task = asyncio.create_task(self._cleanup_rate_limits())
+        self.health_monitor_task = asyncio.create_task(self._monitor_queue_health())
 
     async def cog_unload(self):
-        """Clean shutdown"""
+        """Clean shutdown with better task management"""
         self.logger.info("Shutting down VoiceProcessingCog...")
 
-        # Cancel all pending order futures
+        # Stop all processing first
+        self.guild_processing.clear()
+
+        # Cancel order futures
         for guild_id, message_list in self.guild_message_order.items():
             for sequence_id, future in message_list:
                 if not future.done():
-                    future.set_exception(asyncio.CancelledError())
+                    future.cancel()
 
         # Cancel background tasks
-        if self.rate_cleanup_task and not self.rate_cleanup_task.done():
-            self.rate_cleanup_task.cancel()
-            try:
-                await self.rate_cleanup_task
-            except asyncio.CancelledError:
-                pass
+        tasks_to_cancel = []
+        if self.rate_cleanup_task:
+            tasks_to_cancel.append(self.rate_cleanup_task)
+        if self.health_monitor_task:
+            tasks_to_cancel.append(self.health_monitor_task)
 
-        # Cancel guild processing tasks
+        # Cancel guild processors
         for guild_id, task in self.guild_processing_tasks.items():
-            if task and not task.done():
+            if task:
+                tasks_to_cancel.append(task)
+
+        # Cancel all tasks
+        for task in tasks_to_cancel:
+            if not task.done():
                 task.cancel()
+
+        # Wait for cancellation
+        if tasks_to_cancel:
+            try:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            except Exception as e:
+                self.logger.debug(f"Task cancellation: {e}")
+
+        # Clear queues
+        for queue in self.guild_queues.values():
+            while not queue.empty():
                 try:
-                    await task
-                except asyncio.CancelledError:
+                    queue.get_nowait()
+                    queue.task_done()
+                except:
                     pass
 
-        # Disconnect voice clients
+        # Disconnect voice
         await self.voice_manager.disconnect_all()
 
-        # Close TTS processor
+        # Close TTS
         await self.tts_processor.close()
 
         self.logger.info("VoiceProcessingCog shutdown complete")

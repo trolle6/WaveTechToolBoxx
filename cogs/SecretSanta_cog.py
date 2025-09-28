@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import aiohttp
 import asyncio
 import datetime as dt
 import json
@@ -353,6 +353,7 @@ def participant_only():
     return commands.check(predicate)
 
 
+# Add to SecretSantaCog __init__ method:
 class SecretSantaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -361,6 +362,10 @@ class SecretSantaCog(commands.Cog):
         self.historical_data = _load_historical_assignments()
         self._lock = asyncio.Lock()
         self._backup_task = None
+
+        # Add HTTP session for API calls if needed
+        self.http_session = None
+        self.session_lock = asyncio.Lock()
 
     def _event(self) -> Optional[Dict[str, Any]]:
         return self.state.get("current_event")
@@ -425,6 +430,22 @@ class SecretSantaCog(commands.Cog):
                 failed_count += 1
 
         return {"success": success_count, "failed": failed_count}
+
+    async def cog_unload(self):
+        """Enhanced cleanup"""
+        if self._backup_task:
+            self._backup_task.cancel()
+            try:
+                await self._backup_task
+            except asyncio.CancelledError:
+                pass
+
+        # Close HTTP session if it exists
+        if hasattr(self, 'http_session') and self.http_session and not self.http_session.closed:
+            try:
+                await self.http_session.close()
+            except Exception as e:
+                print(f"Error closing HTTP session: {e}")
 
     async def cog_load(self):
         self._backup_task = asyncio.create_task(self._start_backup_task())
@@ -574,6 +595,16 @@ class SecretSantaCog(commands.Cog):
             await self._save()
 
         await inter.edit_original_response("✅ Secret Santa event stopped without assignments. Event data archived.")
+
+    # Add session management methods
+    async def _get_session(self):
+        """Get or create HTTP session"""
+        async with self.session_lock:
+            if self.http_session is None or self.http_session.closed:
+                timeout = aiohttp.ClientTimeout(total=30)
+                self.http_session = aiohttp.ClientSession(timeout=timeout)
+            return self.http_session
+
 
     @ss_root.sub_command(name="shuffle", description="Manually trigger assignment (mod only)")
     @mod_only()
