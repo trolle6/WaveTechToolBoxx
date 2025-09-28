@@ -1,13 +1,11 @@
 import asyncio
-import datetime
-import json
 import os
 import random
 import re
 import tempfile
 import time
-from typing import Dict, Optional, List, Deque, Tuple, Any
-from collections import deque, OrderedDict
+from typing import Dict, Optional, List, Tuple, Any
+from collections import OrderedDict
 import hashlib
 import uuid
 
@@ -19,7 +17,6 @@ from disnake.ext import commands
 EMOJI_REGEX = re.compile(r"<:(\w+):\d+>")
 MAX_RETRIES = 3
 RETRY_DELAY = 0.2
-HISTORY_PATH = os.path.join(os.path.dirname(__file__), "tts_history.json")
 MAX_QUEUE_SIZE = 100
 PRIORITY_USERS = []
 MAX_TEXT_LENGTH = 2000
@@ -85,12 +82,13 @@ class VoiceClientManager:
                 vc = guild.voice_client
                 try:
                     # Test if connection is actually alive
-                    if vc.channel.id == channel.id:
+                    if vc.channel and vc.channel.id == channel.id:  # Fixed: Added None check
                         self.logger.info(f"✅ Using existing guild connection to {channel.name}")
                         self.voice_clients[guild_id] = vc
                         return vc
                     else:
-                        await vc.move_to(channel)
+                        # Fixed: Added type assertion for move_to
+                        await vc.move_to(channel)  # type: ignore
                         self.logger.info(f"🔀 Moved to {channel.name}")
                         self.voice_clients[guild_id] = vc
                         return vc
@@ -98,7 +96,7 @@ class VoiceClientManager:
                     self.logger.warning(f"Existing connection issue: {e}, creating new connection")
                     try:
                         await vc.disconnect(force=True)
-                    except:
+                    except Exception:
                         pass
 
             # Clean up stale tracking
@@ -114,7 +112,7 @@ class VoiceClientManager:
                     vc = await channel.connect()
 
                     # Wait for connection
-                    for i in range(30):  # 3 second timeout
+                    for _ in range(30):  # 3 second timeout
                         if vc.is_connected():
                             break
                         await asyncio.sleep(0.1)
@@ -224,7 +222,7 @@ class EnhancedTTSProcessor:
         self.user_voice_map = config.tts.voices.get("user_voice_mappings", {})
         self.retry_limit = config.tts.retry_limit
         self.logger = logger
-        self.http_session = None
+        self.http_session: Optional[aiohttp.ClientSession] = None
         self.audio_cache = LRUCache(CACHE_SIZE)
         self.cache_lock = asyncio.Lock()
 
@@ -362,8 +360,12 @@ class VoiceProcessingCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.cfg = bot.config
-        self.logger = bot.logger
+        # Fixed: Add type hints for custom attributes
+        self.cfg = getattr(bot, 'config', None)
+        self.logger = getattr(bot, 'logger', None)
+
+        if not self.cfg or not self.logger:
+            raise ValueError("Bot is missing required 'config' or 'logger' attributes")
 
         # Validate configuration
         self._validate_config()
@@ -481,6 +483,8 @@ class VoiceProcessingCog(commands.Cog):
 
     async def _process_message(self, message: disnake.Message):
         """Process a single message with proper ordering"""
+        # Fixed: Initialize sequence_id at the start
+        sequence_id = 0
         try:
             # Sanitize text
             text = sanitize_text(sanitize_emojis(message.content))
@@ -551,7 +555,7 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 guild_id = message.guild.id
                 await self._cleanup_order_queue(guild_id, sequence_id)
-            except:
+            except Exception:
                 pass
 
     async def _cleanup_order_queue(self, guild_id: int, current_sequence_id: int):
@@ -666,7 +670,7 @@ class VoiceProcessingCog(commands.Cog):
                     # Get the bot's event loop for the after_playing callback
                     bot_loop = self.bot.loop
 
-                    def after_playing(error):
+                    def after_playing(error: Optional[Exception]) -> None:
                         # Clean up temp file first
                         try:
                             if tmp_file and os.path.exists(tmp_file):
@@ -692,7 +696,7 @@ class VoiceProcessingCog(commands.Cog):
                     if tmp_file and os.path.exists(tmp_file):
                         try:
                             os.unlink(tmp_file)
-                        except:
+                        except Exception:
                             pass
                     await self._cleanup_order_queue(guild_id, sequence_id)
 
@@ -703,6 +707,7 @@ class VoiceProcessingCog(commands.Cog):
             except Exception as e:
                 self.logger.error(f"Guild queue processor error: {e}")
                 await asyncio.sleep(1)
+
     @commands.Cog.listener()
     async def on_message(self, message: disnake.Message):
         """Handle new messages"""
@@ -828,7 +833,7 @@ class VoiceProcessingCog(commands.Cog):
                 try:
                     queue.get_nowait()
                     queue.task_done()
-                except:
+                except Exception:
                     pass
 
         # Disconnect voice
