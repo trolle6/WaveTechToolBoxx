@@ -77,25 +77,25 @@ class VoiceClientManager:
                 self.logger.error(f"Guild {guild_id} not found")
                 return None
 
-            # Check existing connection with health verification
-            if guild.voice_client and guild.voice_client.is_connected():
-                vc = guild.voice_client
+            # Check existing connection with proper type handling
+            existing_vc = guild.voice_client
+            if existing_vc and isinstance(existing_vc, disnake.VoiceClient) and existing_vc.is_connected():
                 try:
                     # Test if connection is actually alive
-                    if vc.channel and vc.channel.id == channel.id:  # Fixed: Added None check
+                    if existing_vc.channel and existing_vc.channel.id == channel.id:
                         self.logger.info(f"✅ Using existing guild connection to {channel.name}")
-                        self.voice_clients[guild_id] = vc
-                        return vc
+                        self.voice_clients[guild_id] = existing_vc
+                        return existing_vc
                     else:
-                        # Fixed: Added type assertion for move_to
-                        await vc.move_to(channel)  # type: ignore
+                        # Move to correct channel
+                        await existing_vc.move_to(channel)
                         self.logger.info(f"🔀 Moved to {channel.name}")
-                        self.voice_clients[guild_id] = vc
-                        return vc
-                except Exception as e:
+                        self.voice_clients[guild_id] = existing_vc
+                        return existing_vc
+                except (disnake.ClientException, asyncio.TimeoutError) as e:
                     self.logger.warning(f"Existing connection issue: {e}, creating new connection")
                     try:
-                        await vc.disconnect(force=True)
+                        await existing_vc.disconnect(force=True)
                     except Exception:
                         pass
 
@@ -111,25 +111,70 @@ class VoiceClientManager:
                     self.logger.info(f"🔊 Connecting to {channel.name} (attempt {attempt + 1})...")
                     vc = await channel.connect()
 
-                    # Wait for connection
-                    for _ in range(30):  # 3 second timeout
+                    # Type assertion and validation
+                    if isinstance(vc, disnake.VoiceClient):
+                        # Wait for connection
+                        for _ in range(30):  # 3 second timeout
+                            if vc.is_connected():
+                                break
+                            await asyncio.sleep(0.1)
+
                         if vc.is_connected():
-                            break
-                        await asyncio.sleep(0.1)
-
-                    if vc.is_connected():
-                        self.voice_clients[guild_id] = vc
-                        self.logger.info(f"✅ Connected to {channel.name}")
-                        return vc
+                            self.voice_clients[guild_id] = vc
+                            self.logger.info(f"✅ Connected to {channel.name}")
+                            return vc
+                        else:
+                            await vc.disconnect(force=True)
                     else:
-                        await vc.disconnect(force=True)
+                        self.logger.error("Failed to get VoiceClient instance")
+                        continue
 
-                except Exception as e:
+                except (disnake.ClientException, asyncio.TimeoutError) as e:
                     self.logger.error(f"❌ Connection attempt {attempt + 1} failed: {e}")
                     if attempt == 0:
                         await asyncio.sleep(1)  # Brief delay before retry
+                except Exception as e:
+                    self.logger.error(f"❌ Unexpected connection error (attempt {attempt + 1}): {e}")
+                    if attempt == 0:
+                        await asyncio.sleep(1)
 
             return None
+
+    async def disconnect(self, guild_id: int):
+        """Disconnect from voice channel"""
+        lock = self._get_connection_lock(guild_id)
+
+        async with lock:
+            if guild_id in self.voice_clients:
+                vc = self.voice_clients[guild_id]
+                try:
+                    if vc and isinstance(vc, disnake.VoiceClient) and vc.is_connected():
+                        await vc.disconnect(force=True)
+                    del self.voice_clients[guild_id]
+                    self.logger.info(f"🔇 Disconnected from guild {guild_id}")
+                except Exception as e:
+                    self.logger.error(f"Error disconnecting: {e}")
+                    if guild_id in self.voice_clients:
+                        del self.voice_clients[guild_id]
+
+    async def disconnect_all(self):
+        """Disconnect all voice clients"""
+        for guild_id in list(self.voice_clients.keys()):
+            await self.disconnect(guild_id)
+
+    def is_connected(self, guild_id: int) -> bool:
+        """Check if bot is connected to voice in guild"""
+        if guild_id in self.voice_clients:
+            vc = self.voice_clients[guild_id]
+            return vc and isinstance(vc, disnake.VoiceClient) and vc.is_connected()
+        return False
+
+    def is_connected(self, guild_id: int) -> bool:
+        """Check if bot is connected to voice in guild"""
+        if guild_id in self.voice_clients:
+            vc = self.voice_clients[guild_id]
+            return vc and isinstance(vc, disnake.VoiceClient) and vc.is_connected()
+        return False
 
     async def disconnect(self, guild_id: int):
         """Disconnect from voice channel"""
@@ -300,10 +345,10 @@ class EnhancedTTSProcessor:
 
         # Use WAV format for better quality and Discord compatibility
         payload = {
-            "model": self.tts_model,  # "tts-1" or "tts-1-hd"
-            "input": text,  # The text to convert
-            "voice": voice_id,  # "alloy", "shimmer", "echo", etc.
-            "response_format": self.preferred_format,  # WAV format for better quality
+            "model": self.tts_model,
+            "input": text,
+            "voice": voice_id,
+            "response_format": self.preferred_format,
         }
 
         self.logger.info(f"🔧 TTS DEBUG: Payload={payload}")
@@ -324,7 +369,7 @@ class EnhancedTTSProcessor:
                         if 400 <= response.status < 500:
                             break
 
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientError, aiohttp.ServerTimeoutError, asyncio.TimeoutError) as e:
                 self.logger.error(f"🌐 TTS network error (attempt {attempt + 1}): {e}")
             except Exception as e:
                 self.logger.error(f"💥 TTS unexpected error (attempt {attempt + 1}): {e}")
@@ -335,7 +380,8 @@ class EnhancedTTSProcessor:
         self.logger.error("💀 All TTS attempts failed")
         return None
 
-    def _optimize_text_for_tts(self, text: str) -> str:
+    @staticmethod
+    def _optimize_text_for_tts(text: str) -> str:
         """Optimize text for TTS - FIXED VERSION"""
         text = text.strip()
 
@@ -348,12 +394,6 @@ class EnhancedTTSProcessor:
 
         text = enhance_short_messages(text)
         return text
-
-    async def close(self):
-        """Clean up"""
-        if self.http_session and not self.http_session.closed:
-            await self.http_session.close()
-
 
 class VoiceProcessingCog(commands.Cog):
     """Simplified TTS Processing System with Optimized Audio"""
@@ -564,11 +604,9 @@ class VoiceProcessingCog(commands.Cog):
             if guild_id in self.guild_message_order:
                 # Find and remove the current message
                 remaining_messages = []
-                found_current = False
 
                 for seq, fut in self.guild_message_order[guild_id]:
                     if seq == current_sequence_id:
-                        found_current = True
                         continue  # Skip the current message
                     else:
                         remaining_messages.append((seq, fut))
@@ -584,7 +622,6 @@ class VoiceProcessingCog(commands.Cog):
 
                 self.logger.info(
                     f"📋 Order queue updated for guild {guild_id}, {len(remaining_messages)} messages remaining")
-
     async def _cleanup_playback(self, guild_id: int, sequence_id: int, error: Optional[Exception]):
         """Handle playback completion cleanup"""
         if error:
