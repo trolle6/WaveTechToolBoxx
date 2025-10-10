@@ -510,17 +510,22 @@ class VoiceProcessingCog(commands.Cog):
                 tmp.write(audio_data)
                 temp_file = tmp.name
 
+            self.logger.debug(f"Created temp file: {temp_file}")
+
             # Wait if already playing
             if vc.is_playing():
+                self.logger.debug("Voice client is playing, waiting...")
                 await asyncio.wait_for(
                     asyncio.create_task(self._wait_for_audio_end(vc)),
                     timeout=30
                 )
+                self.logger.debug("Done waiting for audio")
 
-            # Play audio
+            # Play audio - FIXED: Use proper FFmpeg options
             audio_source = disnake.FFmpegPCMAudio(
                 temp_file,
-                options='-loglevel error'
+                before_options="-loglevel quiet",
+                options="-vn"
             )
 
             # Playback completed event
@@ -534,14 +539,22 @@ class VoiceProcessingCog(commands.Cog):
                 try:
                     if temp_file and os.path.exists(temp_file):
                         os.unlink(temp_file)
-                except Exception:
-                    pass
+                        self.logger.debug("Cleaned up temp file")
+                except Exception as e:
+                    self.logger.error(f"Error cleaning up temp file: {e}")
 
+            self.logger.debug("Starting playback...")
             vc.play(audio_source, after=after_playback)
 
             # Wait for playback to start
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
 
+            # Check if playback actually started
+            if not vc.is_playing():
+                self.logger.error("Playback failed to start")
+                return False
+
+            self.logger.debug("Playback started successfully")
             self.metrics["messages_processed"] += 1
             return True
 
@@ -561,6 +574,7 @@ class VoiceProcessingCog(commands.Cog):
         while vc.is_playing():
             if time.time() - start_time > timeout:
                 vc.stop()
+                self.logger.warning("Audio playback timeout, forced stop")
                 break
             await asyncio.sleep(0.1)
 
@@ -601,6 +615,7 @@ class VoiceProcessingCog(commands.Cog):
                     )
 
                     if not vc:
+                        self.logger.error("Failed to get voice connection")
                         try:
                             await item.message.add_reaction("❌")
                         except Exception:
@@ -608,10 +623,18 @@ class VoiceProcessingCog(commands.Cog):
                         continue
 
                     # Play the audio
+                    self.logger.debug(f"Playing TTS audio: {item.text[:50]}...")
                     success = await self._play_tts_audio(vc, item.audio_data, item.text)
 
                     if success:
                         state.processed_count += 1
+                        self.logger.debug("TTS playback completed successfully")
+                    else:
+                        self.logger.error("TTS playback failed")
+                        try:
+                            await item.message.add_reaction("❌")
+                        except Exception:
+                            pass
 
                 except asyncio.TimeoutError:
                     # No items for 5 minutes, exit
