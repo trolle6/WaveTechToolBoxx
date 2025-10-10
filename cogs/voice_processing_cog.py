@@ -279,11 +279,13 @@ class VoiceProcessingCog(commands.Cog):
             state.cleanup()
 
         # Disconnect all voice clients
+        disconnect_tasks = []
         for vc in self.bot.voice_clients:
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                pass
+            if vc.is_connected():
+                disconnect_tasks.append(vc.disconnect(force=True))
+
+        if disconnect_tasks:
+            await asyncio.gather(*disconnect_tasks, return_exceptions=True)
 
         self.logger.info("Voice Processing Cog unloaded")
 
@@ -641,43 +643,51 @@ class VoiceProcessingCog(commands.Cog):
     async def on_message(self, msg: disnake.Message):
         """Handle messages for TTS processing"""
 
-        # Skip if bot message or not in configured channel
-        if (
-                msg.author.bot
-                or not msg.guild
-                or msg.channel.id != self.bot.config.DISCORD_CHANNEL_ID
-        ):
+        # Skip if bot message or not in guild
+        if msg.author.bot or not msg.guild:
             return
+
+        self.logger.debug(f"📨 Message received from {msg.author} in #{msg.channel.name}: {msg.content[:50]}...")
 
         # Check if user is in voice channel
         if not msg.author.voice or not msg.author.voice.channel:
+            self.logger.debug(f"❌ User {msg.author} not in voice channel")
             try:
                 await msg.add_reaction("🔇")  # Not in voice channel
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to add reaction: {e}")
             return
 
         # Check rate limit
-        if not await self.rate_limiter.check(str(msg.author.id)):
+        rate_limit_result = await self.rate_limiter.check(str(msg.author.id))
+        if not rate_limit_result:
+            self.logger.debug(f"⏳ User {msg.author} rate limited")
             try:
                 await msg.add_reaction("⏳")  # Rate limited
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to add reaction: {e}")
             return
 
         # Process text
         processed_text = self._process_text(msg.content)
         if not processed_text:
+            self.logger.debug("📝 Text processing resulted in empty string")
             return
 
+        self.logger.debug(f"🔧 Processed text: {processed_text}")
+
         # Get TTS audio
+        self.logger.debug("🎵 Generating TTS audio...")
         audio_data = await self._get_tts_audio(processed_text)
         if not audio_data:
+            self.logger.error("❌ TTS audio generation failed")
             try:
                 await msg.add_reaction("⚠️")  # TTS failed
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to add reaction: {e}")
             return
+
+        self.logger.debug(f"✅ TTS audio generated ({len(audio_data)} bytes)")
 
         # Add to queue
         state = self._get_state(msg.guild.id)
@@ -692,24 +702,45 @@ class VoiceProcessingCog(commands.Cog):
             # Priority queue: (priority, item)
             # Lower priority number = higher priority
             await state.queue.put((0, queue_item))
+            self.logger.debug(f"📥 Added to queue for guild {msg.guild.id}, queue size: {state.queue.qsize()}")
 
             # Start processor if not running
             if not state.is_active():
+                self.logger.debug(f"🚀 Starting queue processor for guild {msg.guild.id}")
                 state.processing_task = asyncio.create_task(
                     self._process_queue(msg.guild.id)
                 )
+                # Add error handling to the task
+                state.processing_task.add_done_callback(self._handle_queue_task_result)
 
             # Success reaction
             try:
                 await msg.add_reaction("✅")
+                self.logger.debug(f"✅ Successfully queued TTS for user {msg.author}")
+            except Exception as e:
+                self.logger.debug(f"Failed to add success reaction: {e}")
+
+        except asyncio.QueueFull:
+            self.logger.warning(f"📊 Queue full for guild {msg.guild.id}")
+            try:
+                await msg.add_reaction("📊")  # Queue full
+            except Exception as e:
+                self.logger.debug(f"Failed to add reaction: {e}")
+        except Exception as e:
+            self.logger.error(f"💥 Unexpected error adding to queue: {e}")
+            try:
+                await msg.add_reaction("❌")
             except Exception:
                 pass
 
-        except asyncio.QueueFull:
-            try:
-                await msg.add_reaction("📊")  # Queue full
-            except Exception:
-                pass
+    def _handle_queue_task_result(self, task: asyncio.Task):
+        """Handle the result of a queue processing task"""
+        try:
+            task.result()  # This will re-raise any exceptions that occurred in the task
+        except asyncio.CancelledError:
+            self.logger.debug("Queue processing task was cancelled")
+        except Exception as e:
+            self.logger.error(f"Queue processing task failed: {e}")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
