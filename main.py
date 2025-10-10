@@ -1,319 +1,261 @@
-import os
-import warnings
-import sys
-import signal
 import asyncio
 import logging
-import time
-import psutil
-from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, Optional
-from dataclasses import dataclass, field
+import logging.handlers
+import os
+import signal
+import sys
+from pathlib import Path
+from typing import Any, Optional
 
+import aiohttp
 import disnake
 from disnake.ext import commands
 from dotenv import load_dotenv
 
-MAX_MESSAGE_LENGTH = 1990
-
-
-@dataclass
-class DiscordConfig:
-    guild_id: int
-    channel_id: int
-    log_channel_id: int
-    moderator_role_id: int
-    moderator_channel_id: int
-    announcement_message_id: int
-    no_mic_role_id: int
-    log_file_path: str = "bot.log"
-
-
-@dataclass
-class TtsConfig:
-    api_url: str
-    bearer_token: str
-    engine: str = "tts-1"
-    delay_between_messages: float = 2.0
-    temperature: float = 1.0
-    max_tokens: int = 100
-    retry_limit: int = 2
-    enable_emotions: bool = False
-    voices: Dict[str, Any] = field(default_factory=dict)
-    default_voice: str = "GenericVoice"
-
-
-@dataclass
-class DalleConfig:
-    api_url: str
-    size: str = "1024x1024"
-
-
-@dataclass
-class Config:
-    discord: DiscordConfig
-    debug: bool
-    openai_api_key: str
-    tts: TtsConfig
-    dalle: DalleConfig
-    prefix: str = "!"
-
-
-warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
 load_dotenv("config.env")
 
 
-def get_env_or_exit(var: str, default: Optional[str] = None) -> str:
-    if (value := os.getenv(var, default)) is None:
-        print(f"Error: Environment variable '{var}' is required.")
-        sys.exit(1)
-    return value
-
-
-def get_int_env_or_exit(var: str) -> int:
-    value_str = get_env_or_exit(var)
-    try:
-        return int(value_str)
-    except ValueError:
-        print(f"Error: '{var}' must be an integer, got '{value_str}'")
-        sys.exit(1)
-
-
-def load_config() -> Config:
-    tts_voices_list = [v.strip() for v in os.getenv("OPENAI_VOICES", "").split(",") if v.strip()]
-    tts_user_map = {
-        kv.split("=")[0]: kv.split("=")[1]
-        for kv in os.getenv("TTS_USER_VOICE_MAPPINGS", "").split(",") if "=" in kv
+# ============ CONFIG ============
+class Config:
+    """Load config with validation and defaults"""
+    _required = {
+        "DISCORD_TOKEN": (str, None),
+        "DISCORD_GUILD_ID": (int, None),
+        "DISCORD_CHANNEL_ID": (int, None),
+        "DISCORD_LOG_CHANNEL_ID": (int, None),
+        "DISCORD_MODERATOR_ROLE_ID": (int, None),
+        "TTS_BEARER_TOKEN": (str, None),
+    }
+    _optional = {
+        "DEBUG_MODE": (bool, False),
+        "LOG_LEVEL": (str, "INFO"),
+        "MAX_TTS_CACHE": (int, 50),
+        "TTS_TIMEOUT": (int, 15),
     }
 
-    return Config(
-        discord=DiscordConfig(
-            guild_id=get_int_env_or_exit("DISCORD_GUILD_ID"),
-            channel_id=get_int_env_or_exit("DISCORD_CHANNEL_ID"),
-            log_channel_id=get_int_env_or_exit("DISCORD_LOG_CHANNEL_ID"),
-            moderator_role_id=get_int_env_or_exit("DISCORD_MODERATOR_ROLE_ID"),
-            moderator_channel_id=get_int_env_or_exit("MODERATOR_CHANNEL_ID"),
-            announcement_message_id=get_int_env_or_exit("ANNOUNCEMENT_MESSAGE_ID"),
-            no_mic_role_id=get_int_env_or_exit("NO_MIC_ROLE_ID"),
-            log_file_path=os.getenv("LOG_FILE_PATH", "bot.log"),
-        ),
-        debug=os.getenv("DEBUG_MODE", "false").lower() == "true",
-        openai_api_key=get_env_or_exit("OPENAI_API_KEY", ""),
-        tts=TtsConfig(
-            api_url=get_env_or_exit("TTS_API_URL", ""),
-            bearer_token=get_env_or_exit("TTS_BEARER_TOKEN", ""),
-            voices={"available_voices": tts_voices_list, "user_voice_mappings": tts_user_map},
-            default_voice=tts_voices_list[0] if tts_voices_list else "GenericVoice",
-            delay_between_messages=float(os.getenv("TTS_DELAY", 2)),
-            engine=os.getenv("TTS_MODEL", "tts-1"),
-            temperature=float(os.getenv("TTS_TEMPERATURE", 1)),
-            max_tokens=int(os.getenv("TTS_MAX_TOKENS", 100)),
-            retry_limit=int(os.getenv("TTS_RETRY_LIMIT", 2)),
-            enable_emotions=os.getenv("TTS_ENABLE_EMOTIONS", "false").lower() == "true",
-        ),
-        dalle=DalleConfig(
-            api_url=get_env_or_exit("DALLE_API_URL", ""),
-            size=os.getenv("DALLE_SIZE", "1024x1024"),
-        ),
-        prefix=os.getenv("BOT_PREFIX", "!"),
-    )
+    def __init__(self):
+        self.data = {}
+        self._load()
+
+    def _load(self):
+        missing = []
+        for key, (cast_type, _) in self._required.items():
+            val = os.getenv(key)
+            if not val:
+                missing.append(key)
+                continue
+            self.data[key] = cast_type(val) if cast_type == int else val
+
+        if missing:
+            print(f"Fatal: Missing env vars: {', '.join(missing)}")
+            raise RuntimeError(f"Missing config: {missing}")
+
+        for key, (cast_type, default) in self._optional.items():
+            val = os.getenv(key, default)
+            if cast_type == bool:
+                self.data[key] = str(val).lower() == "true"
+            elif cast_type == int:
+                self.data[key] = int(val)
+            else:
+                self.data[key] = val
+
+    def __getattr__(self, name: str):
+        key = name.upper()
+        if key in self.data:
+            return self.data[key]
+        raise AttributeError(f"Config missing: {key}")
 
 
-config = load_config()
+class HttpManager:
+    """Reusable HTTP session with connection pooling"""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.session = None
+        return cls._instance
+
+    async def get_session(self, timeout: int = 30) -> aiohttp.ClientSession:
+        if self.session is None or self.session.closed:
+            connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                connector=connector,
+            )
+        return self.session
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            try:
+                await self.session.close()
+                await asyncio.sleep(0.25)  # Allow time for connections to close
+            except Exception as e:
+                logging.getLogger("bot").debug(f"HTTP session close error: {e}")
 
 
-def setup_logger(cfg: Config) -> logging.Logger:
-    logger = logging.getLogger("bot_logger")
+# ============ SETUP ============
+def setup_logging(config: Config) -> logging.Logger:
+    logger = logging.getLogger("bot")
+    logger.setLevel(config.LOG_LEVEL)
+
+    # Prevent duplicate handlers
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.DEBUG if cfg.debug else logging.INFO)
-    fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    fmt = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
-    file_handler = RotatingFileHandler(cfg.discord.log_file_path, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
-    file_handler.setFormatter(fmt)
-    logger.addHandler(file_handler)
+    # File handler with rotation
+    fh = logging.handlers.RotatingFileHandler(
+        "bot.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(fmt)
-    logger.addHandler(console)
+    # Console handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
 
     return logger
 
 
-logger = setup_logger(config)
+async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
+    """Test if OpenAI API key is valid before loading cogs"""
+    if not key or not key.startswith("sk-"):
+        logger.error(f"Invalid key format: {key[:10] if key else 'EMPTY'}...")
+        return False
 
+    headers = {"Authorization": f"Bearer {key}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                    "https://api.openai.com/v1/models",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                if r.status == 200:
+                    logger.info("✓ OpenAI API key is valid")
+                    return True
+                elif r.status == 401:
+                    logger.error("✗ API key is invalid or expired")
+                    return False
+                else:
+                    logger.warning(f"Unexpected API response: {r.status}")
+                    return False
+    except asyncio.TimeoutError:
+        logger.warning("API key validation timeout (API might be slow)")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not validate API key: {e}")
+        return True
+
+
+# Load config early
+try:
+    config = Config()
+except RuntimeError as e:
+    print(f"Fatal: {e}")
+    sys.exit(1)
+
+logger = setup_logging(config)
+
+# Bot setup
 intents = disnake.Intents.all()
 bot = commands.InteractionBot(intents=intents)
-bot.config, bot.logger = config, logger
-bot.start_time = time.time()
+bot.config = config
+bot.logger = logger
+bot.http_mgr = HttpManager()
+bot.ready_once = False
 
 
-class DiscordLogHandler(logging.Handler):
-    def __init__(self, bot: commands.Bot, channel_id: int):
-        super().__init__()
-        self.bot, self.channel_id, self.queue = bot, channel_id, asyncio.Queue()
-        self.task: Optional[asyncio.Task] = None
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.queue.put_nowait(record)
-
-    def start(self) -> None:
-        if not self.task or self.task.done():
-            self.task = asyncio.create_task(self._process_logs())
-
-    async def _process_logs(self) -> None:
-        await self.bot.wait_until_ready()
-        if not (channel := self.bot.get_channel(self.channel_id)):
-            logger.error(f"Discord log channel {self.channel_id} not found.")
-            return
-
-        while True:
-            record = await self.queue.get()
-            message = self.format(record)
-            for i in range(0, len(message), MAX_MESSAGE_LENGTH):
-                await channel.send(f"```{message[i:i + MAX_MESSAGE_LENGTH]}```")
-            self.queue.task_done()
+@bot.event
+async def on_ready():
+    if not bot.ready_once:
+        logger.info(f"Logged in as {bot.user}")
+        bot.ready_once = True
 
 
-async def periodic_health_check():
-    """Periodic health check for the entire bot"""
-    while True:
-        await asyncio.sleep(300)  # Every 5 minutes
+@bot.event
+async def on_error(event, *args, **kwargs):
+    logger.error(f"Error in {event}", exc_info=True)
+
+
+async def graceful_shutdown():
+    """Clean shutdown ensuring all resources are released"""
+    logger.info("Shutting down...")
+
+    # Disconnect all voice clients
+    for vc in list(bot.voice_clients):
         try:
-            # Check if bot is responding
-            if not bot.is_ready():
-                logger.warning("Bot is not ready, attempting to reconnect...")
-                # Add reconnection logic if needed
-
-            # Log memory usage for monitoring
-            memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
-            if memory_mb > 500:  # If using more than 500MB
-                logger.warning(f"High memory usage: {memory_mb:.2f} MB")
-
+            await vc.disconnect()
         except Exception as e:
-            logger.error(f"Health check error: {e}")
+            logger.debug(f"Voice disconnect error: {e}")
 
-
-@bot.event
-async def on_ready() -> None:
-    logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    handler = DiscordLogHandler(bot, config.discord.log_channel_id)
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-    logger.addHandler(handler)
-    handler.start()
-
-    # Start health monitoring
-    asyncio.create_task(periodic_health_check())
-
-    logger.info("Discord log handler and health monitor started.")
-
-
-@bot.event
-async def on_interaction(inter: disnake.Interaction):
-    if inter.type == disnake.InteractionType.application_command:
-        if inter.application_command.qualified_name.startswith("santa"):
-            return
-
-
-@bot.event
-async def on_error(event_method: str, *args: Any, **kwargs: Any) -> None:
-    logger.error(f"Unhandled error in {event_method}", exc_info=True)
-
-
-@bot.event
-async def on_slash_command_error(inter: disnake.ApplicationCommandInteraction, error: Exception) -> None:
-    logger.error(f"Slash cmd '{getattr(inter.application_command, 'name', 'unknown')}' error: {error}", exc_info=True)
+    # Close HTTP session
     try:
-        await inter.send(f"❌ {error}", ephemeral=True)
-    except disnake.InteractionResponded:
-        logger.warning("Already responded to error.")
-
-
-@bot.event
-async def on_guild_join(guild: disnake.Guild) -> None:
-    if guild.id != config.discord.guild_id:
-        logger.warning(f"Joined unauthorized guild {guild.id}, leaving.")
-        await guild.leave()
-
-
-async def shutdown():
-    logger.info("Shutdown initiated.")
-    tasks = []
-
-    for cog in bot.cogs.values():
-        for attr in ['http_session', 'http']:
-            if hasattr(cog, attr) and (session := getattr(cog, attr)) and not session.closed:
-                tasks.append(session.close())
-
-    tasks.extend(vc.disconnect(force=True) for vc in bot.voice_clients)
-
-    for task in asyncio.all_tasks():
-        if task is not asyncio.current_task():
-            task.cancel()
-
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await bot.http_mgr.close()
     except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
-    finally:
+        logger.debug(f"HTTP session close error: {e}")
+
+    # Close bot
+    try:
         await bot.close()
+    except Exception as e:
+        logger.debug(f"Bot close error: {e}")
 
 
-@bot.slash_command(name="health", description="Check bot health status")
-async def health_check(inter: disnake.ApplicationCommandInteraction):
-    status = {
-        "uptime": time.time() - bot.start_time if hasattr(bot, 'start_time') else "unknown",
-        "cogs_loaded": len(bot.cogs),
-        "voice_clients": len(bot.voice_clients),
-        "memory_usage": f"{psutil.Process().memory_info().rss / 1024 / 1024:.2f} MB"
-    }
+def load_cogs() -> int:
+    """Load cogs and return count of successfully loaded cogs"""
+    cogs = ["cogs.voice_processing_cog", "cogs.DALLE_cog", "cogs.SecretSanta_cog"]
+    loaded = 0
+    for cog in cogs:
+        try:
+            bot.load_extension(cog)
+            logger.info(f"Loaded {cog}")
+            loaded += 1
+        except Exception as e:
+            logger.error(f"Failed to load {cog}: {e}")
+    return loaded
 
-    embed = disnake.Embed(title="🤖 Bot Health Status", color=disnake.Color.green())
-    for key, value in status.items():
-        embed.add_field(name=key.replace('_', ' ').title(), value=str(value), inline=True)
 
-    await inter.response.send_message(embed=embed)
+# Graceful shutdown on signals
+def handle_signal(signum, frame):
+    logger.info(f"Received signal {signum}")
+    asyncio.create_task(graceful_shutdown())
 
 
 for sig in (signal.SIGINT, signal.SIGTERM):
-    signal.signal(sig, lambda *_: asyncio.create_task(shutdown()))
-
-
-def load_cogs_safely():
-    cogs_to_load = ["cogs.SecretSanta_cog", "cogs.voice_processing_cog", "cogs.DALLE_cog"]
-    loaded_cogs = []
-
-    for cog in cogs_to_load:
-        try:
-            bot.load_extension(cog)
-            loaded_cogs.append(cog)
-            logger.info(f"Successfully loaded {cog}")
-        except Exception as e:
-            logger.error(f"Failed to load {cog}: {e}")
-
-    return loaded_cogs
-
+    signal.signal(sig, handle_signal)
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
 
-    if missing_vars := [var for var in
-                        ["DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID", "TTS_BEARER_TOKEN", "TTS_API_URL"]
-                        if not os.getenv(var)]:
-        logger.critical(f"Missing required environment variables: {', '.join(missing_vars)}")
+    # Validate API key before loading cogs
+    api_key_valid = asyncio.run(validate_openai_key(config.TTS_BEARER_TOKEN, logger))
+    if not api_key_valid:
+        logger.critical("OpenAI API key is invalid. Fix your config.env")
         sys.exit(1)
 
-    loaded_cogs = load_cogs_safely()
-    if not loaded_cogs:
-        logger.critical("No cogs loaded successfully! Exiting.")
+    # Load cogs once and store result
+    num_loaded = load_cogs()
+    if num_loaded == 0:
+        logger.critical("No cogs loaded!")
         sys.exit(1)
 
-    logger.info(f"Loaded {len(loaded_cogs)} cogs: {', '.join(loaded_cogs)}")
+    logger.info(f"Successfully loaded {num_loaded} cogs")
 
     try:
-        bot.run(get_env_or_exit("DISCORD_TOKEN"))
+        bot.run(config.DISCORD_TOKEN)
     except Exception as e:
-        logger.critical(f"Bot run failed: {e}", exc_info=True)
+        logger.critical(f"Bot failed: {e}", exc_info=True)
+        # Ensure cleanup even if bot crashes
+        try:
+            asyncio.run(graceful_shutdown())
+        except Exception as cleanup_error:
+            logger.error(f"Cleanup failed: {cleanup_error}")
         sys.exit(1)
