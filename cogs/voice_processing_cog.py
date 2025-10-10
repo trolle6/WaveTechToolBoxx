@@ -21,95 +21,173 @@ RATE_LIMIT_CLEANUP_INTERVAL, CONNECTION_TIMEOUT = 300, 10.0
 
 
 class VoiceClientManager:
-    """Optimized voice connection manager"""
+    """SUPER ROBUST voice connection manager - ENHANCED STATE DETECTION"""
 
     def __init__(self, bot: commands.Bot, logger):
         self.bot, self.logger = bot, logger
         self.voice_clients: Dict[int, disnake.VoiceClient] = {}
         self.connection_locks: Dict[int, asyncio.Lock] = {}
         self.last_activity: Dict[int, float] = {}
+        self.connection_attempts: Dict[int, int] = {}  # Track failed attempts
 
     def _get_connection_lock(self, guild_id: int) -> asyncio.Lock:
         """Get or create connection lock for guild"""
         return self.connection_locks.setdefault(guild_id, asyncio.Lock())
 
+    def _is_actually_connected(self, guild_id: int, target_channel_id: int = None) -> bool:
+        """SUPER ACCURATE connection check - uses Discord's actual state"""
+        guild = self.bot.get_guild(guild_id)
+        if not guild or not guild.voice_client:
+            return False
+
+        vc = guild.voice_client
+        is_connected = (
+                vc and
+                isinstance(vc, disnake.VoiceClient) and
+                vc.is_connected()
+        )
+
+        # If we're checking a specific channel, verify we're in the right one
+        if is_connected and target_channel_id:
+            return vc.channel and vc.channel.id == target_channel_id
+
+        return is_connected
+
+    async def _verify_connection_health(self, vc: disnake.VoiceClient) -> bool:
+        """Verify the connection is actually working"""
+        try:
+            # Check if we can get the WS connection state
+            return (vc.is_connected() and
+                    hasattr(vc, 'ws') and
+                    vc.ws and
+                    not vc.ws.closed)
+        except Exception:
+            return False
+
+    async def _force_cleanup_connection(self, guild_id: int):
+        """FORCE cleanup of any connection state"""
+        guild = self.bot.get_guild(guild_id)
+        if guild and guild.voice_client:
+            try:
+                await guild.voice_client.disconnect(force=True)
+                self.logger.info("🛑 Force disconnected existing connection")
+            except Exception as e:
+                self.logger.debug(f"Force disconnect had issue: {e}")
+            await asyncio.sleep(0.5)  # Give time for cleanup
+
     async def get_voice_client(self, guild_id: int, channel: disnake.VoiceChannel) -> Optional[disnake.VoiceClient]:
-        """Get or create voice client - SIMPLIFIED version"""
+        """SUPER ROBUST voice client getter with state verification"""
         async with self._get_connection_lock(guild_id):
             guild = self.bot.get_guild(guild_id)
             if not guild:
                 self.logger.error(f"Guild {guild_id} not found")
                 return None
 
-            existing_vc = guild.voice_client
-            current_time = time.time()
-            self.last_activity[guild_id] = current_time
+            # ENHANCED: Double-check Discord's actual voice state
+            bot_member = guild.get_member(self.bot.user.id)
+            if bot_member and bot_member.voice and bot_member.voice.channel:
+                actual_channel = bot_member.voice.channel
+                if actual_channel.id == channel.id:
+                    self.logger.info(f"✅ Already connected to correct channel: {channel.name}")
+                    self.voice_clients[guild_id] = guild.voice_client
+                    self.last_activity[guild_id] = time.time()
+                    return guild.voice_client
+                else:
+                    self.logger.info(f"🔄 Actually in different channel: {actual_channel.name} vs {channel.name}")
 
-            # Check if we have a valid, connected voice client to the correct channel
-            if (existing_vc and
-                    isinstance(existing_vc, disnake.VoiceClient) and
-                    existing_vc.is_connected() and
-                    existing_vc.channel and
-                    existing_vc.channel.id == channel.id):
-                self.voice_clients[guild_id] = existing_vc
-                return existing_vc
+            # STEP 1: Check if we're ALREADY connected to the RIGHT channel
+            if self._is_actually_connected(guild_id, channel.id):
+                self.logger.info(f"✅ Already connected to {channel.name}")
+                self.voice_clients[guild_id] = guild.voice_client
+                self.last_activity[guild_id] = time.time()
+                return guild.voice_client
 
-            # If we have an existing connection but it's to the wrong channel, try to move
-            if (existing_vc and
-                    isinstance(existing_vc, disnake.VoiceClient) and
-                    existing_vc.is_connected()):
+            # STEP 2: If connected to WRONG channel, try to move
+            if self._is_actually_connected(guild_id):
                 try:
-                    await existing_vc.move_to(channel)
-                    self.voice_clients[guild_id] = existing_vc
-                    self.logger.info(f"🔀 Moved to {channel.name}")
-                    return existing_vc
-                except (disnake.ClientException, asyncio.TimeoutError) as e:
-                    self.logger.warning(f"Move failed: {e}. Reconnecting...")
-                    try:
-                        await existing_vc.disconnect(force=True)
-                    except:
-                        pass
+                    self.logger.info(f"🔀 Moving from {guild.voice_client.channel.name} to {channel.name}")
+                    await guild.voice_client.move_to(channel)
+                    self.voice_clients[guild_id] = guild.voice_client
+                    self.last_activity[guild_id] = time.time()
+                    self.logger.info(f"✅ Moved to {channel.name}")
+                    return guild.voice_client
+                except Exception as e:
+                    self.logger.warning(f"Move failed: {e}. Force reconnecting...")
+                    await self._force_cleanup_connection(guild_id)
 
-            # Create new connection
+            # STEP 3: Clean connection attempt
             try:
+                # Ensure any stale connections are cleaned up
+                if guild.voice_client:
+                    await self._force_cleanup_connection(guild_id)
+
                 self.logger.info(f"🔊 Connecting to {channel.name}...")
-                vc = await channel.connect(reconnect=True, timeout=20.0)
+                vc = await channel.connect(reconnect=True, timeout=15.0)
 
                 if vc and vc.is_connected():
                     self.voice_clients[guild_id] = vc
-                    self.last_activity[guild_id] = current_time
-                    self.logger.info(f"✅ Connected to {channel.name}")
+                    self.last_activity[guild_id] = time.time()
+                    self.logger.info(f"✅ Successfully connected to {channel.name}")
                     return vc
 
-            except (asyncio.TimeoutError, disnake.ClientException, Exception) as e:
+            except disnake.ClientException as e:
+                if "Already connected" in str(e):
+                    self.logger.warning("🔄 Bot thinks it's already connected somewhere else")
+                    # Force cleanup and retry once
+                    await self._force_cleanup_connection(guild_id)
+                    try:
+                        vc = await channel.connect(reconnect=True, timeout=15.0)
+                        if vc and vc.is_connected():
+                            self.voice_clients[guild_id] = vc
+                            self.last_activity[guild_id] = time.time()
+                            self.logger.info(f"✅ Reconnected to {channel.name}")
+                            return vc
+                    except Exception as retry_error:
+                        self.logger.error(f"❌ Reconnection failed: {retry_error}")
+                else:
+                    self.logger.error(f"❌ Connection failed: {e}")
+
+            except (asyncio.TimeoutError, Exception) as e:
                 self.logger.error(f"❌ Connection failed: {e}")
-                if guild_id in self.voice_clients:
-                    del self.voice_clients[guild_id]
+
+            # Clean up on complete failure
+            if guild_id in self.voice_clients:
+                del self.voice_clients[guild_id]
 
             return None
 
     async def disconnect(self, guild_id: int):
-        """Disconnect from voice channel"""
+        """Force disconnect from voice channel"""
         async with self._get_connection_lock(guild_id):
+            await self._force_cleanup_connection(guild_id)
+
             if guild_id in self.voice_clients:
-                vc = self.voice_clients[guild_id]
-                try:
-                    if vc and vc.is_connected():
-                        await vc.disconnect(force=True)
-                except Exception:
-                    pass
-                finally:
-                    if guild_id in self.voice_clients:
-                        del self.voice_clients[guild_id]
-                    if guild_id in self.last_activity:
-                        del self.last_activity[guild_id]
+                del self.voice_clients[guild_id]
+            if guild_id in self.last_activity:
+                del self.last_activity[guild_id]
+            if guild_id in self.connection_attempts:
+                del self.connection_attempts[guild_id]
+
+    async def disconnect_all(self):
+        """Disconnect from all voice channels"""
+        for guild_id in list(self.voice_clients.keys()):
+            await self.disconnect(guild_id)
 
     def is_connected(self, guild_id: int) -> bool:
-        """Connection check"""
-        if guild_id in self.voice_clients:
-            vc = self.voice_clients[guild_id]
-            return vc and vc.is_connected()
-        return False
+        """ACCURATE connection check using Discord's state"""
+        return self._is_actually_connected(guild_id)
+
+    async def cleanup_all_stale_connections(self):
+        """Clean up ALL stale connections across all guilds"""
+        for guild in self.bot.guilds:
+            if guild.voice_client and guild.voice_client.is_connected():
+                # Check if this is a stale connection (not in our managed list)
+                if guild.id not in self.voice_clients:
+                    self.logger.info(f"🧹 Cleaning up stale connection in {guild.name}")
+                    try:
+                        await guild.voice_client.disconnect(force=True)
+                    except Exception:
+                        pass
 
 
 def sanitize_text(text: str) -> str:
@@ -187,6 +265,11 @@ class EnhancedTTSProcessor:
             self.http_session = aiohttp.ClientSession(timeout=timeout)
         return self.http_session
 
+    async def close_http_session(self):
+        """Close HTTP session"""
+        if self.http_session and not self.http_session.closed:
+            await self.http_session.close()
+
     async def generate_audio(self, text: str, user_id: int) -> Optional[bytes]:
         enhanced_text = self._optimize_text_for_tts(text)
         if not enhanced_text:
@@ -208,7 +291,18 @@ class EnhancedTTSProcessor:
                 return cached_audio
 
         self.total_requests += 1
-        audio_data = await self._call_tts_api(enhanced_text, voice_id)
+
+        # Enhanced TTS generation with retries
+        max_retries = 2
+        audio_data = None
+
+        for attempt in range(max_retries):
+            audio_data = await self._call_tts_api(enhanced_text, voice_id)
+            if audio_data:
+                break
+            elif attempt < max_retries - 1:
+                self.logger.warning(f"🔄 TTS generation failed, retrying... ({attempt + 1}/{max_retries})")
+                await asyncio.sleep(0.5)
 
         if audio_data:
             async with self.cache_lock:
@@ -258,7 +352,7 @@ class EnhancedTTSProcessor:
 
 
 class VoiceProcessingCog(commands.Cog):
-    """TTS Processing System - FIXED VERSION"""
+    """TTS Processing System - ULTRA ROBUST VERSION"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -287,8 +381,9 @@ class VoiceProcessingCog(commands.Cog):
         # Background tasks
         self.rate_cleanup_task: Optional[asyncio.Task] = None
         self.health_monitor_task: Optional[asyncio.Task] = None
+        self.connection_cleanup_task: Optional[asyncio.Task] = None
 
-        self.logger.info("🚀 VoiceProcessingCog initialized!")
+        self.logger.info("🚀 ULTRA ROBUST VoiceProcessingCog initialized!")
 
     def _check_rate_limit(self, user_id: int) -> bool:
         now = time.time()
@@ -323,7 +418,7 @@ class VoiceProcessingCog(commands.Cog):
                     self.guild_message_order[guild_id][0][1].set_result(True)
 
     async def _process_message(self, message: disnake.Message):
-        """SIMPLIFIED message processing - FIXED"""
+        """Message processing with connection state verification"""
         sequence_id = 0
         try:
             # Check if user is in voice channel
@@ -341,7 +436,7 @@ class VoiceProcessingCog(commands.Cog):
 
             guild_id = message.guild.id
 
-            # Generate TTS immediately
+            # Generate TTS with enhanced retry logic
             self.logger.info(f"🎯 Generating TTS for: {text[:30]}...")
             audio_data = await self.tts_processor.generate_audio(text, message.author.id)
             if not audio_data:
@@ -386,16 +481,16 @@ class VoiceProcessingCog(commands.Cog):
                 pass
 
     async def _process_guild_queue(self, guild_id: int):
-        """SIMPLIFIED guild queue processing - FIXED"""
+        """Guild queue processing with robust connection handling and failure recovery"""
         queue = self._get_guild_queue(guild_id)
         self.guild_processing[guild_id] = True
         self.logger.info(f"🎯 Starting queue processor for guild {guild_id}")
 
-        while True:
-            try:
-                if not self.guild_processing.get(guild_id, False):
-                    break
+        consecutive_failures = 0
+        max_consecutive_failures = 3
 
+        while self.guild_processing.get(guild_id, False):
+            try:
                 try:
                     message, text, audio_data, sequence_id = await asyncio.wait_for(queue.get(), timeout=20.0)
                 except asyncio.TimeoutError:
@@ -413,7 +508,7 @@ class VoiceProcessingCog(commands.Cog):
 
                 voice_channel = message.author.voice.channel
 
-                # Get voice connection
+                # Get voice connection with robust error handling
                 try:
                     self.logger.info(f"🔊 Attempting voice connection to {voice_channel.name}...")
                     vc = await self.voice_manager.get_voice_client(guild_id, voice_channel)
@@ -421,12 +516,14 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.error(f"❌ Voice connection error: {e}")
                     await self._cleanup_order_queue(guild_id, sequence_id)
                     queue.task_done()
+                    consecutive_failures += 1
                     continue
 
                 if not vc:
                     self.logger.error(f"❌ Failed to get voice client for {voice_channel.name}")
                     await self._cleanup_order_queue(guild_id, sequence_id)
                     queue.task_done()
+                    consecutive_failures += 1
                     continue
 
                 # Wait for current playback to finish
@@ -469,6 +566,9 @@ class VoiceProcessingCog(commands.Cog):
                     vc.play(source, after=after_playing)
                     self.logger.info(f"🔊 Playing TTS: {text[:30]}...")
 
+                    # Reset failure counter on success
+                    consecutive_failures = 0
+
                 except Exception as e:
                     self.logger.error(f"❌ Playback error: {e}")
                     if tmp_file and os.path.exists(tmp_file):
@@ -477,6 +577,7 @@ class VoiceProcessingCog(commands.Cog):
                         except Exception:
                             pass
                     await self._cleanup_order_queue(guild_id, sequence_id)
+                    consecutive_failures += 1
 
                 queue.task_done()
 
@@ -484,11 +585,26 @@ class VoiceProcessingCog(commands.Cog):
                 self.logger.info(f"🛑 Queue processor cancelled for guild {guild_id}")
                 break
             except Exception as e:
-                self.logger.error(f"❌ Queue processor error: {e}")
-                await asyncio.sleep(0.5)
+                consecutive_failures += 1
+                self.logger.error(f"❌ Queue processor error ({consecutive_failures}/{max_consecutive_failures}): {e}")
+
+                if consecutive_failures >= max_consecutive_failures:
+                    self.logger.error(f"🛑 Too many consecutive failures, stopping processor for guild {guild_id}")
+                    break
+
+                await asyncio.sleep(1.0 * consecutive_failures)  # Exponential backoff
 
         self.guild_processing[guild_id] = False
         self.logger.info(f"🛑 Queue processor stopped for guild {guild_id}")
+
+    async def _periodic_connection_cleanup(self):
+        """Periodically clean up stale connections"""
+        while True:
+            await asyncio.sleep(60)  # Every minute
+            try:
+                await self.voice_manager.cleanup_all_stale_connections()
+            except Exception as e:
+                self.logger.debug(f"Connection cleanup error: {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message: disnake.Message):
@@ -507,30 +623,44 @@ class VoiceProcessingCog(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: disnake.Member, before: disnake.VoiceState,
                                     after: disnake.VoiceState):
-        """Voice state handler"""
+        """Enhanced voice state handler - AUTO DISCONNECT WHEN EMPTY"""
         if member.bot:
             return
 
         guild_id = member.guild.id
 
-        # Handle bot being disconnected
+        # Handle bot being disconnected or moved
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
+                # Bot was disconnected
+                self.logger.info("🔌 Bot was disconnected from voice channel")
                 await self.voice_manager.disconnect(guild_id)
+            elif before.channel and after.channel and before.channel.id != after.channel.id:
+                # Bot was moved to different channel
+                self.logger.info(f"🔀 Bot was moved to {after.channel.name}")
+                # Update our tracking
+                self.voice_manager.voice_clients[guild_id] = member.guild.voice_client
             return
 
-        # Auto-disconnect if no users left in channel
+        # Enhanced auto-disconnect logic
         if before.channel and not after.channel:
-            if self.voice_manager.is_connected(guild_id):
-                vc = self.voice_manager.voice_clients.get(guild_id)
-                if vc and vc.channel and vc.channel.id == before.channel.id:
-                    if not any(not m.bot for m in before.channel.members):
-                        await asyncio.sleep(1)
-                        if self.voice_manager.is_connected(guild_id) and not any(not m.bot for m in vc.channel.members):
-                            await self.voice_manager.disconnect(guild_id)
+            await asyncio.sleep(3)  # Longer delay for stability
+
+            guild = self.bot.get_guild(guild_id)
+            if guild and guild.voice_client and guild.voice_client.channel:
+                current_channel = guild.voice_client.channel
+                human_users = [m for m in current_channel.members if not m.bot]
+
+                if not human_users:
+                    self.logger.info(f"🎯 Auto-disconnecting from empty channel: {current_channel.name}")
+                    await self.voice_manager.disconnect(guild_id)
+                else:
+                    self.logger.debug(f"👥 Channel not empty: {len(human_users)} users remaining")
 
     async def cog_load(self):
-        """Cog load"""
+        """Cog load - cleanup any stale connections"""
+        await self.voice_manager.cleanup_all_stale_connections()
+        self.connection_cleanup_task = asyncio.create_task(self._periodic_connection_cleanup())
         self.logger.info("VoiceProcessingCog background tasks started")
 
     async def cog_unload(self):
@@ -543,6 +673,8 @@ class VoiceProcessingCog(commands.Cog):
             tasks_to_cancel.append(self.rate_cleanup_task)
         if self.health_monitor_task:
             tasks_to_cancel.append(self.health_monitor_task)
+        if self.connection_cleanup_task:
+            tasks_to_cancel.append(self.connection_cleanup_task)
         for task in self.guild_processing_tasks.values():
             if task and not task.done():
                 tasks_to_cancel.append(task)
