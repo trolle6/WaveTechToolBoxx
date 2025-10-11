@@ -976,24 +976,6 @@ class SecretSantaCog(commands.Cog):
                 text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
             await inter.edit_original_response(embed=embed)
 
-            # Add summary statistics
-            total_participants = sum(
-                len(archives[y].get("event", {}).get("participants", {}))
-                for y in sorted_years
-            )
-            total_gifts = sum(
-                len(archives[y].get("event", {}).get("gift_submissions", {}))
-                for y in sorted_years
-            )
-
-            embed.add_field(
-                name="📊 All-Time Stats",
-                value=f"Total Events: {len(sorted_years)}\nTotal Participants: {total_participants}\nTotal Gifts: {total_gifts}",
-                inline=False
-            )
-
-            await inter.edit_original_response(embed=embed)
-
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
         """Handle reaction adds for joining"""
