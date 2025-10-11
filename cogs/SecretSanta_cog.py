@@ -14,12 +14,26 @@ from typing import Any, Dict, List, Optional
 import disnake
 from disnake.ext import commands
 
-
 # Paths
-ROOT = Path(__file__).parent
+# The cog file is at: PROJECT_ROOT/cogs/SecretSanta_cog.py
+# We want archive at: PROJECT_ROOT/cogs/archive/
+ROOT = Path(__file__).parent  # This is the 'cogs' directory
 STATE_FILE = ROOT / "secret_santa_state.json"
 ARCHIVE_DIR = ROOT / "archive"
+
+# Ensure archive directory exists
 ARCHIVE_DIR.mkdir(exist_ok=True)
+
+# Log the paths for debugging
+import logging
+_init_logger = logging.getLogger("bot.santa.init")
+_init_logger.info(f"Secret Santa cog file: {__file__}")
+_init_logger.info(f"ROOT (cogs dir): {ROOT}")
+_init_logger.info(f"Archive directory: {ARCHIVE_DIR}")
+_init_logger.info(f"Archive exists: {ARCHIVE_DIR.exists()}")
+if ARCHIVE_DIR.exists():
+    files = list(ARCHIVE_DIR.glob("*.json"))
+    _init_logger.info(f"Archive files found: {[f.name for f in files]}")
 
 
 def load_json(path: Path, default: Any = None) -> Any:
@@ -183,13 +197,36 @@ class SecretSantaCog(commands.Cog):
 
     def _archive_event(self, event: Dict[str, Any], year: int):
         """Archive event data"""
-        archive = {
+        # Convert event structure to match historical format
+        archived_assignments = []
+
+        # Process gift submissions
+        for giver_id, submission in event.get("gift_submissions", {}).items():
+            archived_assignments.append({
+                "giver_id": giver_id,
+                "giver_name": event["participants"].get(giver_id, f"User {giver_id}"),
+                "receiver_id": str(submission.get("receiver_id", "")),
+                "receiver_name": submission.get("receiver_name", "Unknown"),
+                "gift": submission.get("gift", "No description")
+            })
+
+        # Archive in new format (event_YEAR.json)
+        archive_new = {
             "year": year,
             "event": event.copy(),
             "archived_at": time.time(),
             "timestamp": dt.datetime.now().isoformat()
         }
-        save_json(ARCHIVE_DIR / f"event_{year}.json", archive)
+        save_json(ARCHIVE_DIR / f"event_{year}.json", archive_new)
+
+        # Also save in old format (YEAR.json) for compatibility
+        archive_old = {
+            "year": year,
+            "assignments": archived_assignments
+        }
+        save_json(ARCHIVE_DIR / f"{year}.json", archive_old)
+
+        self.logger.info(f"Archived Secret Santa {year} in both formats")
 
     @commands.slash_command(name="ss")
     async def ss_root(self, inter: disnake.ApplicationCommandInteraction):
@@ -309,17 +346,47 @@ class SecretSantaCog(commands.Cog):
         # Load all history (current + archived)
         history = self.state.get("pair_history", {}).copy()
 
-        # Load archived history
-        for archive_file in ARCHIVE_DIR.glob("event_*.json"):
+        # Load archived history from YYYY.json files
+        for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
             try:
-                archive_data = load_json(archive_file)
-                event_data = archive_data.get("event", {})
-                assignments = event_data.get("assignments", {})
+                year_str = archive_file.stem
+                if not year_str.isdigit() or len(year_str) != 4:
+                    continue
 
-                if isinstance(assignments, dict):
-                    for giver, receiver in assignments.items():
-                        history.setdefault(giver, []).append(int(receiver))
-            except Exception:
+                archive_data = load_json(archive_file)
+
+                # Handle old format (direct assignments list)
+                assignments_data = archive_data.get("assignments", [])
+
+                if isinstance(assignments_data, list):
+                    # Process old format where assignments is a list
+                    for assignment in assignments_data:
+                        giver_id = assignment.get("giver_id")
+                        receiver_id = assignment.get("receiver_id")
+
+                        if giver_id and receiver_id:
+                            # Ensure receiver_id is int
+                            try:
+                                receiver_int = int(receiver_id)
+                                history.setdefault(str(giver_id), []).append(receiver_int)
+                            except (ValueError, TypeError):
+                                continue
+
+                # Also check for new format (event_YYYY.json)
+                elif archive_data.get("event"):
+                    event_data = archive_data["event"]
+                    event_assignments = event_data.get("assignments", {})
+
+                    if isinstance(event_assignments, dict):
+                        for giver, receiver in event_assignments.items():
+                            try:
+                                receiver_int = int(receiver)
+                                history.setdefault(str(giver), []).append(receiver_int)
+                            except (ValueError, TypeError):
+                                continue
+
+            except Exception as e:
+                self.logger.warning(f"Error loading archive {archive_file}: {e}")
                 continue
 
         # Make assignments
@@ -640,20 +707,81 @@ class SecretSantaCog(commands.Cog):
 
     @ss_root.sub_command(name="history", description="View past Secret Santa events")
     async def ss_history(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(default=None, description="Specific year to view")
+            self,
+            inter: disnake.ApplicationCommandInteraction,
+            year: int = commands.Param(default=None, description="Specific year to view")
     ):
         """Show event history"""
         await inter.response.defer(ephemeral=True)
 
-        # Load archived events
-        archives = []
+        # Load archived events - both YYYY.json and event_YYYY.json formats
+        archives = {}
+
+        # Load old format (YYYY.json)
+        for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
+            year_str = archive_file.stem
+
+            # Skip non-4-digit year files
+            if not year_str.isdigit() or len(year_str) != 4:
+                continue
+
+            try:
+                year_int = int(year_str)
+                data = load_json(archive_file)
+
+                if data:
+                    # Convert old format to consistent structure
+                    if "assignments" in data and isinstance(data["assignments"], list):
+                        # Old format - create a pseudo-event structure
+                        participants = {}
+                        gifts = {}
+                        assignments_map = {}
+
+                        for assignment in data["assignments"]:
+                            giver_id = assignment.get("giver_id", "")
+                            giver_name = assignment.get("giver_name", "Unknown")
+                            receiver_id = assignment.get("receiver_id", "")
+                            receiver_name = assignment.get("receiver_name", "Unknown")
+                            gift = assignment.get("gift", "No description")
+
+                            participants[giver_id] = giver_name
+                            if receiver_id:
+                                participants[receiver_id] = receiver_name
+
+                            gifts[giver_id] = {
+                                "gift": gift,
+                                "receiver_name": receiver_name,
+                                "receiver_id": receiver_id
+                            }
+
+                            if giver_id and receiver_id:
+                                assignments_map[giver_id] = receiver_id
+
+                        archives[year_int] = {
+                            "year": year_int,
+                            "event": {
+                                "participants": participants,
+                                "gift_submissions": gifts,
+                                "assignments": assignments_map
+                            }
+                        }
+                    elif "event" in data:
+                        # New format
+                        archives[year_int] = data
+
+            except Exception as e:
+                self.logger.warning(f"Error loading archive {archive_file}: {e}")
+                continue
+
+        # Load new format (event_YYYY.json) - these take precedence
         for archive_file in ARCHIVE_DIR.glob("event_*.json"):
             try:
-                data = load_json(archive_file)
-                if data:
-                    archives.append(data)
+                year_str = archive_file.stem.replace("event_", "")
+                if year_str.isdigit():
+                    year_int = int(year_str)
+                    data = load_json(archive_file)
+                    if data:
+                        archives[year_int] = data
             except Exception:
                 continue
 
@@ -661,61 +789,208 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ No archived events found")
             return
 
-        archives.sort(key=lambda x: x.get("year", 0), reverse=True)
+        # Sort by year
+        sorted_years = sorted(archives.keys(), reverse=True)
 
         if year:
-            # Show specific year
-            archive = next((a for a in archives if a.get("year") == year), None)
-
-            if not archive:
-                await inter.edit_original_response(content=f"❌ No event found for {year}")
+            # Show specific year with improved layout
+            if year not in archives:
+                available = ", ".join(str(y) for y in sorted_years)
+                await inter.edit_original_response(
+                    content=f"❌ No event found for {year}\n**Available years:** {available}"
+                )
                 return
 
+            archive = archives[year]
             event_data = archive.get("event", {})
             participants = event_data.get("participants", {})
             gifts = event_data.get("gift_submissions", {})
 
             embed = disnake.Embed(
                 title=f"🎄 Secret Santa {year}",
-                color=disnake.Color.gold()
+                description=f"**{len(participants)}** participants exchanged gifts",
+                color=disnake.Color.gold(),
+                timestamp=dt.datetime.now()
             )
 
-            embed.add_field(name="Participants", value=str(len(participants)), inline=True)
-            embed.add_field(name="Gifts Submitted", value=str(len(gifts)), inline=True)
-
+            # Create gift exchange list with mentions
             if gifts:
-                gift_list = []
-                for giver_id, submission in list(gifts.items())[:5]:
-                    giver = participants.get(giver_id, f"User {giver_id}")
-                    receiver = submission.get("receiver_name", "Unknown")
-                    gift_list.append(f"🎁 {giver} → {receiver}")
+                exchange_lines = []
 
+                for giver_id, submission in gifts.items():
+                    receiver_id = submission.get("receiver_id", "")
+                    gift_desc = submission.get("gift", "No description")
+
+                    # Use mentions for clickable names
+                    giver_mention = f"<@{giver_id}>" if giver_id.isdigit() else participants.get(giver_id, "Unknown")
+                    receiver_mention = f"<@{receiver_id}>" if receiver_id and receiver_id.isdigit() else submission.get(
+                        "receiver_name", "Unknown")
+
+                    # Format gift description (truncate if needed)
+                    if len(gift_desc) > 60:
+                        gift_desc = gift_desc[:57] + "..."
+
+                    exchange_lines.append(f"🎁 {giver_mention} → {receiver_mention}")
+                    exchange_lines.append(f"    ⤷ *{gift_desc}*")
+
+                # Split into multiple fields if needed
+                chunks = []
+                current_chunk = []
+                current_length = 0
+
+                for line in exchange_lines:
+                    line_length = len(line)
+                    if current_length + line_length > 900:  # Leave buffer for field limits
+                        chunks.append("\n".join(current_chunk))
+                        current_chunk = [line]
+                        current_length = line_length
+                    else:
+                        current_chunk.append(line)
+                        current_length += line_length + 1
+
+                if current_chunk:
+                    chunks.append("\n".join(current_chunk))
+
+                # Add fields
+                for i, chunk in enumerate(chunks[:3]):  # Max 3 fields
+                    field_name = "🎁 Gift Exchanges" if i == 0 else "​"  # Zero width space for continuation
+                    embed.add_field(name=field_name, value=chunk, inline=False)
+
+                if len(gifts) > 10:
+                    embed.add_field(
+                        name="​",
+                        value=f"*... and {len(gifts) - 10} more exchanges*",
+                        inline=False
+                    )
+            else:
                 embed.add_field(
-                    name="Gifts",
-                    value="\n".join(gift_list),
+                    name="📝 Status",
+                    value="No gifts recorded for this year",
                     inline=False
                 )
 
+            # Add statistics
+            completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
+            embed.add_field(
+                name="📊 Statistics",
+                value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {len(gifts)}",
+                inline=True
+            )
+
+            embed.set_footer(text=f"Requested by {inter.author.display_name}")
             await inter.edit_original_response(embed=embed)
 
         else:
-            # Show all years
+            # Show all years overview with better layout
             embed = disnake.Embed(
-                title="🎄 Secret Santa History",
-                color=disnake.Color.blue()
+                title="🎄 Secret Santa Archive",
+                description="Complete history of all Secret Santa events",
+                color=disnake.Color.blue(),
+                timestamp=dt.datetime.now()
             )
 
-            for archive in archives[:10]:
-                year_val = archive.get("year", "Unknown")
+            # Create year timeline
+            timeline_text = []
+            for year_val in sorted_years:
+                archive = archives[year_val]
                 event_data = archive.get("event", {})
                 participants = event_data.get("participants", {})
                 gifts = event_data.get("gift_submissions", {})
 
-                embed.add_field(
-                    name=f"Year {year_val}",
-                    value=f"👥 {len(participants)} participants | 🎁 {len(gifts)} gifts",
-                    inline=True
+                completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
+
+                # Status indicator
+                if completion_rate >= 90:
+                    status = "✅"
+                elif completion_rate >= 70:
+                    status = "🟨"
+                elif completion_rate > 0:
+                    status = "🟧"
+                else:
+                    status = "⏳"
+
+                timeline_text.append(
+                    f"**{year_val}** {status} — {len(participants)} participants, {len(gifts)} gifts ({completion_rate:.0f}%)"
                 )
+
+            # Split timeline into chunks if needed
+            if len(timeline_text) <= 10:
+                embed.add_field(
+                    name="📅 Event Timeline",
+                    value="\n".join(timeline_text),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="📅 Recent Events",
+                    value="\n".join(timeline_text[:5]),
+                    inline=False
+                )
+                embed.add_field(
+                    name="📅 Earlier Events",
+                    value="\n".join(timeline_text[5:10]),
+                    inline=False
+                )
+                if len(timeline_text) > 10:
+                    embed.add_field(
+                        name="​",
+                        value=f"*... and {len(timeline_text) - 10} more years*",
+                        inline=False
+                    )
+
+            # Calculate all-time statistics
+            total_participants = sum(
+                len(archives[y].get("event", {}).get("participants", {}))
+                for y in sorted_years
+            )
+            total_gifts = sum(
+                len(archives[y].get("event", {}).get("gift_submissions", {}))
+                for y in sorted_years
+            )
+            avg_participants = total_participants / len(sorted_years) if sorted_years else 0
+            avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
+
+            # Add statistics with better formatting
+            stats_text = [
+                f"**Total Events:** {len(sorted_years)}",
+                f"**Total Participants:** {total_participants}",
+                f"**Total Gifts Given:** {total_gifts}",
+                f"**Average per Year:** {avg_participants:.0f} participants",
+                f"**Overall Completion:** {avg_completion:.0f}%"
+            ]
+
+            embed.add_field(
+                name="📊 All-Time Statistics",
+                value="\n".join(stats_text),
+                inline=False
+            )
+
+            # Add legend
+            embed.add_field(
+                name="📖 Status Legend",
+                value="✅ 90%+ complete | 🟨 70-89% | 🟧 Under 70% | ⏳ No gifts recorded",
+                inline=False
+            )
+
+            embed.set_footer(
+                text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
+            await inter.edit_original_response(embed=embed)
+
+            # Add summary statistics
+            total_participants = sum(
+                len(archives[y].get("event", {}).get("participants", {}))
+                for y in sorted_years
+            )
+            total_gifts = sum(
+                len(archives[y].get("event", {}).get("gift_submissions", {}))
+                for y in sorted_years
+            )
+
+            embed.add_field(
+                name="📊 All-Time Stats",
+                value=f"Total Events: {len(sorted_years)}\nTotal Participants: {total_participants}\nTotal Gifts: {total_gifts}",
+                inline=False
+            )
 
             await inter.edit_original_response(embed=embed)
 
