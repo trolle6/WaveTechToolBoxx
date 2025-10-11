@@ -105,7 +105,7 @@ class VoiceProcessingCog(commands.Cog):
         self._cleanup_task = None
         self._shutdown = asyncio.Event()
 
-        self.allowed_channels: List[int] = bot.config.get("DISCORD_CHANNEL_ID", [])
+        self.allowed_channel = bot.config.DISCORD_CHANNEL_ID
     async def cog_load(self):
         """Initialize cog"""
         if not self.enabled:
@@ -517,7 +517,7 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         # Check channel whitelist
-        if self.allowed_channels and message.channel.id not in self.allowed_channels:
+        if self.allowed_channel and message.channel.id is not self.allowed_channel:
             return
 
         # Check if user is in voice
