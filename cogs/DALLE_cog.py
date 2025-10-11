@@ -1,0 +1,517 @@
+"""
+DALL-E Image Generation Cog - Complete Rewrite
+High-quality AI image generation with robust queue management
+"""
+
+import asyncio
+import hashlib
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+import aiohttp
+import disnake
+from disnake.ext import commands
+
+from . import utils
+
+
+@dataclass
+class GenerationJob:
+    """Image generation job"""
+    user_id: int
+    prompt: str
+    size: str
+    quality: str
+    interaction: disnake.ApplicationCommandInteraction
+    timestamp: float
+
+    def is_expired(self, max_age: int = 300) -> bool:
+        """Check if job is too old (5 minutes)"""
+        return (time.time() - self.timestamp) > max_age
+
+
+class DALLECog(commands.Cog):
+    """DALL-E 3 image generation"""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.logger = bot.logger.getChild("dalle")
+
+        # Check API key
+        if not hasattr(bot.config, 'OPENAI_API_KEY') or not bot.config.OPENAI_API_KEY:
+            self.logger.warning("OPENAI_API_KEY not configured - DALL-E disabled")
+            self.enabled = False
+            return
+
+        self.enabled = True
+
+        # Components
+        self.rate_limiter = utils.RateLimiter(limit=10, window=60)
+        self.cache = utils.LRUCache[str](max_size=50, ttl=3000)  # URLs expire in ~1 hour
+
+        # Queue
+        self.queue = asyncio.Queue(maxsize=50)
+        self.processor_task: Optional[asyncio.Task] = None
+        self.is_processing = False
+
+        # Config
+        self.api_url = "https://api.openai.com/v1/images/generations"
+
+        # Stats
+        self.stats = {
+            "total_requests": 0,
+            "successful": 0,
+            "failed": 0,
+            "cache_hits": 0,
+            "total_time": 0.0
+        }
+
+        self._shutdown = asyncio.Event()
+
+        self.logger.info("DALL-E cog initialized")
+
+    async def cog_load(self):
+        """Initialize cog"""
+        if not self.enabled:
+            return
+
+        self.processor_task = asyncio.create_task(self._process_queue())
+        self.logger.info("DALL-E cog loaded")
+
+    async def cog_unload(self):
+        """Cleanup cog"""
+        if not self.enabled:
+            return
+
+        self.logger.info("Unloading DALL-E cog...")
+        self._shutdown.set()
+
+        if self.processor_task:
+            self.processor_task.cancel()
+            try:
+                await self.processor_task
+            except asyncio.CancelledError:
+                pass
+
+        self.logger.info("DALL-E cog unloaded")
+
+    def _cache_key(self, prompt: str, size: str, quality: str) -> str:
+        """Generate cache key"""
+        return hashlib.sha256(f"{prompt}:{size}:{quality}".encode()).hexdigest()[:16]
+
+    def _enhance_prompt(self, prompt: str) -> str:
+        """Enhance prompt for better results"""
+        prompt = " ".join(prompt.split())
+
+        # Don't enhance if already detailed
+        quality_terms = ["masterpiece", "4k", "8k", "ultra detailed", "professional"]
+        if any(term in prompt.lower() for term in quality_terms):
+            return prompt
+
+        # Add quality enhancement if there's room
+        if len(prompt) < 3900:
+            return f"{prompt}, masterpiece, best quality, ultra detailed, professional"
+
+        return prompt
+
+    async def _generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        quality: str = "hd"
+    ) -> Dict:
+        """Call DALL-E API"""
+
+        headers = {
+            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": "dall-e-3",
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+            "quality": quality,
+            "response_format": "url",
+            "style": "vivid"
+        }
+
+        self.stats["total_requests"] += 1
+
+        # Try up to 3 times
+        for attempt in range(3):
+            try:
+                session = await self.bot.http_mgr.get_session(timeout=45)
+
+                async with session.post(
+                    self.api_url,
+                    json=payload,
+                    headers=headers
+                ) as resp:
+
+                    if resp.status == 200:
+                        result = await resp.json()
+                        self.stats["successful"] += 1
+                        return {"success": True, "data": result}
+
+                    elif resp.status == 429:
+                        retry_after = resp.headers.get('Retry-After', '60')
+
+                        if attempt < 2:
+                            wait = min(int(retry_after), 30)
+                            self.logger.warning(f"Rate limited, waiting {wait}s")
+                            await asyncio.sleep(wait)
+                            continue
+
+                        return {"success": False, "error": f"Rate limited. Try again in {retry_after}s"}
+
+                    elif resp.status == 400:
+                        error_data = await resp.json()
+                        error_msg = error_data.get("error", {}).get("message", "Bad request")
+
+                        if "content_policy" in error_msg.lower():
+                            return {"success": False, "error": "🚫 Content policy violation"}
+
+                        return {"success": False, "error": f"Invalid request: {error_msg}"}
+
+                    elif resp.status == 401:
+                        return {"success": False, "error": "🔒 API authentication failed"}
+
+                    else:
+                        if attempt < 2:
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+
+                        error = await resp.text()
+                        return {"success": False, "error": f"API error {resp.status}"}
+
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return {"success": False, "error": "⏰ Request timeout"}
+
+            except Exception as e:
+                self.logger.error(f"Generation error: {e}", exc_info=True)
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return {"success": False, "error": f"Unexpected error: {str(e)[:50]}"}
+
+        self.stats["failed"] += 1
+        return {"success": False, "error": "Max retries exceeded"}
+
+    async def _process_queue(self):
+        """Process generation queue"""
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    # Get next job
+                    job = await asyncio.wait_for(self.queue.get(), timeout=60)
+
+                    # Check if expired
+                    if job.is_expired():
+                        try:
+                            await job.interaction.edit_original_response(
+                                content="⏰ Request expired"
+                            )
+                        except Exception:
+                            pass
+                        continue
+
+                    self.is_processing = True
+
+                    # Update status
+                    try:
+                        embed = disnake.Embed(
+                            title="🎨 Generating Image",
+                            description="Creating your masterpiece with DALL-E 3...",
+                            color=disnake.Color.blue()
+                        )
+                        embed.add_field(
+                            name="Prompt",
+                            value=f"```{job.prompt[:100]}...```" if len(job.prompt) > 100 else f"```{job.prompt}```",
+                            inline=False
+                        )
+                        embed.add_field(name="Quality", value=job.quality.upper(), inline=True)
+                        embed.add_field(name="Size", value=job.size, inline=True)
+                        embed.set_footer(text="This may take 15-30 seconds")
+
+                        await job.interaction.edit_original_response(embed=embed)
+                    except Exception:
+                        pass
+
+                    # Generate
+                    start = time.time()
+                    result = await self._generate_image(job.prompt, job.size, job.quality)
+                    elapsed = time.time() - start
+                    self.stats["total_time"] += elapsed
+
+                    # Cache if successful
+                    if result.get("success") and result.get("data"):
+                        cache_key = self._cache_key(job.prompt, job.size, job.quality)
+                        image_url = result["data"]["data"][0]["url"]
+                        await self.cache.set(cache_key, image_url)
+
+                    # Send result
+                    await self._send_result(job, result, elapsed)
+
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Queue processing error: {e}", exc_info=True)
+                    await asyncio.sleep(1)
+                finally:
+                    self.is_processing = False
+
+        except asyncio.CancelledError:
+            pass
+
+    async def _send_result(self, job: GenerationJob, result: Dict, elapsed: float):
+        """Send generation result"""
+        try:
+            if not result.get("success"):
+                embed = disnake.Embed(
+                    title="❌ Generation Failed",
+                    description=result.get("error", "Unknown error"),
+                    color=disnake.Color.red()
+                )
+                embed.set_footer(text=f"Time: {elapsed:.1f}s")
+                await job.interaction.edit_original_response(embed=embed)
+                return
+
+            image_url = result["data"]["data"][0]["url"]
+
+            embed = disnake.Embed(
+                title="🎨 Image Generated!",
+                description=f"**Prompt:** {job.prompt[:200]}{'...' if len(job.prompt) > 200 else ''}",
+                color=disnake.Color.green()
+            )
+            embed.set_image(url=image_url)
+            embed.add_field(name="Time", value=f"{elapsed:.1f}s", inline=True)
+            embed.add_field(name="Model", value="DALL-E 3", inline=True)
+            embed.add_field(name="Quality", value=job.quality.upper(), inline=True)
+            embed.set_footer(text="💡 Tip: Use specific details for better results!")
+
+            await job.interaction.edit_original_response(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Failed to send result: {e}", exc_info=True)
+            try:
+                await job.interaction.edit_original_response(
+                    content="❌ Failed to send result"
+                )
+            except Exception:
+                pass
+
+    @commands.slash_command(name="imagine", description="Generate an image with DALL-E 3")
+    async def imagine(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        prompt: str = commands.Param(description="Describe the image", max_length=4000),
+        size: str = commands.Param(
+            default="1024x1024",
+            choices=["1024x1024", "1792x1024", "1024x1792"],
+            description="Image size"
+        ),
+        quality: str = commands.Param(
+            default="hd",
+            choices=["standard", "hd"],
+            description="Image quality (HD recommended)"
+        ),
+        private: bool = commands.Param(
+            default=False,
+            description="Make response private"
+        )
+    ):
+        """Generate images with DALL-E 3"""
+
+        if not self.enabled:
+            await inter.response.send_message(
+                "❌ DALL-E is not configured",
+                ephemeral=True
+            )
+            return
+
+        await inter.response.defer(ephemeral=private)
+
+        user_id = str(inter.author.id)
+
+        # Check rate limit
+        if not await self.rate_limiter.check(user_id):
+            await inter.edit_original_response(
+                content="⏳ Rate limited. Please wait before generating another image."
+            )
+            return
+
+        # Validate prompt
+        if len(prompt.strip()) < 3:
+            await inter.edit_original_response(
+                content="❌ Prompt too short (min 3 characters)"
+            )
+            return
+
+        # Enhance prompt
+        enhanced = self._enhance_prompt(prompt)
+
+        # Check cache
+        cache_key = self._cache_key(enhanced, size, quality)
+        cached = await self.cache.get(cache_key)
+
+        if cached:
+            self.stats["cache_hits"] += 1
+
+            embed = disnake.Embed(
+                title="🎨 Image (Cached)",
+                description=f"**Prompt:** {prompt[:200]}{'...' if len(prompt) > 200 else ''}",
+                color=disnake.Color.blue()
+            )
+            embed.set_image(url=cached)
+            embed.set_footer(text="⚡ Retrieved from cache")
+
+            await inter.edit_original_response(embed=embed)
+            return
+
+        # Create job
+        job = GenerationJob(
+            user_id=inter.author.id,
+            prompt=enhanced,
+            size=size,
+            quality=quality,
+            interaction=inter,
+            timestamp=time.time()
+        )
+
+        # Add to queue
+        try:
+            self.queue.put_nowait(job)
+
+            queue_size = self.queue.qsize()
+
+            embed = disnake.Embed(
+                title="⏳ Queued",
+                description="Your image is in the queue",
+                color=disnake.Color.blue()
+            )
+            embed.add_field(name="Position", value=f"#{queue_size}", inline=True)
+            embed.add_field(name="Est. Wait", value=f"~{queue_size * 30}s", inline=True)
+            embed.set_footer(text="You'll be notified when generation starts")
+
+            await inter.edit_original_response(embed=embed)
+
+        except asyncio.QueueFull:
+            await inter.edit_original_response(
+                content="❌ Queue is full. Try again in a few minutes."
+            )
+
+    @commands.slash_command(name="dalle")
+    async def dalle_group(self, inter: disnake.ApplicationCommandInteraction):
+        """DALL-E commands"""
+        pass
+
+    @dalle_group.sub_command(name="stats", description="View DALL-E statistics")
+    async def dalle_stats(self, inter: disnake.ApplicationCommandInteraction):
+        """Show stats"""
+        await inter.response.defer(ephemeral=True)
+
+        if not self.enabled:
+            await inter.edit_original_response(content="❌ DALL-E disabled")
+            return
+
+        cache_stats = await self.cache.get_stats()
+
+        success_rate = (self.stats["successful"] / max(1, self.stats["total_requests"])) * 100
+        avg_time = self.stats["total_time"] / max(1, self.stats["successful"])
+
+        embed = disnake.Embed(title="📊 DALL-E Statistics", color=disnake.Color.blue())
+
+        embed.add_field(
+            name="🚀 Generation",
+            value=f"• Requests: `{self.stats['total_requests']}`\n"
+                  f"• Successful: `{self.stats['successful']}`\n"
+                  f"• Failed: `{self.stats['failed']}`\n"
+                  f"• Success Rate: `{success_rate:.1f}%`\n"
+                  f"• Avg Time: `{avg_time:.1f}s`",
+            inline=True
+        )
+
+        embed.add_field(
+            name="⚡ Cache",
+            value=f"• Hits: `{self.stats['cache_hits']}`\n"
+                  f"• Size: `{cache_stats['size']}/{cache_stats['max_size']}`\n"
+                  f"• Hit Rate: `{cache_stats['hit_rate']:.1f}%`",
+            inline=True
+        )
+
+        embed.add_field(
+            name="📋 Queue",
+            value=f"• Size: `{self.queue.qsize()}`\n"
+                  f"• Processing: `{'Yes' if self.is_processing else 'No'}`",
+            inline=True
+        )
+
+        await inter.edit_original_response(embed=embed)
+
+    @dalle_group.sub_command(name="queue", description="View generation queue")
+    async def dalle_queue(self, inter: disnake.ApplicationCommandInteraction):
+        """Show queue status"""
+        await inter.response.defer(ephemeral=True)
+
+        if not self.enabled:
+            await inter.edit_original_response(content="❌ DALL-E disabled")
+            return
+
+        queue_size = self.queue.qsize()
+
+        embed = disnake.Embed(
+            title="📋 Generation Queue",
+            color=disnake.Color.blue()
+        )
+
+        embed.add_field(
+            name="Status",
+            value=f"• Queue Size: `{queue_size}`\n"
+                  f"• Processing: `{'Yes' if self.is_processing else 'No'}`\n"
+                  f"• Max Size: `50`",
+            inline=False
+        )
+
+        if queue_size > 0:
+            embed.set_footer(text=f"Est. wait time: ~{queue_size * 30}s")
+
+        await inter.edit_original_response(embed=embed)
+
+    @dalle_group.sub_command(name="tips", description="Get tips for better prompts")
+    async def dalle_tips(self, inter: disnake.ApplicationCommandInteraction):
+        """Prompt tips"""
+
+        embed = disnake.Embed(
+            title="💡 DALL-E Prompt Tips",
+            description="Create amazing images with these techniques:",
+            color=disnake.Color.gold()
+        )
+
+        tips = [
+            "**Be Specific**: 'fluffy siamese cat wearing a crown, photorealistic'",
+            "**Add Style**: 'digital art', 'oil painting', 'anime style', 'photorealistic'",
+            "**Set the Scene**: 'sunset lighting, dramatic shadows, cozy environment'",
+            "**Quality Terms**: '4k', 'ultra detailed', 'masterpiece', 'professional'",
+            "**Composition**: 'close-up', 'wide shot', 'portrait view', 'landscape'",
+            "**Colors**: 'vibrant colors', 'monochrome', 'pastel palette'"
+        ]
+
+        for tip in tips:
+            embed.add_field(name="📌", value=tip, inline=False)
+
+        embed.set_footer(text="Experiment with different combinations!")
+
+        await inter.response.send_message(embed=embed, ephemeral=True)
+
+
+def setup(bot):
+    """Setup the cog"""
+    bot.add_cog(DALLECog(bot))
