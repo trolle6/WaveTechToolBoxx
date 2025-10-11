@@ -106,6 +106,7 @@ class VoiceProcessingCog(commands.Cog):
         self._shutdown = asyncio.Event()
 
         self.allowed_channel = bot.config.DISCORD_CHANNEL_ID
+
     async def cog_load(self):
         """Initialize cog"""
         if not self.enabled:

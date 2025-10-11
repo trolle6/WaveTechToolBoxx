@@ -250,7 +250,7 @@ if __name__ == "__main__":
     logger.info("Starting bot...")
 
     # Validate API key before loading cogs
-    api_key_valid = asyncio.run(validate_openai_key(config.TTS_BEARER_TOKEN, logger))
+    api_key_valid = asyncio.run(validate_openai_key(config.OPENAI_API_KEY, logger))
     if not api_key_valid:
         logger.critical("OpenAI API key is invalid. Fix your config.env")
         sys.exit(1)
