@@ -71,8 +71,8 @@ class VoiceProcessingCog(commands.Cog):
         self.logger = bot.logger.getChild("voice")
 
         # Check TTS configuration
-        if not hasattr(bot.config, 'TTS_BEARER_TOKEN') or not bot.config.TTS_BEARER_TOKEN:
-            self.logger.warning("TTS_BEARER_TOKEN not configured - TTS disabled")
+        if not hasattr(bot.config, 'OPENAI_API_KEY') or not bot.config.OPENAI_API_KEY:
+            self.logger.warning("OPENAI_API_KEY not configured - TTS disabled")
             self.enabled = False
             return
 
@@ -298,7 +298,7 @@ class VoiceProcessingCog(commands.Cog):
         self.total_requests += 1
 
         headers = {
-            "Authorization": f"Bearer {self.bot.config.TTS_BEARER_TOKEN}",
+            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
             "Content-Type": "application/json"
         }
 

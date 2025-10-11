@@ -24,7 +24,6 @@ class Config:
         "DISCORD_CHANNEL_ID": (int, None),
         "DISCORD_LOG_CHANNEL_ID": (int, None),
         "DISCORD_MODERATOR_ROLE_ID": (int, None),
-        "TTS_BEARER_TOKEN": (str, None),
         "OPENAI_API_KEY": (str, None),
     }
     _optional = {
