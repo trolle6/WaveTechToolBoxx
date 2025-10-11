@@ -105,9 +105,7 @@ class VoiceProcessingCog(commands.Cog):
         self._cleanup_task = None
         self._shutdown = asyncio.Event()
 
-        # Channel whitelist (empty = all channels allowed)
-        self.allowed_channels: List[int] = []
-
+        self.allowed_channels: List[int] = bot.config.get("DISCORD_CHANNEL_ID", [])
     async def cog_load(self):
         """Initialize cog"""
         if not self.enabled:
