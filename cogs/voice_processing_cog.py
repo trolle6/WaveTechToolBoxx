@@ -517,7 +517,7 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         # Check channel whitelist
-        if self.allowed_channel and message.channel.id is not self.allowed_channel:
+        if self.allowed_channel and message.channel.id != self.allowed_channel:
             return
 
         # Check if user is in voice
