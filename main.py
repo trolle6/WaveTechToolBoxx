@@ -31,6 +31,7 @@ class Config:
         "LOG_LEVEL": (str, "INFO"),
         "MAX_TTS_CACHE": (int, 50),
         "TTS_TIMEOUT": (int, 15),
+        "SKIP_API_VALIDATION": (bool, False),
     }
 
     def __init__(self):
@@ -44,7 +45,13 @@ class Config:
             if not val:
                 missing.append(key)
                 continue
-            self.data[key] = cast_type(val) if cast_type == int else val
+            # Clean string values (trim whitespace)
+            if cast_type == str:
+                self.data[key] = val.strip()
+            elif cast_type == int:
+                self.data[key] = int(val)
+            else:
+                self.data[key] = val
 
         if missing:
             print(f"Fatal: Missing env vars: {', '.join(missing)}")
@@ -125,8 +132,16 @@ def setup_logging(config: Config) -> logging.Logger:
 
 async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
     """Test if OpenAI API key is valid before loading cogs"""
-    if not key or not key.startswith("sk-"):
-        logger.error(f"Invalid key format: {key[:10] if key else 'EMPTY'}...")
+    # Clean the key (remove whitespace)
+    key = key.strip() if key else ""
+    
+    if not key:
+        logger.error("OPENAI_API_KEY is empty or not set in config.env")
+        return False
+    
+    if not key.startswith("sk-"):
+        logger.error(f"Invalid key format (should start with 'sk-'): {key[:15]}...")
+        logger.error("Please check your config.env file for correct OPENAI_API_KEY")
         return False
 
     headers = {"Authorization": f"Bearer {key}"}
@@ -136,22 +151,28 @@ async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
             async with session.get(
                     "https://api.openai.com/v1/models",
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=5),
+                    timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
                 if r.status == 200:
                     logger.info("✓ OpenAI API key is valid")
                     return True
                 elif r.status == 401:
                     logger.error("✗ API key is invalid or expired")
+                    logger.error("Please verify your OPENAI_API_KEY in config.env")
+                    error_body = await r.text()
+                    logger.debug(f"API error response: {error_body}")
                     return False
                 else:
                     logger.warning(f"Unexpected API response: {r.status}")
-                    return False
+                    error_body = await r.text()
+                    logger.debug(f"API response: {error_body}")
+                    # Allow bot to start on unexpected responses
+                    return True
     except asyncio.TimeoutError:
-        logger.warning("API key validation timeout (API might be slow)")
+        logger.warning("API key validation timeout (API might be slow) - allowing bot to start")
         return True
     except Exception as e:
-        logger.warning(f"Could not validate API key: {e}")
+        logger.warning(f"Could not validate API key: {e} - allowing bot to start")
         return True
 
 
@@ -248,11 +269,15 @@ for sig in (signal.SIGINT, signal.SIGTERM):
 if __name__ == "__main__":
     logger.info("Starting bot...")
 
-    # Validate API key before loading cogs
-    api_key_valid = asyncio.run(validate_openai_key(config.OPENAI_API_KEY, logger))
-    if not api_key_valid:
-        logger.critical("OpenAI API key is invalid. Fix your config.env")
-        sys.exit(1)
+    # Validate API key before loading cogs (unless skipped)
+    if config.SKIP_API_VALIDATION:
+        logger.warning("⚠️  API key validation skipped (SKIP_API_VALIDATION=true)")
+    else:
+        api_key_valid = asyncio.run(validate_openai_key(config.OPENAI_API_KEY, logger))
+        if not api_key_valid:
+            logger.critical("OpenAI API key is invalid. Fix your config.env")
+            logger.info("💡 Tip: Set SKIP_API_VALIDATION=true in config.env to skip this check")
+            sys.exit(1)
 
     # Load cogs once and store result
     num_loaded = load_cogs()
