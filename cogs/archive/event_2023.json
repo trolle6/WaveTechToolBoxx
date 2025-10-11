@@ -1,0 +1,152 @@
+{
+  "year": 2023,
+  "assignments": [
+    {
+      "giver_id": "132642056165261312",
+      "giver_name": "wilton",
+      "receiver_id": "185834053558075392",
+      "receiver_name": "jkm",
+      "gift": "Traffic cone interior"
+    },
+    {
+      "giver_id": "185834053558075392",
+      "giver_name": "jkm",
+      "receiver_id": "239547426224996353",
+      "receiver_name": "sweetbaboo",
+      "gift": "Windows activation key generator"
+    },
+    {
+      "giver_id": "239547426224996353",
+      "giver_name": "sweetbaboo",
+      "receiver_id": "658060236598542353",
+      "receiver_name": "earth computer",
+      "gift": "Exploding computer"
+    },
+    {
+      "giver_id": "658060236598542353",
+      "giver_name": "earth computer",
+      "receiver_id": "723445440632061964",
+      "receiver_name": "magic",
+      "gift": "Functional 6-sided die"
+    },
+    {
+      "giver_id": "723445440632061964",
+      "giver_name": "magic",
+      "receiver_id": "722756905344434218",
+      "receiver_name": "oriol",
+      "gift": "Falling Oriol cube"
+    },
+    {
+      "giver_id": "722756905344434218",
+      "giver_name": "oriol",
+      "receiver_id": "188187888289054720",
+      "receiver_name": "m³",
+      "gift": "Escape room"
+    },
+    {
+      "giver_id": "188187888289054720",
+      "giver_name": "m³",
+      "receiver_id": "282364743996538881",
+      "receiver_name": "xoid",
+      "gift": "Redstone battleships"
+    },
+    {
+      "giver_id": "282364743996538881",
+      "giver_name": "xoid",
+      "receiver_id": "320526362219905038",
+      "receiver_name": "velizar",
+      "gift": "Garfield oven mapart"
+    },
+    {
+      "giver_id": "320526362219905038",
+      "giver_name": "velizar",
+      "receiver_id": "674649043493978153",
+      "receiver_name": "andrej",
+      "gift": "Fox display mod"
+    },
+    {
+      "giver_id": "674649043493978153",
+      "giver_name": "andrej",
+      "receiver_id": "456226577798135808",
+      "receiver_name": "fallen monkey",
+      "gift": "Suppressed name portals"
+    },
+    {
+      "giver_id": "456226577798135808",
+      "giver_name": "fallen monkey",
+      "receiver_id": "451659705258082304",
+      "receiver_name": "cherry",
+      "gift": "Shulker of random stuff"
+    },
+    {
+      "giver_id": "451659705258082304",
+      "giver_name": "cherry",
+      "receiver_id": "294639971955113986",
+      "receiver_name": "random789",
+      "gift": "Cozy winter mansion"
+    },
+    {
+      "giver_id": "294639971955113986",
+      "giver_name": "random789",
+      "receiver_id": "665985164702384159",
+      "receiver_name": "joosepy",
+      "gift": "Funny redstone box maker"
+    },
+    {
+      "giver_id": "665985164702384159",
+      "giver_name": "joosepy",
+      "receiver_id": "352356592169254922",
+      "receiver_name": "green_jab",
+      "gift": "Chess pieces maparts"
+    },
+    {
+      "giver_id": "352356592169254922",
+      "giver_name": "green_jab",
+      "receiver_id": "323515840236486659",
+      "receiver_name": "kikue",
+      "gift": "Modder's house + flying nutella"
+    },
+    {
+      "giver_id": "323515840236486659",
+      "giver_name": "kikue",
+      "receiver_id": "306569126141493249",
+      "receiver_name": "huntoon",
+      "gift": "Gigachad statue"
+    },
+    {
+      "giver_id": "306569126141493249",
+      "giver_name": "huntoon",
+      "receiver_id": "251835504654286852",
+      "receiver_name": "trolle",
+      "gift": "Coding sessions with Huntoon"
+    },
+    {
+      "giver_id": "251835504654286852",
+      "giver_name": "trolle",
+      "receiver_id": "571818326146416640",
+      "receiver_name": "squibble",
+      "gift": "Random death machine"
+    },
+    {
+      "giver_id": "571818326146416640",
+      "giver_name": "squibble",
+      "receiver_id": "215220873932570624",
+      "receiver_name": "MMM",
+      "gift": "Iron farm perspective art"
+    },
+    {
+      "giver_id": "215220873932570624",
+      "giver_name": "MMM",
+      "receiver_id": "132642056165261312",
+      "receiver_name": "wilton",
+      "gift": "Nothing"
+    },
+    {
+      "giver_ids": ["282364743996538881", "323515840236486659"],
+      "giver_names": ["xoid", "kikue"],
+      "receiver_name": "all_participants",
+      "gift": "Game of life",
+      "special_note": "Gift for entire server/all participants"
+    }
+  ]
+}

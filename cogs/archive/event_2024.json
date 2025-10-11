@@ -1,0 +1,110 @@
+{
+  "year": 2024,
+  "assignments": [
+    {
+      "giver_id": "288183610064764928",
+      "giver_name": "carbsna",
+      "receiver_id": "294639971955113986",
+      "receiver_name": "random789",
+      "gift": "Giant stone spoon"
+    },
+    {
+      "giver_id": "294639971955113986",
+      "giver_name": "random789",
+      "receiver_id": "584694654780309524",
+      "receiver_name": "paradoxx_42",
+      "gift": "Rocket crafter"
+    },
+    {
+      "giver_id": "584694654780309524",
+      "giver_name": "paradoxx_42",
+      "receiver_id": "188187888289054720",
+      "receiver_name": "m³",
+      "gift": "Super destroyer deco maparts"
+    },
+    {
+      "giver_id": "188187888289054720",
+      "giver_name": "m³",
+      "receiver_id": "294480895065194507",
+      "receiver_name": "erikbacke",
+      "gift": "Battleships 2"
+    },
+    {
+      "giver_id": "294480895065194507",
+      "giver_name": "erikbacke",
+      "receiver_id": "571818326146416640",
+      "receiver_name": "squibble",
+      "gift": "Mansion with squibble references"
+    },
+    {
+      "giver_id": "571818326146416640",
+      "giver_name": "squibble",
+      "receiver_id": "320526362219905038",
+      "receiver_name": "velizar",
+      "gift": "Invisible maze"
+    },
+    {
+      "giver_id": "320526362219905038",
+      "giver_name": "velizar",
+      "receiver_id": "282364743996538881",
+      "receiver_name": "xoid",
+      "gift": "Minigame server warp"
+    },
+    {
+      "giver_id": "282364743996538881",
+      "giver_name": "xoid",
+      "receiver_id": "306569126141493249",
+      "receiver_name": "huntoon",
+      "gift": "Real time clock"
+    },
+    {
+      "giver_id": "306569126141493249",
+      "giver_name": "huntoon",
+      "receiver_id": "251835504654286852",
+      "receiver_name": "trolle",
+      "gift": "Wavetech calendar itt"
+    },
+    {
+      "giver_id": "251835504654286852",
+      "giver_name": "trolle",
+      "receiver_id": "185834053558075392",
+      "receiver_name": "jkm",
+      "gift": "Another traffic cone"
+    },
+    {
+      "giver_id": "185834053558075392",
+      "giver_name": "jkm",
+      "receiver_id": "323515840236486659",
+      "receiver_name": "kikue",
+      "gift": "Dolphin farm"
+    },
+    {
+      "giver_id": "323515840236486659",
+      "giver_name": "kikue",
+      "receiver_id": "239932156678242304",
+      "receiver_name": "yun",
+      "gift": "TMC quiz + Subway Surfers mapart"
+    },
+    {
+      "giver_id": "239932156678242304",
+      "giver_name": "yun",
+      "receiver_id": "132642056165261312",
+      "receiver_name": "wilton",
+      "gift": "Drunk driving maparts"
+    },
+    {
+      "giver_id": "132642056165261312",
+      "giver_name": "wilton",
+      "receiver_id": "170242025742925836",
+      "receiver_name": "squze",
+      "gift": "Weird maparts + full membership"
+    },
+    {
+      "giver_id": "170242025742925836",
+      "giver_name": "squze",
+      "receiver_id": "288183610064764928",
+      "receiver_name": "carbsna",
+      "gift": "Ice king statue"
+    }
+  ]
+}
