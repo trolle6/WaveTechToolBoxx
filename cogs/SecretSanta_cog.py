@@ -343,8 +343,8 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Need at least 2 participants")
             return
 
-        # Load all history (current + archived)
-        history = self.state.get("pair_history", {}).copy()
+        # Load all history from archived events only (archives are source of truth)
+        history = {}
 
         # Load archived history from YYYY.json files
         for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
@@ -429,11 +429,6 @@ class SecretSantaCog(commands.Cog):
         async with self._lock:
             event["assignments"] = {str(k): v for k, v in assignments.items()}
             event["join_closed"] = True
-
-            # Update history
-            for giver, receiver in assignments.items():
-                self.state["pair_history"].setdefault(str(giver), []).append(receiver)
-
             self._save()
 
         await inter.edit_original_response(
