@@ -57,10 +57,11 @@ class GuildVoiceState:
         if self.processor_task and not self.processor_task.done():
             self.processor_task.cancel()
             try:
-                await asyncio.wait_for(self.processor_task, timeout=3.0)
+                await asyncio.wait_for(self.processor_task, timeout=5.0)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
-            self.processor_task = None
+            finally:
+                self.processor_task = None
 
 
 class VoiceProcessingCog(commands.Cog):
@@ -71,8 +72,8 @@ class VoiceProcessingCog(commands.Cog):
         self.logger = bot.logger.getChild("voice")
 
         # Check TTS configuration
-        if not hasattr(bot.config, 'TTS_BEARER_TOKEN') or not bot.config.TTS_BEARER_TOKEN:
-            self.logger.warning("TTS_BEARER_TOKEN not configured - TTS disabled")
+        if not hasattr(bot.config, 'OPENAI_API_KEY') or not bot.config.OPENAI_API_KEY:
+            self.logger.warning("OPENAI_API_KEY not configured - TTS disabled")
             self.enabled = False
             return
 
@@ -91,6 +92,10 @@ class VoiceProcessingCog(commands.Cog):
         # Guild states
         self.guild_states: Dict[int, GuildVoiceState] = {}
         self._state_lock = asyncio.Lock()
+        
+        # Message deduplication
+        self._processed_messages = set()
+        self._message_cleanup_task = None
 
         # TTS configuration
         self.tts_url = "https://api.openai.com/v1/audio/speech"
@@ -106,12 +111,14 @@ class VoiceProcessingCog(commands.Cog):
         self._shutdown = asyncio.Event()
 
         self.allowed_channel = bot.config.DISCORD_CHANNEL_ID
+
     async def cog_load(self):
         """Initialize cog"""
         if not self.enabled:
             return
 
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        self._message_cleanup_task = asyncio.create_task(self._message_cleanup_loop())
         self.logger.info("Voice cog loaded")
 
     async def cog_unload(self):
@@ -122,11 +129,18 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.info("Unloading voice cog...")
         self._shutdown.set()
 
-        # Stop cleanup task
+        # Stop cleanup tasks
         if self._cleanup_task:
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+                
+        if self._message_cleanup_task:
+            self._message_cleanup_task.cancel()
+            try:
+                await self._message_cleanup_task
             except asyncio.CancelledError:
                 pass
 
@@ -139,9 +153,18 @@ class VoiceProcessingCog(commands.Cog):
         # Disconnect all voice clients
         for vc in list(self.bot.voice_clients):
             try:
-                await asyncio.wait_for(vc.disconnect(force=True), timeout=3.0)
+                # Stop any playing audio first
+                if vc.is_playing():
+                    vc.stop()
+                # Disconnect with force
+                await asyncio.wait_for(vc.disconnect(force=True), timeout=5.0)
             except Exception as e:
                 self.logger.error(f"Error disconnecting: {e}")
+                # Force cleanup if normal disconnect fails
+                try:
+                    vc.cleanup()
+                except Exception:
+                    pass
 
         self.logger.info("Voice cog unloaded")
 
@@ -154,6 +177,25 @@ class VoiceProcessingCog(commands.Cog):
                 # Cleanup cache
                 if hasattr(self.cache, 'cleanup'):
                     await self.cache.cleanup()
+
+                # Check for empty voice channels
+                for guild in self.bot.guilds:
+                    if guild.voice_client and guild.voice_client.is_connected():
+                        try:
+                            channel = guild.voice_client.channel
+                            if channel:
+                                humans = [m for m in channel.members if not m.bot]
+                                # If no humans and not playing, disconnect after longer timeout
+                                if not humans and not guild.voice_client.is_playing():
+                                    # Check if this guild has been idle for a while
+                                    async with self._state_lock:
+                                        state = self.guild_states.get(guild.id)
+                                        if state and state.is_idle(timeout=300):  # 5 minutes
+                                            self.logger.info(f"Auto-disconnecting from empty channel {channel.name}")
+                                            await guild.voice_client.disconnect()
+                                            await self._remove_state(guild.id)
+                        except Exception as e:
+                            self.logger.debug(f"Error checking voice channel for {guild.name}: {e}")
 
                 # Find idle guild states
                 async with self._state_lock:
@@ -184,6 +226,41 @@ class VoiceProcessingCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Cleanup loop error: {e}", exc_info=True)
 
+    async def _message_cleanup_loop(self):
+        """Clean up old message IDs to prevent memory leaks"""
+        try:
+            while not self._shutdown.is_set():
+                await asyncio.sleep(300)  # Every 5 minutes
+                
+                # Keep only recent message IDs (last 1000)
+                if len(self._processed_messages) > 1000:
+                    # Convert to list, sort by timestamp, keep newest 500
+                    message_list = list(self._processed_messages)
+                    self._processed_messages = set(message_list[-500:])
+                    
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"Message cleanup loop error: {e}", exc_info=True)
+
+    async def _cleanup_temp_file(self, temp_file: str):
+        """Clean up temporary file with retry logic for Windows"""
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                return  # Success
+            except PermissionError:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(0.5)  # Wait before retry
+                    continue
+                else:
+                    self.logger.warning(f"Could not delete temp file after {max_attempts} attempts: {temp_file}")
+            except Exception as e:
+                self.logger.error(f"Temp file cleanup error: {e}")
+                break
+
     async def _get_or_create_state(self, guild_id: int) -> GuildVoiceState:
         """Get or create guild state"""
         async with self._state_lock:
@@ -209,26 +286,46 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check if already connected to the right channel
         if guild.voice_client:
-            if guild.voice_client.channel.id == channel.id:
+            if guild.voice_client.channel and guild.voice_client.channel.id == channel.id:
                 if guild.voice_client.is_connected():
                     return guild.voice_client
 
-            # Disconnect from wrong channel
+            # Disconnect from wrong channel or if not properly connected
             try:
-                await asyncio.wait_for(
-                    guild.voice_client.disconnect(force=True),
-                    timeout=3.0
-                )
-                await asyncio.sleep(0.5)
+                if guild.voice_client.is_connected():
+                    await asyncio.wait_for(
+                        guild.voice_client.disconnect(force=True),
+                        timeout=3.0
+                    )
+                else:
+                    # Force cleanup if not properly connected
+                    guild.voice_client.cleanup()
+                await asyncio.sleep(1.0)  # Wait longer for cleanup
             except Exception as e:
                 self.logger.warning(f"Disconnect error: {e}")
+                # Force cleanup even if disconnect fails
+                try:
+                    guild.voice_client.cleanup()
+                except Exception:
+                    pass
 
-        # Try to connect
+        # Try to connect with retry logic
         try:
-            vc = await asyncio.wait_for(
-                channel.connect(timeout=timeout, reconnect=False),
-                timeout=timeout + 5
-            )
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    vc = await asyncio.wait_for(
+                        channel.connect(timeout=timeout, reconnect=False),
+                        timeout=timeout + 5
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if attempt < max_attempts - 1:
+                        self.logger.warning(f"Connection attempt {attempt + 1} failed: {e}, retrying...")
+                        await asyncio.sleep(1)
+                        continue
+                    else:
+                        raise  # Last attempt failed, re-raise exception
 
             # Self-deafen
             try:
@@ -242,7 +339,14 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.error(f"Connection timeout to {channel.name}")
             return None
         except disnake.ClientException as e:
-            self.logger.error(f"Connection failed to {channel.name}: {e}")
+            error_msg = str(e)
+            if "Already connected" in error_msg:
+                self.logger.warning(f"Already connected to voice channel: {e}")
+                # Try to get the existing connection
+                if guild.voice_client and guild.voice_client.is_connected():
+                    return guild.voice_client
+            else:
+                self.logger.error(f"Connection failed to {channel.name}: {e}")
             return None
         except Exception as e:
             self.logger.error(f"Unexpected connection error: {e}", exc_info=True)
@@ -297,7 +401,7 @@ class VoiceProcessingCog(commands.Cog):
         self.total_requests += 1
 
         headers = {
-            "Authorization": f"Bearer {self.bot.config.TTS_BEARER_TOKEN}",
+            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
             "Content-Type": "application/json"
         }
 
@@ -388,12 +492,22 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.error(f"Playback error: {error}")
                 play_done.set()
 
-                # Cleanup temp file
-                try:
-                    if temp_file and os.path.exists(temp_file):
+                # Cleanup temp file synchronously to avoid event loop issues
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        # Try to delete immediately
                         os.unlink(temp_file)
-                except Exception as e:
-                    self.logger.error(f"Temp file cleanup error: {e}")
+                    except PermissionError:
+                        # If fails, schedule for later cleanup
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                loop.create_task(self._cleanup_temp_file(temp_file))
+                        except RuntimeError:
+                            # No event loop, just log the issue
+                            self.logger.warning(f"Could not schedule cleanup for {temp_file}")
+                    except Exception as e:
+                        self.logger.error(f"Temp file cleanup error: {e}")
 
             vc.play(audio, after=after)
 
@@ -404,11 +518,11 @@ class VoiceProcessingCog(commands.Cog):
                 await asyncio.sleep(0.1)
             else:
                 self.logger.error("Playback failed to start")
-                try:
-                    if temp_file and os.path.exists(temp_file):
+                if temp_file and os.path.exists(temp_file):
+                    try:
                         os.unlink(temp_file)
-                except Exception:
-                    pass
+                    except Exception as e:
+                        self.logger.error(f"Temp file cleanup error: {e}")
                 return False
 
             # Wait for playback to complete
@@ -422,11 +536,11 @@ class VoiceProcessingCog(commands.Cog):
 
         except Exception as e:
             self.logger.error(f"Playback error: {e}", exc_info=True)
-            try:
-                if temp_file and os.path.exists(temp_file):
+            if temp_file and os.path.exists(temp_file):
+                try:
                     os.unlink(temp_file)
-            except Exception:
-                pass
+                except Exception as cleanup_error:
+                    self.logger.error(f"Temp file cleanup error: {cleanup_error}")
             return False
 
     async def _process_queue(self, guild_id: int):
@@ -494,10 +608,17 @@ class VoiceProcessingCog(commands.Cog):
         finally:
             state.is_processing = False
 
-            # Disconnect from voice
-            if guild.voice_client:
+            # Only disconnect if no humans are in the channel
+            if guild.voice_client and guild.voice_client.is_connected():
                 try:
-                    await guild.voice_client.disconnect()
+                    channel = guild.voice_client.channel
+                    if channel:
+                        humans = [m for m in channel.members if not m.bot]
+                        if not humans:
+                            self.logger.info(f"Queue processor finished - disconnecting from {channel.name}")
+                            await guild.voice_client.disconnect()
+                        else:
+                            self.logger.info(f"Queue processor finished - staying connected (humans: {len(humans)})")
                 except Exception as e:
                     self.logger.error(f"Disconnect error: {e}")
 
@@ -515,6 +636,12 @@ class VoiceProcessingCog(commands.Cog):
         # Skip if not in guild
         if not message.guild:
             return
+
+        # Check for duplicate message processing
+        message_key = f"{message.id}:{message.author.id}:{message.content[:50]}"
+        if message_key in self._processed_messages:
+            return
+        self._processed_messages.add(message_key)
 
         # Check channel whitelist
         if self.allowed_channel and message.channel.id != self.allowed_channel:
@@ -573,23 +700,52 @@ class VoiceProcessingCog(commands.Cog):
             await self._remove_state(member.guild.id)
             return
 
-        # User left voice
+        # User left voice - wait longer and check more carefully
         if before.channel and not after.channel:
-            await asyncio.sleep(2)
+            # Wait longer to ensure all voice state updates are processed
+            await asyncio.sleep(5)
 
             guild = member.guild
             if not guild.voice_client:
                 return
 
-            # Check if any humans left
-            humans = [m for m in guild.voice_client.channel.members if not m.bot]
+            # Double-check the voice client is still connected
+            if not guild.voice_client.is_connected():
+                return
 
-            if not humans:
-                try:
-                    await guild.voice_client.disconnect()
-                    await self._remove_state(guild.id)
-                except Exception as e:
-                    self.logger.error(f"Disconnect error: {e}")
+            # Check if any humans are still in the channel
+            try:
+                channel = guild.voice_client.channel
+                if not channel:
+                    return
+                    
+                humans = [m for m in channel.members if not m.bot]
+                
+                self.logger.debug(f"Voice channel check: {len(humans)} humans remaining in {channel.name}")
+
+                # Only disconnect if no humans AND no audio is playing
+                if not humans and not guild.voice_client.is_playing():
+                    # Wait a bit more to make sure no new messages are coming
+                    await asyncio.sleep(3)
+                    
+                    # Final check
+                    if not guild.voice_client.is_connected():
+                        return
+                        
+                    final_humans = [m for m in guild.voice_client.channel.members if not m.bot] if guild.voice_client.channel else []
+                    
+                    if not final_humans and not guild.voice_client.is_playing():
+                        self.logger.info(f"Disconnecting from {channel.name} - no humans remaining")
+                        try:
+                            await guild.voice_client.disconnect()
+                            await self._remove_state(guild.id)
+                        except Exception as e:
+                            self.logger.error(f"Disconnect error: {e}")
+                    else:
+                        self.logger.debug(f"Staying connected - humans: {len(final_humans)}, playing: {guild.voice_client.is_playing()}")
+                        
+            except Exception as e:
+                self.logger.error(f"Error checking voice state: {e}")
 
     @commands.slash_command(name="tts")
     async def tts_cmd(self, inter: disnake.ApplicationCommandInteraction):
@@ -680,6 +836,65 @@ class VoiceProcessingCog(commands.Cog):
                 await inter.edit_original_response(content="✅ Queue cleared")
             else:
                 await inter.edit_original_response(content="❌ No active queue")
+
+    @tts_cmd.sub_command(name="status", description="Check voice channel status")
+    async def tts_status(self, inter: disnake.ApplicationCommandInteraction):
+        """Check voice status"""
+        await inter.response.defer(ephemeral=True)
+
+        if not inter.guild.voice_client:
+            await inter.edit_original_response(content="❌ Bot not connected to voice")
+            return
+
+        vc = inter.guild.voice_client
+        channel = vc.channel
+        
+        if not channel:
+            await inter.edit_original_response(content="❌ No voice channel found")
+            return
+
+        humans = [m for m in channel.members if not m.bot]
+        bots = [m for m in channel.members if m.bot]
+        
+        async with self._state_lock:
+            state = self.guild_states.get(inter.guild.id)
+            queue_size = state.queue.qsize() if state else 0
+            is_processing = state.is_processing if state else False
+
+        embed = disnake.Embed(
+            title="🎵 Voice Channel Status",
+            color=disnake.Color.blue()
+        )
+        
+        embed.add_field(
+            name="Channel",
+            value=f"**{channel.name}**\nID: {channel.id}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Members",
+            value=f"👥 Humans: {len(humans)}\n🤖 Bots: {len(bots)}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Status",
+            value=f"🔊 Playing: {'Yes' if vc.is_playing() else 'No'}\n📋 Queue: {queue_size}\n⚙️ Processing: {'Yes' if is_processing else 'No'}",
+            inline=True
+        )
+        
+        if humans:
+            human_names = [m.display_name for m in humans[:5]]
+            if len(humans) > 5:
+                human_names.append(f"... and {len(humans) - 5} more")
+            embed.add_field(
+                name="👥 Humans in Channel",
+                value="\n".join(human_names),
+                inline=False
+            )
+
+        await inter.edit_original_response(embed=embed)
 
 
 def setup(bot):

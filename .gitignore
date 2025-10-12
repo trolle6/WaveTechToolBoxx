@@ -1,5 +1,28 @@
+# Environment files with sensitive data
 config.env
-venv/
-env/
+.env
+*.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Logs
 *.log
-secret_santa_data.json
+bot.log*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp

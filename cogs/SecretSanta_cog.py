@@ -61,41 +61,21 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
 
     random.seed(time.time() + random.random())
 
-    # Try 100 times to find valid assignment
-    for attempt in range(100):
-        givers = participants.copy()
-        receivers = participants.copy()
-        random.shuffle(givers)
-        random.shuffle(receivers)
-
-        assignments = {}
-        valid = True
-
-        for giver in givers:
-            # Filter out invalid receivers
-            valid_receivers = [
-                r for r in receivers
-                if r != giver and r not in history.get(str(giver), [])
-            ]
-
-            if not valid_receivers:
-                valid = False
+    result: Dict[int, int] = {}
+    for giver in participants:
+        unacceptable: List[int] = history.get(str(giver), [])
+        for g, r in result.items():
+            if r == giver:
+                unacceptable.append(g)
+        receiver: int = 0
+        while True:
+            receiver = random.choice(participants)
+            if receiver not in unacceptable and receiver != giver:
                 break
+        result[giver] = receiver
+        history.setdefault(str(giver), []).append(receiver)
 
-            receiver = random.choice(valid_receivers)
-            assignments[giver] = receiver
-            receivers.remove(receiver)
-
-        if valid:
-            # Update history
-            for giver, receiver in assignments.items():
-                history.setdefault(str(giver), []).append(receiver)
-            return assignments
-
-    # Fallback: simple rotation
-    random.shuffle(givers)
-    random.shuffle(receivers)
-    return {g: receivers[(i + 1) % len(receivers)] for i, g in enumerate(givers)}
+    return result
 
 
 def mod_check():
@@ -343,8 +323,8 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Need at least 2 participants")
             return
 
-        # Load all history (current + archived)
-        history = self.state.get("pair_history", {}).copy()
+        # Load all history from archived events only (archives are source of truth)
+        history = {}
 
         # Load archived history from YYYY.json files
         for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
@@ -429,11 +409,6 @@ class SecretSantaCog(commands.Cog):
         async with self._lock:
             event["assignments"] = {str(k): v for k, v in assignments.items()}
             event["join_closed"] = True
-
-            # Update history
-            for giver, receiver in assignments.items():
-                self.state["pair_history"].setdefault(str(giver), []).append(receiver)
-
             self._save()
 
         await inter.edit_original_response(
