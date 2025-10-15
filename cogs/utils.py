@@ -154,30 +154,8 @@ class LRUCache(Generic[T]):
             del self._access_times[key]
 
 
-class HttpManager:
-    """Reusable HTTP session with connection pooling"""
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance.session = None
-        return cls._instance
-
-    async def get_session(self, timeout: int = 30) -> aiohttp.ClientSession:
-        if self.session is None or self.session.closed:
-            connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=timeout),
-                connector=connector,
-            )
-            logger.info("HTTP session created")
-        return self.session
-
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-            logger.info("HTTP session closed")
+# HttpManager moved to main.py to avoid duplication
+# Use bot.http_mgr instead of importing from here
 
 
 class JsonFile:

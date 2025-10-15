@@ -48,10 +48,55 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def save_json(path: Path, data: Any):
-    """Save JSON atomically"""
+    """Save JSON atomically with error handling"""
     temp = path.with_suffix('.tmp')
-    temp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    temp.replace(path)
+    try:
+        temp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        temp.replace(path)
+    except Exception as e:
+        # Clean up temp file if save failed
+        if temp.exists():
+            try:
+                temp.unlink()
+            except Exception:
+                pass
+        raise  # Re-raise so caller knows save failed
+
+
+def validate_assignment_possibility(participants: List[int], history: Dict[str, List[int]]) -> Optional[str]:
+    """Check if assignments are possible before attempting them"""
+    if len(participants) < 2:
+        return "Need at least 2 participants for Secret Santa"
+    
+    # Check each participant's available options
+    problematic_users = []
+    for giver in participants:
+        unacceptable = history.get(str(giver), [])
+        # Remove giver from available options (can't give to self)
+        available = [p for p in participants if p not in unacceptable and p != giver]
+        
+        if len(available) == 0:
+            problematic_users.append(str(giver))
+        elif len(available) < 2:  # Warn if very limited options
+            # This person might get stuck if others are assigned their only option
+            pass
+    
+    if problematic_users:
+        return f"Assignment impossible due to history constraints. Users {', '.join(problematic_users)} have no valid receivers. Consider running the event earlier or clearing some history."
+    
+    # Check for graph connectivity (basic check)
+    # If everyone can only give to 1 person, we might have issues
+    very_limited = []
+    for giver in participants:
+        unacceptable = history.get(str(giver), [])
+        available = [p for p in participants if p not in unacceptable and p != giver]
+        if len(available) == 1:
+            very_limited.append(giver)
+    
+    if len(very_limited) > len(participants) // 2:
+        return f"Assignment may be difficult - {len(very_limited)} participants have very limited options due to history. Consider running the event earlier in the year."
+    
+    return None
 
 
 def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> Dict[int, int]:
@@ -60,22 +105,74 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
         raise ValueError("Need at least 2 participants")
 
     random.seed(time.time() + random.random())
-
-    result: Dict[int, int] = {}
-    for giver in participants:
-        unacceptable: List[int] = history.get(str(giver), [])
-        for g, r in result.items():
-            if r == giver:
-                unacceptable.append(g)
-        receiver: int = 0
-        while True:
-            receiver = random.choice(participants)
-            if receiver not in unacceptable and receiver != giver:
-                break
-        result[giver] = receiver
-        history.setdefault(str(giver), []).append(receiver)
-
-    return result
+    
+    # Try multiple times with different strategies
+    max_attempts = 10
+    
+    for attempt in range(max_attempts):
+        try:
+            result: Dict[int, int] = {}
+            temp_history = {k: v.copy() for k, v in history.items()}  # Work with copy
+            
+            # Shuffle participants for different assignment order each attempt
+            shuffled_participants = participants.copy()
+            random.shuffle(shuffled_participants)
+            
+            for giver in shuffled_participants:
+                unacceptable: List[int] = temp_history.get(str(giver), [])
+                
+                # Add current assignments where someone else is giving to this giver
+                for g, r in result.items():
+                    if r == giver:
+                        unacceptable.append(g)
+                
+                # Find available receivers
+                available = [p for p in participants if p not in unacceptable and p != giver]
+                
+                if not available:
+                    # If we're on later attempts, try clearing some history
+                    if attempt >= 3:
+                        # Clear oldest entries from this giver's history
+                        giver_history = temp_history.get(str(giver), [])
+                        if len(giver_history) > len(participants) // 2:
+                            temp_history[str(giver)] = giver_history[-(len(participants) // 2):]
+                            unacceptable = temp_history.get(str(giver), [])
+                            for g, r in result.items():
+                                if r == giver:
+                                    unacceptable.append(g)
+                            available = [p for p in participants if p not in unacceptable and p != giver]
+                    
+                    if not available:
+                        raise ValueError(f"Cannot assign giver {giver} - no valid receivers available")
+                
+                receiver = random.choice(available)
+                result[giver] = receiver
+                temp_history.setdefault(str(giver), []).append(receiver)
+            
+            # Success! Update the real history
+            for giver, receiver in result.items():
+                history.setdefault(str(giver), []).append(receiver)
+            
+            return result
+            
+        except ValueError:
+            if attempt == max_attempts - 1:
+                # Last attempt - provide detailed error
+                available_counts = {}
+                for giver in participants:
+                    unacceptable = history.get(str(giver), [])
+                    available = [p for p in participants if p not in unacceptable and p != giver]
+                    available_counts[giver] = len(available)
+                
+                min_available = min(available_counts.values())
+                if min_available == 0:
+                    problematic_users = [str(giver) for giver, count in available_counts.items() if count == 0]
+                    raise ValueError(f"Assignment impossible: Users {', '.join(problematic_users)} have no valid receivers due to history constraints. Consider resetting some history.")
+                else:
+                    raise ValueError(f"Assignment failed after {max_attempts} attempts. This shouldn't happen with {len(participants)} participants.")
+            continue  # Try again
+    
+    raise ValueError("Assignment failed - this should not be reached")
 
 
 def mod_check():
@@ -118,15 +215,74 @@ class SecretSantaCog(commands.Cog):
         self.bot = bot
         self.logger = bot.logger.getChild("santa")
 
-        # Load state
-        self.state = load_json(STATE_FILE, {
-            "current_year": dt.date.today().year,
-            "pair_history": {},
-            "current_event": None
-        })
+        # Load state with validation
+        try:
+            self.state = load_json(STATE_FILE, {
+                "current_year": dt.date.today().year,
+                "pair_history": {},
+                "current_event": None
+            })
+            
+            # Validate loaded state structure
+            if not isinstance(self.state, dict):
+                raise ValueError("State is not a dict")
+            
+            # Ensure required keys exist
+            if "current_year" not in self.state:
+                self.state["current_year"] = dt.date.today().year
+            if "pair_history" not in self.state:
+                self.state["pair_history"] = {}
+            if "current_event" not in self.state:
+                self.state["current_event"] = None
+            
+            # Validate current event if it exists
+            if self.state.get("current_event"):
+                event = self.state["current_event"]
+                if not isinstance(event, dict):
+                    self.logger.error("Invalid event state - not a dict, resetting")
+                    self.state["current_event"] = None
+                elif not isinstance(event.get("participants"), dict):
+                    self.logger.error("Invalid event state - participants not a dict, resetting")
+                    self.state["current_event"] = None
+                else:
+                    # Validate critical event fields
+                    required_fields = ["active", "participants", "assignments", "guild_id"]
+                    if not all(field in event for field in required_fields):
+                        self.logger.warning(f"Event missing required fields, may be incomplete")
+            
+            active_event = bool(self.state.get("current_event", {}).get("active"))
+            self.logger.info(f"State loaded successfully. Active event: {active_event}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load state: {e}, using defaults", exc_info=True)
+            # Try to load from backup
+            backup_path = STATE_FILE.with_suffix('.backup')
+            if backup_path.exists():
+                try:
+                    self.logger.info("Attempting to load from backup...")
+                    self.state = load_json(backup_path, {
+                        "current_year": dt.date.today().year,
+                        "pair_history": {},
+                        "current_event": None
+                    })
+                    self.logger.info("Backup state loaded successfully")
+                except Exception as backup_error:
+                    self.logger.error(f"Backup load also failed: {backup_error}")
+                    self.state = {
+                        "current_year": dt.date.today().year,
+                        "pair_history": {},
+                        "current_event": None
+                    }
+            else:
+                self.state = {
+                    "current_year": dt.date.today().year,
+                    "pair_history": {},
+                    "current_event": None
+                }
 
         self._lock = asyncio.Lock()
         self._backup_task: Optional[asyncio.Task] = None
+        self._unloaded = False  # Track if already unloaded
 
         self.logger.info("Secret Santa cog initialized")
 
@@ -134,26 +290,64 @@ class SecretSantaCog(commands.Cog):
         """Initialize cog"""
         self._backup_task = asyncio.create_task(self._backup_loop())
         self.logger.info("Secret Santa cog loaded")
+        
+        # Notify Discord about cog loading
+        if hasattr(self.bot, 'send_to_discord_log'):
+            await self.bot.send_to_discord_log("🎄 Secret Santa cog loaded successfully", "SUCCESS")
 
-    async def cog_unload(self):
-        """Cleanup cog"""
+    def cog_unload(self):
+        """Cleanup cog (synchronous wrapper to prevent RuntimeWarning)"""
+        if self._unloaded:
+            return
+        
+        self._unloaded = True
         self.logger.info("Unloading Secret Santa cog...")
-
-        if self._backup_task:
-            self._backup_task.cancel()
-            try:
-                await self._backup_task
-            except asyncio.CancelledError:
-                pass
-
-        # Final save
-        self._save()
-
-        self.logger.info("Secret Santa cog unloaded")
+        
+        # Do sync operations immediately
+        self._save()  # Final save is sync, safe to call
+        
+        # Schedule async cleanup for backup task
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running() and self._backup_task:
+                # Create task for async cleanup
+                loop.create_task(self._async_unload())
+            else:
+                # No loop or no task, we're done
+                self.logger.info("Secret Santa cog unloaded (sync)")
+        except RuntimeError:
+            # No event loop available
+            self.logger.info("Secret Santa cog unloaded (no loop)")
+    
+    async def _async_unload(self):
+        """Async cleanup operations"""
+        try:
+            if self._backup_task:
+                self._backup_task.cancel()
+                try:
+                    await self._backup_task
+                except asyncio.CancelledError:
+                    pass
+            
+            self.logger.info("Secret Santa cog unloaded")
+        except Exception as e:
+            self.logger.error(f"Async unload error: {e}")
 
     def _save(self):
-        """Save state to disk"""
-        save_json(STATE_FILE, self.state)
+        """Save state to disk with error handling and backup"""
+        try:
+            save_json(STATE_FILE, self.state)
+            return True
+        except Exception as e:
+            self.logger.error(f"CRITICAL: Failed to save state: {e}", exc_info=True)
+            # Try to save a backup
+            try:
+                backup_path = STATE_FILE.with_suffix('.backup')
+                save_json(backup_path, self.state)
+                self.logger.warning(f"Saved to backup file: {backup_path}")
+            except Exception as backup_error:
+                self.logger.error(f"Backup save also failed: {backup_error}")
+            return False
 
     async def _backup_loop(self):
         """Periodic backup"""
@@ -175,38 +369,88 @@ class SecretSantaCog(commands.Cog):
             self.logger.warning(f"Failed to DM {user_id}: {e}")
             return False
 
+    def _get_year_emoji_mapping(self, participants: Dict[str, str]) -> Dict[str, str]:
+        """Create consistent emoji mapping for all participants in a year"""
+        # Christmas emoji pool for participants
+        emoji_pattern = ["🎁", "🎄", "🎅", "⭐", "❄️", "☃️", "🦌", "🔔", "🍪", "🥛", "🕯️", "✨", "🌟", "🎈", "🧸", "🍭", "🎂", "🎪", "🎨", "🎯"]
+        
+        # Sort participants by ID for consistent assignment
+        sorted_participants = sorted(participants.keys())
+        
+        emoji_mapping = {}
+        for i, participant_id in enumerate(sorted_participants):
+            emoji_mapping[participant_id] = emoji_pattern[i % len(emoji_pattern)]
+        
+        return emoji_mapping
+
+    async def _anonymize_text(self, text: str, message_type: str = "question") -> str:
+        """Use OpenAI to rewrite text for anonymity"""
+        if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
+            return text  # Return original if no API key
+        
+        try:
+            prompts = {
+                "question": (
+                    "Rewrite this Secret Santa message with slightly different wording while keeping the EXACT same meaning and tone. "
+                    "Only change the writing style minimally - use different words but maintain the same message, emotion, and intent. "
+                    "Don't make it more polite or change the personality. Just rephrase it subtly for anonymity.\n\n"
+                    f"Original: {text}\n\nRewritten:"
+                ),
+                "reply": (
+                    "Rewrite this Secret Santa reply with slightly different wording while keeping the EXACT same meaning and tone. "
+                    "Only change the writing style minimally - use different words but maintain the same message, emotion, and intent. "
+                    "Don't make it more polite or change the personality. Just rephrase it subtly for anonymity.\n\n"
+                    f"Original: {text}\n\nRewritten:"
+                )
+            }
+            
+            prompt = prompts.get(message_type, prompts["question"])
+            
+            headers = {
+                "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 100,  # Shorter to prevent over-elaboration
+                "temperature": 0.3  # Lower temperature for more subtle changes
+            }
+            
+            # Use reasonable timeout for anonymization
+            session = await self.bot.http_mgr.get_session(timeout=20)
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions",
+                json=payload,
+                headers=headers
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    rewritten = result["choices"][0]["message"]["content"].strip()
+                    # Remove common AI response prefixes
+                    rewritten = rewritten.replace("Rewritten:", "").strip()
+                    return rewritten if rewritten else text
+                else:
+                    self.logger.debug(f"Anonymization failed: {resp.status}")
+                    return text
+                    
+        except Exception as e:
+            self.logger.debug(f"Anonymization error: {e}")
+            return text
+
     def _archive_event(self, event: Dict[str, Any], year: int):
-        """Archive event data"""
-        # Convert event structure to match historical format
-        archived_assignments = []
-
-        # Process gift submissions
-        for giver_id, submission in event.get("gift_submissions", {}).items():
-            archived_assignments.append({
-                "giver_id": giver_id,
-                "giver_name": event["participants"].get(giver_id, f"User {giver_id}"),
-                "receiver_id": str(submission.get("receiver_id", "")),
-                "receiver_name": submission.get("receiver_name", "Unknown"),
-                "gift": submission.get("gift", "No description")
-            })
-
-        # Archive in new format (event_YEAR.json)
-        archive_new = {
+        """Archive event data in unified format"""
+        # Save everything in unified YEAR.json format
+        archive_data = {
             "year": year,
             "event": event.copy(),
             "archived_at": time.time(),
             "timestamp": dt.datetime.now().isoformat()
         }
-        save_json(ARCHIVE_DIR / f"event_{year}.json", archive_new)
+        save_json(ARCHIVE_DIR / f"{year}.json", archive_data)
 
-        # Also save in old format (YEAR.json) for compatibility
-        archive_old = {
-            "year": year,
-            "assignments": archived_assignments
-        }
-        save_json(ARCHIVE_DIR / f"{year}.json", archive_old)
-
-        self.logger.info(f"Archived Secret Santa {year} in both formats")
+        self.logger.info(f"Archived Secret Santa {year}")
 
     @commands.slash_command(name="ss")
     async def ss_root(self, inter: disnake.ApplicationCommandInteraction):
@@ -299,12 +543,21 @@ class SecretSantaCog(commands.Cog):
         results = await asyncio.gather(*dm_tasks, return_exceptions=True)
         successful = sum(1 for r in results if r is True)
 
-        await inter.edit_original_response(
+        response_msg = (
             f"✅ Secret Santa {current_year} started!\n"
             f"• Participants: {len(participants)}\n"
             f"• DMs sent: {successful}/{len(participants)}\n"
             f"• Role ID: {role_id_int}"
         )
+        
+        await inter.edit_original_response(response_msg)
+        
+        # Notify Discord log channel
+        if hasattr(self.bot, 'send_to_discord_log'):
+            await self.bot.send_to_discord_log(
+                f"Secret Santa {current_year} event started by {inter.author.display_name} - {len(participants)} participants joined",
+                "SUCCESS"
+            )
 
     @ss_root.sub_command(name="shuffle", description="Assign Secret Santas")
     @mod_check()
@@ -323,7 +576,7 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Need at least 2 participants")
             return
 
-        # Load all history from archived events only (archives are source of truth)
+        # Load all history from archived events (unified format)
         history = {}
 
         # Load archived history from YYYY.json files
@@ -335,25 +588,8 @@ class SecretSantaCog(commands.Cog):
 
                 archive_data = load_json(archive_file)
 
-                # Handle old format (direct assignments list)
-                assignments_data = archive_data.get("assignments", [])
-
-                if isinstance(assignments_data, list):
-                    # Process old format where assignments is a list
-                    for assignment in assignments_data:
-                        giver_id = assignment.get("giver_id")
-                        receiver_id = assignment.get("receiver_id")
-
-                        if giver_id and receiver_id:
-                            # Ensure receiver_id is int
-                            try:
-                                receiver_int = int(receiver_id)
-                                history.setdefault(str(giver_id), []).append(receiver_int)
-                            except (ValueError, TypeError):
-                                continue
-
-                # Also check for new format (event_YYYY.json)
-                elif archive_data.get("event"):
+                # Check for unified format (event key)
+                if archive_data.get("event"):
                     event_data = archive_data["event"]
                     event_assignments = event_data.get("assignments", {})
 
@@ -364,16 +600,49 @@ class SecretSantaCog(commands.Cog):
                                 history.setdefault(str(giver), []).append(receiver_int)
                             except (ValueError, TypeError):
                                 continue
+                
+                # Handle legacy old format (direct assignments list)
+                elif "assignments" in archive_data and isinstance(archive_data["assignments"], list):
+                    for assignment in archive_data["assignments"]:
+                        giver_id = assignment.get("giver_id")
+                        receiver_id = assignment.get("receiver_id")
+
+                        if giver_id and receiver_id:
+                            try:
+                                receiver_int = int(receiver_id)
+                                history.setdefault(str(giver_id), []).append(receiver_int)
+                            except (ValueError, TypeError):
+                                continue
 
             except Exception as e:
                 self.logger.warning(f"Error loading archive {archive_file}: {e}")
                 continue
+
+        # Pre-validate assignment possibility
+        validation_error = validate_assignment_possibility(participants, history)
+        if validation_error:
+            await inter.edit_original_response(content=f"❌ {validation_error}")
+            
+            # Notify Discord log channel about assignment failure
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log(
+                    f"Secret Santa assignment failed - {validation_error}",
+                    "WARNING"
+                )
+            return
 
         # Make assignments
         try:
             assignments = make_assignments(participants, history)
         except ValueError as e:
             await inter.edit_original_response(content=f"❌ {e}")
+            
+            # Notify Discord log channel about assignment error
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log(
+                    f"Secret Santa assignment error - {e}",
+                    "ERROR"
+                )
             return
 
         # Assign role to participants
@@ -387,20 +656,43 @@ class SecretSantaCog(commands.Cog):
                 except Exception:
                     pass
 
-        # Send assignment DMs
+        # Send assignment DMs - Santa knows who they're gifting to!
         messages = [
-            "🎅 Ho ho ho! You're Secret Santa for {receiver}!",
-            "🎄 You've been assigned to gift {receiver}!",
-            "✨ The magic of Christmas pairs you with {receiver}!",
-            "🦌 Rudolph guides you to {receiver}!"
+            "🎅 **Ho ho ho!** You're Secret Santa for {receiver}!",
+            "🎄 **You've been assigned** to gift {receiver}!",
+            "✨ **The magic of Christmas** has paired you with {receiver}!",
+            "🦌 **Rudolph has chosen** you to spread joy to {receiver}!",
+            "🎁 **Your mission** is to make {receiver}'s Christmas magical!",
+            "❄️ **Winter magic** has matched you with {receiver}!"
         ]
 
         dm_tasks = []
         for giver, receiver in assignments.items():
-            msg = random.choice(messages).format(receiver=f"<@{receiver}>")
-            msg += "\n\n💬 **Ask questions**: `/ss ask_giftee`"
-            msg += "\n📨 **Reply to Santa**: `/ss reply_santa`"
-            msg += "\n📝 **Submit gift**: `/ss submit_gift`"
+            # Create clean assignment message with subtle festive touches
+            msg = f"🎄✨ **SECRET SANTA {self.state['current_year']}** ✨🎄\n"
+            
+            # WHO YOU GOT (most important info)
+            msg += f"🎯 **YOUR GIFTEE:**\n"
+            msg += f"➤ {random.choice(messages).format(receiver=f'<@{receiver}>')}\n\n"
+            
+            # Simple separator
+            msg += f"❄️ ❄️ ❄️ ❄️ ❄️ ❄️ ❄️ ❄️ ❄️\n\n"
+            
+            # Quick reference guide
+            msg += f"💡 **QUICK GUIDE:**\n"
+            msg += f"• Ask them questions anonymously to learn their interests\n"
+            msg += f"• Find a thoughtful gift they'll love\n"
+            msg += f"• Your identity stays secret until you choose to reveal it!\n\n"
+            
+            # Command reference with better formatting
+            msg += f"🔧 **COMMANDS:**\n"
+            msg += f"`/ss ask_giftee` → Send anonymous questions\n"
+            msg += f"`/ss reply_santa` → Reply if they ask you something\n"
+            msg += f"`/ss submit_gift` → Log your gift when delivered\n\n"
+            
+            # Clean footer
+            msg += f"🔐 All messages are subtly AI-rewritten for anonymity!"
+            
             dm_tasks.append(self._send_dm(giver, msg))
 
         await asyncio.gather(*dm_tasks)
@@ -411,11 +703,20 @@ class SecretSantaCog(commands.Cog):
             event["join_closed"] = True
             self._save()
 
-        await inter.edit_original_response(
+        response_msg = (
             f"✅ Assignments complete!\n"
             f"• {len(assignments)} pairs created\n"
             f"• DMs sent to all participants"
         )
+        
+        await inter.edit_original_response(response_msg)
+        
+        # Notify Discord log channel
+        if hasattr(self.bot, 'send_to_discord_log'):
+            await self.bot.send_to_discord_log(
+                f"Secret Santa assignments completed by {inter.author.display_name} - {len(assignments)} pairs created",
+                "SUCCESS"
+            )
 
     @ss_root.sub_command(name="stop", description="Stop the Secret Santa event")
     @mod_check()
@@ -436,6 +737,15 @@ class SecretSantaCog(commands.Cog):
             self._save()
 
         await inter.edit_original_response("✅ Event stopped and archived")
+        
+        # Notify Discord log channel
+        if hasattr(self.bot, 'send_to_discord_log'):
+            participants_count = len(event.get("participants", {}))
+            gifts_count = len(event.get("gift_submissions", {}))
+            await self.bot.send_to_discord_log(
+                f"Secret Santa {self.state['current_year']} event stopped by {inter.author.display_name} - {participants_count} participants, {gifts_count} gifts submitted",
+                "INFO"
+            )
 
     @ss_root.sub_command(name="participants", description="View participants")
     @mod_check()
@@ -469,14 +779,15 @@ class SecretSantaCog(commands.Cog):
 
         await inter.edit_original_response(embed=embed)
 
-    @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question")
+    @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question (anonymously rewritten)")
     @participant_check()
     async def ss_ask(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        question: str = commands.Param(description="Your anonymous question")
+        question: str = commands.Param(description="Your question (will be rewritten for anonymity)", max_length=500),
+        skip_rewrite: bool = commands.Param(default=False, description="Skip AI rewriting (less anonymous)")
     ):
-        """Ask giftee anonymously"""
+        """Ask giftee anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
 
         event = self.state.get("current_event")
@@ -484,17 +795,34 @@ class SecretSantaCog(commands.Cog):
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
-            await inter.edit_original_response(content="❌ You don't have an assignment yet")
+            embed = disnake.Embed(
+                title="❌ No Assignment",
+                description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
+                color=disnake.Color.red()
+            )
+            await inter.edit_original_response(embed=embed)
             return
 
         receiver_id = event["assignments"][user_id]
 
+        # Rewrite question for anonymity (unless skipped)
+        if not skip_rewrite:
+            await inter.edit_original_response(content="🤖 Rewriting your question for anonymity...")
+            rewritten_question = await self._anonymize_text(question, "question")
+        else:
+            rewritten_question = question
+
+        # Create beautiful question message
+        question_msg = f"🎅✨ **SECRET SANTA MESSAGE** ✨🎅\n\n"
+        question_msg += f"💌 **Anonymous question from your Secret Santa:**\n\n"
+        question_msg += f"*\"{rewritten_question}\"*\n\n"
+        question_msg += "─────────────────────\n"
+        question_msg += "🎯 **How to reply:**\n"
+        question_msg += "Use `/ss reply_santa` to send an anonymous reply back!\n\n"
+        question_msg += "✨ *Your Secret Santa is excited to learn more about you!*"
+
         # Send question
-        success = await self._send_dm(
-            receiver_id,
-            f"🎅 **Anonymous question from your Secret Santa:**\n\n{question}\n\n"
-            f"💬 Reply with `/ss reply_santa`"
-        )
+        success = await self._send_dm(receiver_id, question_msg)
 
         if success:
             # Save communication
@@ -504,22 +832,48 @@ class SecretSantaCog(commands.Cog):
                 thread["thread"].append({
                     "type": "question",
                     "message": question,
+                    "rewritten": rewritten_question,
                     "timestamp": time.time()
                 })
                 self._save()
 
-            await inter.edit_original_response(content="✅ Question sent!")
+            # Success embed
+            embed = disnake.Embed(
+                title="✅ Question Sent!",
+                description=f"Your question has been delivered anonymously!",
+                color=disnake.Color.green()
+            )
+            embed.add_field(
+                name="📝 Original", 
+                value=f"*{question[:100]}{'...' if len(question) > 100 else ''}*", 
+                inline=False
+            )
+            if not skip_rewrite and rewritten_question != question:
+                embed.add_field(
+                    name="🤖 Rewritten", 
+                    value=f"*{rewritten_question[:100]}{'...' if len(rewritten_question) > 100 else ''}*", 
+                    inline=False
+                )
+            embed.set_footer(text="💡 Tip: Keep asking questions to find the perfect gift!")
+            
+            await inter.edit_original_response(embed=embed)
         else:
-            await inter.edit_original_response(content="❌ Failed to send. They may have DMs disabled.")
+            embed = disnake.Embed(
+                title="❌ Delivery Failed",
+                description="Couldn't send your question. Your giftee may have DMs disabled.",
+                color=disnake.Color.red()
+            )
+            await inter.edit_original_response(embed=embed)
 
-    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa")
+    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (anonymously rewritten)")
     @participant_check()
     async def ss_reply(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        reply: str = commands.Param(description="Your anonymous reply")
+        reply: str = commands.Param(description="Your reply (will be rewritten for anonymity)", max_length=500),
+        skip_rewrite: bool = commands.Param(default=False, description="Skip AI rewriting (less anonymous)")
     ):
-        """Reply to Santa anonymously"""
+        """Reply to Santa anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
 
         event = self.state.get("current_event")
@@ -533,15 +887,33 @@ class SecretSantaCog(commands.Cog):
                 break
 
         if not santa_id:
-            await inter.edit_original_response(content="❌ No one has asked you a question yet")
+            embed = disnake.Embed(
+                title="❌ No Secret Santa Found",
+                description="No one has asked you a question yet, or you haven't been assigned a Secret Santa!",
+                color=disnake.Color.red()
+            )
+            embed.set_footer(text="💡 Wait for your Secret Santa to ask you something first!")
+            await inter.edit_original_response(embed=embed)
             return
 
+        # Rewrite reply for anonymity (unless skipped)
+        if not skip_rewrite:
+            await inter.edit_original_response(content="🤖 Rewriting your reply for anonymity...")
+            rewritten_reply = await self._anonymize_text(reply, "reply")
+        else:
+            rewritten_reply = reply
+
+        # Create beautiful reply message
+        reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
+        reply_msg += f"📨 **Anonymous reply from your giftee:**\n\n"
+        reply_msg += f"*\"{rewritten_reply}\"*\n\n"
+        reply_msg += "─────────────────────\n"
+        reply_msg += "🎯 **Keep the conversation going:**\n"
+        reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
+        reply_msg += "✨ *Your giftee is happy to help you find the perfect gift!*"
+
         # Send reply
-        success = await self._send_dm(
-            santa_id,
-            f"📨 **Anonymous reply from your giftee:**\n\n{reply}\n\n"
-            f"💬 Ask more with `/ss ask_giftee`"
-        )
+        success = await self._send_dm(santa_id, reply_msg)
 
         if success:
             # Save communication
@@ -551,20 +923,45 @@ class SecretSantaCog(commands.Cog):
                 thread["thread"].append({
                     "type": "reply",
                     "message": reply,
+                    "rewritten": rewritten_reply,
                     "timestamp": time.time()
                 })
                 self._save()
 
-            await inter.edit_original_response(content="✅ Reply sent!")
+            # Success embed
+            embed = disnake.Embed(
+                title="✅ Reply Sent!",
+                description="Your reply has been delivered to your Secret Santa!",
+                color=disnake.Color.green()
+            )
+            embed.add_field(
+                name="📝 Original", 
+                value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
+                inline=False
+            )
+            if not skip_rewrite and rewritten_reply != reply:
+                embed.add_field(
+                    name="🤖 Rewritten", 
+                    value=f"*{rewritten_reply[:100]}{'...' if len(rewritten_reply) > 100 else ''}*", 
+                    inline=False
+                )
+            embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
+            
+            await inter.edit_original_response(embed=embed)
         else:
-            await inter.edit_original_response(content="❌ Failed to send. They may have DMs disabled.")
+            embed = disnake.Embed(
+                title="❌ Delivery Failed",
+                description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
+                color=disnake.Color.red()
+            )
+            await inter.edit_original_response(embed=embed)
 
     @ss_root.sub_command(name="submit_gift", description="Submit your gift for records")
     @participant_check()
     async def ss_submit(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        gift_description: str = commands.Param(description="Describe what you gave")
+        gift_description: str = commands.Param(description="Describe what you gave", max_length=500)
     ):
         """Submit gift description"""
         await inter.response.defer(ephemeral=True)
@@ -574,7 +971,12 @@ class SecretSantaCog(commands.Cog):
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
-            await inter.edit_original_response(content="❌ You don't have an assignment yet")
+            embed = disnake.Embed(
+                title="❌ No Assignment",
+                description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
+                color=disnake.Color.red()
+            )
+            await inter.edit_original_response(embed=embed)
             return
 
         receiver_id = event["assignments"][user_id]
@@ -591,12 +993,36 @@ class SecretSantaCog(commands.Cog):
             }
             self._save()
 
-        await inter.edit_original_response(
-            f"✅ Gift submitted!\n\n"
-            f"**For:** {receiver_name}\n"
-            f"**Gift:** {gift_description}\n\n"
-            f"Recorded in Secret Santa {self.state['current_year']} archives!"
+        # Create beautiful success embed
+        embed = disnake.Embed(
+            title="🎁 Gift Submitted Successfully!",
+            description="Your gift has been recorded in the Secret Santa archives!",
+            color=disnake.Color.green()
         )
+        embed.add_field(
+            name="🎯 Recipient",
+            value=f"**{receiver_name}**",
+            inline=True
+        )
+        embed.add_field(
+            name="📅 Year",
+            value=f"**{self.state['current_year']}**",
+            inline=True
+        )
+        embed.add_field(
+            name="⏰ Submitted",
+            value=f"<t:{int(time.time())}:R>",
+            inline=True
+        )
+        embed.add_field(
+            name="🎁 Gift Description",
+            value=f"*{gift_description}*",
+            inline=False
+        )
+        embed.set_footer(text="🎄 Thank you for participating in Secret Santa! Your kindness makes the season brighter.")
+        embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/852616843715395605.png")  # Gift emoji
+
+        await inter.edit_original_response(embed=embed)
 
     @ss_root.sub_command(name="view_gifts", description="View submitted gifts")
     @mod_check()
@@ -620,13 +1046,26 @@ class SecretSantaCog(commands.Cog):
             color=disnake.Color.green()
         )
 
+        # Create consistent emoji mapping for all participants this year
+        emoji_mapping = self._get_year_emoji_mapping(event["participants"])
+        
         for giver_id, submission in list(submissions.items())[:10]:
             giver_name = event["participants"].get(giver_id, f"User {giver_id}")
             receiver_name = submission.get("receiver_name", "Unknown")
             gift = submission["gift"][:200] + "..." if len(submission["gift"]) > 200 else submission["gift"]
 
+            # Get consistent emojis for each person this year
+            giver_emoji = emoji_mapping.get(giver_id, "🎁")
+            
+            # Try to get receiver emoji from their ID if available
+            receiver_id = submission.get("receiver_id")
+            if receiver_id:
+                receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
+            else:
+                receiver_emoji = "🎄"
+
             embed.add_field(
-                name=f"🎁 {giver_name} → {receiver_name}",
+                name=f"{giver_emoji} {giver_name} → {receiver_emoji} {receiver_name}",
                 value=gift,
                 inline=False
             )
@@ -658,14 +1097,21 @@ class SecretSantaCog(commands.Cog):
             color=disnake.Color.blue()
         )
 
+        # Create consistent emoji mapping for all participants this year
+        emoji_mapping = self._get_year_emoji_mapping(event["participants"])
+        
         for santa_id, data in list(comms.items())[:5]:
             santa_name = event["participants"].get(santa_id, f"User {santa_id}")
             giftee_id = data.get("giftee_id")
             giftee_name = event["participants"].get(str(giftee_id), "Unknown")
 
+            # Get consistent emojis for each person this year
+            santa_emoji = emoji_mapping.get(santa_id, "🎅")
+            giftee_emoji = emoji_mapping.get(str(giftee_id), "🎄")
+
             thread = data.get("thread", [])
             thread_text = "\n".join([
-                f"{'🎅' if msg['type'] == 'question' else '📨'} {msg['message'][:50]}..."
+                f"{santa_emoji if msg['type'] == 'question' else giftee_emoji} {msg['message'][:50]}..."
                 for msg in thread[:3]
             ])
 
@@ -692,7 +1138,7 @@ class SecretSantaCog(commands.Cog):
         # Load archived events - both YYYY.json and event_YYYY.json formats
         archives = {}
 
-        # Load old format (YYYY.json)
+        # Load archive files (unified YEAR.json format)
         for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
             year_str = archive_file.stem
 
@@ -704,60 +1150,48 @@ class SecretSantaCog(commands.Cog):
                 year_int = int(year_str)
                 data = load_json(archive_file)
 
-                if data:
-                    # Convert old format to consistent structure
-                    if "assignments" in data and isinstance(data["assignments"], list):
-                        # Old format - create a pseudo-event structure
-                        participants = {}
-                        gifts = {}
-                        assignments_map = {}
+                if data and "event" in data:
+                    # Unified format with full event data
+                    archives[year_int] = data
+                elif data and "assignments" in data and isinstance(data["assignments"], list):
+                    # Legacy old format - convert to new structure
+                    participants = {}
+                    gifts = {}
+                    assignments_map = {}
 
-                        for assignment in data["assignments"]:
-                            giver_id = assignment.get("giver_id", "")
-                            giver_name = assignment.get("giver_name", "Unknown")
-                            receiver_id = assignment.get("receiver_id", "")
-                            receiver_name = assignment.get("receiver_name", "Unknown")
-                            gift = assignment.get("gift", "No description")
+                    for assignment in data["assignments"]:
+                        giver_id = assignment.get("giver_id", "")
+                        giver_name = assignment.get("giver_name", "Unknown")
+                        receiver_id = assignment.get("receiver_id", "")
+                        receiver_name = assignment.get("receiver_name", "Unknown")
+                        gift = assignment.get("gift", "No description")
 
-                            participants[giver_id] = giver_name
-                            if receiver_id:
-                                participants[receiver_id] = receiver_name
+                        participants[giver_id] = giver_name
+                        if receiver_id:
+                            participants[receiver_id] = receiver_name
 
+                        # Only add to gifts if there's actual gift data
+                        if gift and gift != "No description":
                             gifts[giver_id] = {
                                 "gift": gift,
                                 "receiver_name": receiver_name,
                                 "receiver_id": receiver_id
                             }
 
-                            if giver_id and receiver_id:
-                                assignments_map[giver_id] = receiver_id
+                        if giver_id and receiver_id:
+                            assignments_map[giver_id] = receiver_id
 
-                        archives[year_int] = {
-                            "year": year_int,
-                            "event": {
-                                "participants": participants,
-                                "gift_submissions": gifts,
-                                "assignments": assignments_map
-                            }
+                    archives[year_int] = {
+                        "year": year_int,
+                        "event": {
+                            "participants": participants,
+                            "gift_submissions": gifts,
+                            "assignments": assignments_map
                         }
-                    elif "event" in data:
-                        # New format
-                        archives[year_int] = data
+                    }
 
             except Exception as e:
                 self.logger.warning(f"Error loading archive {archive_file}: {e}")
-                continue
-
-        # Load new format (event_YYYY.json) - these take precedence
-        for archive_file in ARCHIVE_DIR.glob("event_*.json"):
-            try:
-                year_str = archive_file.stem.replace("event_", "")
-                if year_str.isdigit():
-                    year_int = int(year_str)
-                    data = load_json(archive_file)
-                    if data:
-                        archives[year_int] = data
-            except Exception:
                 continue
 
         if not archives:
@@ -781,32 +1215,61 @@ class SecretSantaCog(commands.Cog):
             participants = event_data.get("participants", {})
             gifts = event_data.get("gift_submissions", {})
 
+            # Create more accurate description based on event state
+            assignments = event_data.get("assignments", {})
+            has_assignments = bool(assignments)
+            has_gifts = bool(gifts)
+            
+            if has_gifts:
+                description = f"**{len(participants)}** participants, **{len(gifts)}** gifts exchanged"
+            elif has_assignments:
+                description = f"**{len(participants)}** participants, assignments made but no gifts recorded"
+            else:
+                description = f"**{len(participants)}** participants signed up, event incomplete"
+
             embed = disnake.Embed(
                 title=f"🎄 Secret Santa {year}",
-                description=f"**{len(participants)}** participants exchanged gifts",
+                description=description,
                 color=disnake.Color.gold(),
                 timestamp=dt.datetime.now()
             )
 
-            # Create gift exchange list with mentions
-            if gifts:
+                # Always show assignments, with gift info if available
+            if has_assignments:
+                # Create consistent emoji mapping for all participants this year
+                emoji_mapping = self._get_year_emoji_mapping(participants)
                 exchange_lines = []
 
-                for giver_id, submission in gifts.items():
-                    receiver_id = submission.get("receiver_id", "")
-                    gift_desc = submission.get("gift", "No description")
-
-                    # Use mentions for clickable names
-                    giver_mention = f"<@{giver_id}>" if giver_id.isdigit() else participants.get(giver_id, "Unknown")
-                    receiver_mention = f"<@{receiver_id}>" if receiver_id and receiver_id.isdigit() else submission.get(
-                        "receiver_name", "Unknown")
-
-                    # Format gift description (truncate if needed)
-                    if len(gift_desc) > 60:
-                        gift_desc = gift_desc[:57] + "..."
-
-                    exchange_lines.append(f"🎁 {giver_mention} → {receiver_mention}")
-                    exchange_lines.append(f"    ⤷ *{gift_desc}*")
+                for giver_id, receiver_id in list(assignments.items()):
+                    # Get names/mentions for giver and receiver
+                    giver_name = participants.get(str(giver_id), f"User {giver_id}")
+                    receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
+                    
+                    giver_mention = f"<@{giver_id}>" if str(giver_id).isdigit() else giver_name
+                    receiver_mention = f"<@{receiver_id}>" if str(receiver_id).isdigit() else receiver_name
+                    
+                    # Get consistent emojis for each person this year
+                    giver_emoji = emoji_mapping.get(str(giver_id), "🎁")
+                    receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
+                    
+                    # Check if this assignment has a gift submission
+                    submission = gifts.get(str(giver_id))
+                    
+                    if submission and isinstance(submission, dict):
+                        # Has gift - show with description
+                        gift_desc = submission.get("gift", "No description provided")
+                        
+                        # Format gift description (truncate if needed)
+                        if isinstance(gift_desc, str) and len(gift_desc) > 60:
+                            gift_desc = gift_desc[:57] + "..."
+                        elif not isinstance(gift_desc, str):
+                            gift_desc = "Invalid gift description"
+                        
+                        exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
+                        exchange_lines.append(f"    ⤷ *{gift_desc}*")
+                    else:
+                        # No gift submitted - show assignment only
+                        exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *(no gift recorded)*")
 
                 # Split into multiple fields if needed
                 chunks = []
@@ -828,19 +1291,26 @@ class SecretSantaCog(commands.Cog):
 
                 # Add fields
                 for i, chunk in enumerate(chunks[:3]):  # Max 3 fields
-                    field_name = "🎁 Gift Exchanges" if i == 0 else "​"  # Zero width space for continuation
+                    if i == 0:
+                        gifts_count = len([g for g in gifts.keys() if g in [str(a) for a in assignments.keys()]])
+                        field_name = f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)"
+                    else:
+                        field_name = "​"  # Zero width space for continuation
                     embed.add_field(name=field_name, value=chunk, inline=False)
 
-                if len(gifts) > 10:
+                if len(assignments) > 10:
                     embed.add_field(
                         name="​",
-                        value=f"*... and {len(gifts) - 10} more exchanges*",
+                        value=f"*... and {len(assignments) - 10} more assignments*",
                         inline=False
                     )
             else:
+                # Event incomplete - no assignments made at all
+                status_text = f"⏸️ Signup completed ({len(participants)} joined)\n❌ No assignments made\n❌ No gifts recorded"
+                
                 embed.add_field(
-                    name="📝 Status",
-                    value="No gifts recorded for this year",
+                    name="📝 Event Status",
+                    value=status_text,
                     inline=False
                 )
 

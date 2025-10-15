@@ -46,12 +46,16 @@ class DALLECog(commands.Cog):
 
         self.enabled = True
 
-        # Components
-        self.rate_limiter = utils.RateLimiter(limit=10, window=60)
-        self.cache = utils.LRUCache[str](max_size=50, ttl=3000)  # URLs expire in ~1 hour
+        # Components with configurable limits
+        rate_limit = getattr(bot.config, 'RATE_LIMIT_REQUESTS', 10)
+        rate_window = getattr(bot.config, 'RATE_LIMIT_WINDOW', 60)
+        max_queue = getattr(bot.config, 'MAX_QUEUE_SIZE', 50)
+        
+        self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
+        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3000)  # URLs expire in ~1 hour
 
         # Queue
-        self.queue = asyncio.Queue(maxsize=50)
+        self.queue = asyncio.Queue(maxsize=max_queue)
         self.processor_task: Optional[asyncio.Task] = None
         self.is_processing = False
 
@@ -68,33 +72,72 @@ class DALLECog(commands.Cog):
         }
 
         self._shutdown = asyncio.Event()
+        self._unloaded = False  # Track if already unloaded
+        self._health_check_task = None
 
         self.logger.info("DALL-E cog initialized")
 
     async def cog_load(self):
         """Initialize cog"""
         if not self.enabled:
+            # Notify Discord about DALLE being disabled
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log("🖼️ DALL-E cog loaded but disabled (no API key)", "WARNING")
             return
 
         self.processor_task = asyncio.create_task(self._process_queue())
+        self._health_check_task = asyncio.create_task(self._health_check_loop())
         self.logger.info("DALL-E cog loaded")
+        
+        # Notify Discord about successful loading
+        if hasattr(self.bot, 'send_to_discord_log'):
+            await self.bot.send_to_discord_log("🎨 DALL-E cog loaded successfully", "SUCCESS")
 
-    async def cog_unload(self):
-        """Cleanup cog"""
-        if not self.enabled:
+    def cog_unload(self):
+        """Cleanup cog (synchronous wrapper to prevent RuntimeWarning)"""
+        if not self.enabled or self._unloaded:
             return
-
+        
+        self._unloaded = True
         self.logger.info("Unloading DALL-E cog...")
-        self._shutdown.set()
+        
+        # Schedule async cleanup
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Create task for async cleanup
+                loop.create_task(self._async_unload())
+            else:
+                # If no running loop, do sync cleanup only
+                self._shutdown.set()
+                self.logger.info("DALL-E cog unloaded (sync)")
+        except RuntimeError:
+            # No event loop available, do minimal cleanup
+            self._shutdown.set()
+            self.logger.info("DALL-E cog unloaded (no loop)")
+    
+    async def _async_unload(self):
+        """Async cleanup operations"""
+        try:
+            self._shutdown.set()
 
-        if self.processor_task:
-            self.processor_task.cancel()
-            try:
-                await self.processor_task
-            except asyncio.CancelledError:
-                pass
+            if self.processor_task:
+                self.processor_task.cancel()
+                try:
+                    await self.processor_task
+                except asyncio.CancelledError:
+                    pass
+            
+            if self._health_check_task:
+                self._health_check_task.cancel()
+                try:
+                    await self._health_check_task
+                except asyncio.CancelledError:
+                    pass
 
-        self.logger.info("DALL-E cog unloaded")
+            self.logger.info("DALL-E cog unloaded")
+        except Exception as e:
+            self.logger.error(f"Async unload error: {e}")
 
     def _cache_key(self, prompt: str, size: str, quality: str) -> str:
         """Generate cache key"""
@@ -270,6 +313,33 @@ class DALLECog(commands.Cog):
 
         except asyncio.CancelledError:
             pass
+
+    async def _health_check_loop(self):
+        """Health check for hung processor task"""
+        try:
+            while not self._shutdown.is_set():
+                await asyncio.sleep(600)  # Every 10 minutes
+                
+                # Check if processor task died unexpectedly
+                if self.processor_task and self.processor_task.done():
+                    exc = self.processor_task.exception()
+                    if exc:
+                        self.logger.error(f"Processor task died: {exc}")
+                        # Restart it if queue is not empty
+                        if not self.queue.empty():
+                            self.logger.info("Restarting DALL-E processor task")
+                            self.processor_task = asyncio.create_task(self._process_queue())
+                
+                # Check for stuck queue
+                if self.queue.qsize() > 0 and not self.is_processing:
+                    self.logger.warning("Queue stuck, attempting restart")
+                    if not self.processor_task or self.processor_task.done():
+                        self.processor_task = asyncio.create_task(self._process_queue())
+                
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"Health check loop error: {e}", exc_info=True)
 
     async def _send_result(self, job: GenerationJob, result: Dict, elapsed: float):
         """Send generation result"""
