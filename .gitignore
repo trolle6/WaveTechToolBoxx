@@ -1,28 +1,50 @@
-# Environment files with sensitive data
-config.env
-.env
-*.env
+# Spotify Discord Bot - gitignore
 
-# Python cache
+# Configuration files with secrets
+config.json
+
+# Spotify cache
+.cache
+.cache-*
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Logs
-*.log
-bot.log*
+# Downloaded audio files
+*.webm
+*.m4a
+*.mp3
+*.opus
 
-# IDE files
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
