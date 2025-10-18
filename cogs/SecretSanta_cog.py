@@ -6,7 +6,7 @@ Manages Secret Santa events with gift tracking and anonymous communication
 import asyncio
 import datetime as dt
 import json
-import random
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -63,6 +63,77 @@ def save_json(path: Path, data: Any):
         raise  # Re-raise so caller knows save failed
 
 
+def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = None, logger=None) -> tuple[Dict[str, List[int]], List[int]]:
+    """
+    Load Secret Santa history from archive files.
+    
+    Args:
+        archive_dir: Path to archive directory
+        exclude_years: List of years to exclude from history (for fallback)
+        logger: Optional logger for debugging
+    
+    Returns:
+        Tuple of (history dict, list of available years sorted oldest to newest)
+    """
+    exclude_years = exclude_years or []
+    history = {}
+    available_years = []
+
+    # Load archived history from YYYY.json files
+    for archive_file in archive_dir.glob("[0-9]*.json"):
+        try:
+            year_str = archive_file.stem
+            if not year_str.isdigit() or len(year_str) != 4:
+                continue
+
+            year = int(year_str)
+            available_years.append(year)
+            
+            # Skip excluded years
+            if year in exclude_years:
+                if logger:
+                    logger.info(f"Excluding year {year} from history (fallback mode)")
+                continue
+
+            archive_data = load_json(archive_file)
+
+            # Check for unified format (event key)
+            if archive_data.get("event"):
+                event_data = archive_data["event"]
+                event_assignments = event_data.get("assignments", {})
+
+                if isinstance(event_assignments, dict):
+                    for giver, receiver in event_assignments.items():
+                        try:
+                            receiver_int = int(receiver)
+                            history.setdefault(str(giver), []).append(receiver_int)
+                        except (ValueError, TypeError):
+                            continue
+            
+            # Handle legacy old format (direct assignments list)
+            elif "assignments" in archive_data and isinstance(archive_data["assignments"], list):
+                for assignment in archive_data["assignments"]:
+                    giver_id = assignment.get("giver_id")
+                    receiver_id = assignment.get("receiver_id")
+
+                    if giver_id and receiver_id:
+                        try:
+                            receiver_int = int(receiver_id)
+                            history.setdefault(str(giver_id), []).append(receiver_int)
+                        except (ValueError, TypeError):
+                            continue
+
+        except Exception as e:
+            if logger:
+                logger.warning(f"Error loading archive {archive_file}: {e}")
+            continue
+
+    # Sort available years (oldest first)
+    available_years.sort()
+    
+    return history, available_years
+
+
 def validate_assignment_possibility(participants: List[int], history: Dict[str, List[int]]) -> Optional[str]:
     """Check if assignments are possible before attempting them"""
     if len(participants) < 2:
@@ -100,13 +171,44 @@ def validate_assignment_possibility(participants: List[int], history: Dict[str, 
 
 
 def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> Dict[int, int]:
-    """Create Secret Santa assignments avoiding repeats"""
+    """
+    Create Secret Santa assignments avoiding repeats from history.
+    
+    ALGORITHM:
+    1. Use cryptographically secure randomness (secrets.SystemRandom)
+    2. Shuffle participants randomly (different order each attempt)
+    3. For each giver, find available receivers (not in history, not self)
+    4. Randomly choose from available receivers
+    5. Retry up to 10 times if assignment fails
+    
+    SAFETY:
+    - Works with copy of history (doesn't modify unless successful)
+    - Only updates real history if ALL assignments succeed
+    - Prevents cycles (giver can't receive from their receiver)
+    
+    RANDOMNESS:
+    Uses secrets.SystemRandom() which is cryptographically secure and doesn't
+    require manual seeding. It uses the OS's entropy pool directly (os.urandom).
+    This is the recommended approach for security-sensitive randomness in Python.
+    
+    Args:
+        participants: List of user IDs participating
+        history: Dict mapping giver ID (str) to list of previous receiver IDs
+    
+    Returns:
+        Dict mapping giver ID (int) to receiver ID (int)
+    
+    Raises:
+        ValueError: If assignment is impossible with current history
+    """
     if len(participants) < 2:
         raise ValueError("Need at least 2 participants")
 
-    random.seed(time.time() + random.random())
+    # Use cryptographically secure random number generator
+    # This uses os.urandom() internally - no manual seeding needed!
+    secure_random = secrets.SystemRandom()
     
-    # Try multiple times with different strategies
+    # Try multiple times with different random orderings
     max_attempts = 10
     
     for attempt in range(max_attempts):
@@ -116,7 +218,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
             
             # Shuffle participants for different assignment order each attempt
             shuffled_participants = participants.copy()
-            random.shuffle(shuffled_participants)
+            secure_random.shuffle(shuffled_participants)
             
             for giver in shuffled_participants:
                 unacceptable: List[int] = temp_history.get(str(giver), [])
@@ -130,22 +232,9 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
                 available = [p for p in participants if p not in unacceptable and p != giver]
                 
                 if not available:
-                    # If we're on later attempts, try clearing some history
-                    if attempt >= 3:
-                        # Clear oldest entries from this giver's history
-                        giver_history = temp_history.get(str(giver), [])
-                        if len(giver_history) > len(participants) // 2:
-                            temp_history[str(giver)] = giver_history[-(len(participants) // 2):]
-                            unacceptable = temp_history.get(str(giver), [])
-                            for g, r in result.items():
-                                if r == giver:
-                                    unacceptable.append(g)
-                            available = [p for p in participants if p not in unacceptable and p != giver]
-                    
-                    if not available:
-                        raise ValueError(f"Cannot assign giver {giver} - no valid receivers available")
+                    raise ValueError(f"Cannot assign giver {giver} - no valid receivers available")
                 
-                receiver = random.choice(available)
+                receiver = secure_random.choice(available)
                 result[giver] = receiver
                 temp_history.setdefault(str(giver), []).append(receiver)
             
@@ -157,20 +246,9 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
             
         except ValueError:
             if attempt == max_attempts - 1:
-                # Last attempt - provide detailed error
-                available_counts = {}
-                for giver in participants:
-                    unacceptable = history.get(str(giver), [])
-                    available = [p for p in participants if p not in unacceptable and p != giver]
-                    available_counts[giver] = len(available)
-                
-                min_available = min(available_counts.values())
-                if min_available == 0:
-                    problematic_users = [str(giver) for giver, count in available_counts.items() if count == 0]
-                    raise ValueError(f"Assignment impossible: Users {', '.join(problematic_users)} have no valid receivers due to history constraints. Consider resetting some history.")
-                else:
-                    raise ValueError(f"Assignment failed after {max_attempts} attempts. This shouldn't happen with {len(participants)} participants.")
-            continue  # Try again
+                # Last attempt failed - provide detailed error for fallback
+                raise ValueError("Assignment failed with current history constraints")
+            continue  # Try again with different random order
     
     raise ValueError("Assignment failed - this should not be reached")
 
@@ -439,18 +517,57 @@ class SecretSantaCog(commands.Cog):
             self.logger.debug(f"Anonymization error: {e}")
             return text
 
-    def _archive_event(self, event: Dict[str, Any], year: int):
-        """Archive event data in unified format"""
-        # Save everything in unified YEAR.json format
+    def _archive_event(self, event: Dict[str, Any], year: int) -> str:
+        """
+        Archive event data in unified format with CRITICAL overwrite protection.
+        
+        SAFETY FEATURES:
+        - Never overwrites existing archives (data loss prevention!)
+        - Creates timestamped backup if year already archived
+        - Sends Discord warnings if duplicate year detected
+        - Useful for test events or accidental re-runs
+        
+        If archive already exists, saves to backup file instead.
+        Example: 2025.json exists → saves to 2025_backup_20251216_153045.json
+        
+        Returns:
+            Filename of the saved archive (e.g., "2025.json" or "2025_backup_20251216_153045.json")
+        """
         archive_data = {
             "year": year,
             "event": event.copy(),
             "archived_at": time.time(),
             "timestamp": dt.datetime.now().isoformat()
         }
-        save_json(ARCHIVE_DIR / f"{year}.json", archive_data)
-
-        self.logger.info(f"Archived Secret Santa {year}")
+        
+        archive_path = ARCHIVE_DIR / f"{year}.json"
+        
+        # CRITICAL SAFETY CHECK: Prevent data loss from accidental overwrites
+        # This catches: test runs, accidental re-runs, multiple events per year
+        if archive_path.exists():
+            # Archive already exists! Save to backup file instead (NEVER overwrite!)
+            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = ARCHIVE_DIR / f"{year}_backup_{timestamp}.json"
+            save_json(backup_path, archive_data)
+            
+            self.logger.warning(f"⚠️ Archive {year}.json already exists! Saved to {backup_path.name} instead")
+            self.logger.warning(f"This suggests you ran multiple events in {year}. Please review archives manually!")
+            
+            # Also notify via Discord if possible
+            if hasattr(self.bot, 'send_to_discord_log'):
+                asyncio.create_task(
+                    self.bot.send_to_discord_log(
+                        f"⚠️ Archive protection: {year}.json already exists! Saved to {backup_path.name} to prevent data loss. Review manually!",
+                        "WARNING"
+                    )
+                )
+            
+            return backup_path.name
+        else:
+            # Safe to save normally
+            save_json(archive_path, archive_data)
+            self.logger.info(f"Archived Secret Santa {year} → {archive_path.name}")
+            return archive_path.name
 
     @commands.slash_command(name="ss")
     async def ss_root(self, inter: disnake.ApplicationCommandInteraction):
@@ -482,6 +599,41 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Event already active")
             return
 
+        # SAFETY WARNING: Check if current year is already archived
+        # Prevents accidental data loss if you test on wrong server or run twice
+        current_year = dt.date.today().year
+        existing_archive = ARCHIVE_DIR / f"{current_year}.json"
+        if existing_archive.exists():
+            embed = disnake.Embed(
+                title="⚠️ Year Already Archived",
+                description=f"An archive already exists for {current_year}!\n\n"
+                            f"**This might mean:**\n"
+                            f"• You already ran Secret Santa this year\n"
+                            f"• You're testing on the wrong server\n"
+                            f"• This is intentional (test event)\n\n"
+                            f"**If you continue, the old archive will be preserved** and any new archive will be saved to a backup file.",
+                color=disnake.Color.orange()
+            )
+            embed.add_field(
+                name="🔒 Protection Active",
+                value=f"Existing archive: `{current_year}.json`\n"
+                      f"New archives will save to: `{current_year}_backup_TIMESTAMP.json`",
+                inline=False
+            )
+            embed.set_footer(text="✅ Your existing archive is safe and won't be overwritten!")
+            await inter.edit_original_response(embed=embed)
+            
+            # Log this warning
+            self.logger.warning(f"Starting new event for {current_year} but archive already exists!")
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log(
+                    f"⚠️ {inter.author.display_name} is starting a new Secret Santa {current_year} event, but {current_year}.json archive already exists!",
+                    "WARNING"
+                )
+            
+            # Wait 5 seconds so user can read the warning, then continue
+            await asyncio.sleep(5)
+
         # Find message and collect participants
         participants = {}
         found = False
@@ -510,9 +662,7 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Message not found")
             return
 
-        # Create event
-        current_year = dt.date.today().year
-
+        # Create event (current_year already set above during safety check)
         new_event = {
             "active": True,
             "join_closed": False,
@@ -562,7 +712,7 @@ class SecretSantaCog(commands.Cog):
     @ss_root.sub_command(name="shuffle", description="Assign Secret Santas")
     @mod_check()
     async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
-        """Make assignments"""
+        """Make assignments with progressive year-based fallback"""
         await inter.response.defer(ephemeral=True)
 
         event = self.state.get("current_event")
@@ -570,79 +720,83 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ No active event")
             return
 
-        participants = list(map(int, event["participants"].keys()))
+        # Convert participant IDs to integers
+        participants = [int(uid) for uid in event["participants"]]
 
         if len(participants) < 2:
             await inter.edit_original_response(content="❌ Need at least 2 participants")
             return
 
-        # Load all history from archived events (unified format)
-        history = {}
-
-        # Load archived history from YYYY.json files
-        for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
-            try:
-                year_str = archive_file.stem
-                if not year_str.isdigit() or len(year_str) != 4:
-                    continue
-
-                archive_data = load_json(archive_file)
-
-                # Check for unified format (event key)
-                if archive_data.get("event"):
-                    event_data = archive_data["event"]
-                    event_assignments = event_data.get("assignments", {})
-
-                    if isinstance(event_assignments, dict):
-                        for giver, receiver in event_assignments.items():
-                            try:
-                                receiver_int = int(receiver)
-                                history.setdefault(str(giver), []).append(receiver_int)
-                            except (ValueError, TypeError):
-                                continue
+        # Load all history to get available years
+        history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[], logger=self.logger)
+        
+        self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
+        self.logger.info(f"Available history years: {available_years}")
+        
+        # PROGRESSIVE FALLBACK SYSTEM:
+        # Try 1: Use ALL history (2021, 2022, 2023, 2024)
+        # Try 2: Exclude 2021 only
+        # Try 3: Exclude 2021, 2022
+        # Try 4: Exclude 2021, 2022, 2023
+        # Try 5: No history (fresh start)
+        # This prevents impossible assignments after many years
+        exclude_years = []
+        assignments = None
+        fallback_used = False
+        
+        for attempt in range(len(available_years) + 1):
+            if attempt > 0:
+                # Exclude oldest year(s) progressively (2021 first, then 2022, etc.)
+                exclude_years = available_years[:attempt]
+                fallback_used = True
+                self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
                 
-                # Handle legacy old format (direct assignments list)
-                elif "assignments" in archive_data and isinstance(archive_data["assignments"], list):
-                    for assignment in archive_data["assignments"]:
-                        giver_id = assignment.get("giver_id")
-                        receiver_id = assignment.get("receiver_id")
-
-                        if giver_id and receiver_id:
-                            try:
-                                receiver_int = int(receiver_id)
-                                history.setdefault(str(giver_id), []).append(receiver_int)
-                            except (ValueError, TypeError):
-                                continue
-
-            except Exception as e:
-                self.logger.warning(f"Error loading archive {archive_file}: {e}")
+                # Reload history without excluded years
+                history, _ = load_history_from_archives(ARCHIVE_DIR, exclude_years=exclude_years, logger=self.logger)
+                
+                # Inform user about fallback
+                years_str = ", ".join(map(str, exclude_years))
+                await inter.edit_original_response(
+                    content=f"⚠️ Initial assignment difficult... trying fallback (excluding {years_str})..."
+                )
+            
+            # Pre-validate assignment possibility
+            validation_error = validate_assignment_possibility(participants, history)
+            if validation_error:
+                if attempt == len(available_years):
+                    # Last attempt failed
+                    await inter.edit_original_response(content=f"❌ {validation_error}")
+                    
+                    if hasattr(self.bot, 'send_to_discord_log'):
+                        await self.bot.send_to_discord_log(
+                            f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
+                            "ERROR"
+                        )
+                    return
+                # Try next fallback
                 continue
-
-        # Pre-validate assignment possibility
-        validation_error = validate_assignment_possibility(participants, history)
-        if validation_error:
-            await inter.edit_original_response(content=f"❌ {validation_error}")
             
-            # Notify Discord log channel about assignment failure
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log(
-                    f"Secret Santa assignment failed - {validation_error}",
-                    "WARNING"
-                )
-            return
-
-        # Make assignments
-        try:
-            assignments = make_assignments(participants, history)
-        except ValueError as e:
-            await inter.edit_original_response(content=f"❌ {e}")
-            
-            # Notify Discord log channel about assignment error
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log(
-                    f"Secret Santa assignment error - {e}",
-                    "ERROR"
-                )
+            # Try to make assignments
+            try:
+                assignments = make_assignments(participants, history)
+                # Success!
+                break
+            except ValueError as e:
+                if attempt == len(available_years):
+                    # Last attempt failed
+                    await inter.edit_original_response(content=f"❌ Assignment failed: {e}")
+                    
+                    if hasattr(self.bot, 'send_to_discord_log'):
+                        await self.bot.send_to_discord_log(
+                            f"Secret Santa assignment failed even with all fallbacks - {e}",
+                            "ERROR"
+                        )
+                    return
+                # Try next fallback
+                continue
+        
+        if not assignments:
+            await inter.edit_original_response(content="❌ Assignment failed unexpectedly")
             return
 
         # Assign role to participants
@@ -673,7 +827,7 @@ class SecretSantaCog(commands.Cog):
             
             # WHO YOU GOT (most important info)
             msg += f"🎯 **YOUR GIFTEE:**\n"
-            msg += f"➤ {random.choice(messages).format(receiver=f'<@{receiver}>')}\n\n"
+            msg += f"➤ {secrets.choice(messages).format(receiver=f'<@{receiver}>')}\n\n"
             
             # Simple separator
             msg += f"❄️ ❄️ ❄️ ❄️ ❄️ ❄️ ❄️ ❄️ ❄️\n\n"
@@ -703,20 +857,24 @@ class SecretSantaCog(commands.Cog):
             event["join_closed"] = True
             self._save()
 
-        response_msg = (
-            f"✅ Assignments complete!\n"
-            f"• {len(assignments)} pairs created\n"
-            f"• DMs sent to all participants"
-        )
+        # Build success message
+        response_msg = f"✅ Assignments complete!\n"
+        response_msg += f"• {len(assignments)} pairs created\n"
+        response_msg += f"• DMs sent to all participants\n"
         
-        await inter.edit_original_response(response_msg)
+        if fallback_used:
+            years_str = ", ".join(map(str, exclude_years))
+            response_msg += f"\n⚠️ **Fallback used:** Excluded history from {years_str} to make assignments possible\n"
+            response_msg += f"💡 Consider having Secret Santa more frequently to avoid this!"
+        
+        await inter.edit_original_response(content=response_msg)
         
         # Notify Discord log channel
         if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log(
-                f"Secret Santa assignments completed by {inter.author.display_name} - {len(assignments)} pairs created",
-                "SUCCESS"
-            )
+            log_msg = f"Secret Santa assignments completed by {inter.author.display_name} - {len(assignments)} pairs created"
+            if fallback_used:
+                log_msg += f" (fallback: excluded years {', '.join(map(str, exclude_years))})"
+            await self.bot.send_to_discord_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")
 
     @ss_root.sub_command(name="stop", description="Stop the Secret Santa event")
     @mod_check()
@@ -729,14 +887,35 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ No active event")
             return
 
-        # Archive event
-        self._archive_event(event, self.state["current_year"])
+        year = self.state["current_year"]
+
+        # Archive event (with automatic backup protection)
+        saved_filename = self._archive_event(event, year)
 
         async with self._lock:
             self.state["current_event"] = None
             self._save()
 
-        await inter.edit_original_response("✅ Event stopped and archived")
+        # Show appropriate message based on what file was saved
+        if "backup" in saved_filename:
+            # Archive protection was triggered
+            embed = disnake.Embed(
+                title="✅ Event Stopped & Protected",
+                description=f"Secret Santa {year} has been archived with data protection!",
+                color=disnake.Color.orange()
+            )
+            embed.add_field(
+                name="🔒 Archive Protection",
+                value=f"**Original:** `{year}.json` (preserved)\n"
+                      f"**This event:** `{saved_filename}`\n\n"
+                      f"⚠️ You ran multiple {year} events! Review archives folder manually.",
+                inline=False
+            )
+            embed.set_footer(text="Your original archive was NOT overwritten!")
+            await inter.edit_original_response(embed=embed)
+        else:
+            # Normal archive
+            await inter.edit_original_response(content=f"✅ Event stopped and archived → `{saved_filename}`")
         
         # Notify Discord log channel
         if hasattr(self.bot, 'send_to_discord_log'):
@@ -1136,6 +1315,8 @@ class SecretSantaCog(commands.Cog):
         await inter.response.defer(ephemeral=True)
 
         # Load archived events - both YYYY.json and event_YYYY.json formats
+        # NOTE: Current active event is NOT shown (would reveal secret assignments!)
+        # Only archived events (after /ss stop) are visible
         archives = {}
 
         # Load archive files (unified YEAR.json format)
@@ -1419,24 +1600,6 @@ class SecretSantaCog(commands.Cog):
 
             embed.set_footer(
                 text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
-            await inter.edit_original_response(embed=embed)
-
-            # Add summary statistics
-            total_participants = sum(
-                len(archives[y].get("event", {}).get("participants", {}))
-                for y in sorted_years
-            )
-            total_gifts = sum(
-                len(archives[y].get("event", {}).get("gift_submissions", {}))
-                for y in sorted_years
-            )
-
-            embed.add_field(
-                name="📊 All-Time Stats",
-                value=f"Total Events: {len(sorted_years)}\nTotal Participants: {total_participants}\nTotal Gifts: {total_gifts}",
-                inline=False
-            )
-
             await inter.edit_original_response(embed=embed)
 
     @commands.Cog.listener()

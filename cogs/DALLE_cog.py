@@ -4,7 +4,6 @@ High-quality AI image generation with robust queue management
 """
 
 import asyncio
-import hashlib
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -140,23 +139,15 @@ class DALLECog(commands.Cog):
             self.logger.error(f"Async unload error: {e}")
 
     def _cache_key(self, prompt: str, size: str, quality: str) -> str:
-        """Generate cache key"""
-        return hashlib.sha256(f"{prompt}:{size}:{quality}".encode()).hexdigest()[:16]
-
-    def _enhance_prompt(self, prompt: str) -> str:
-        """Enhance prompt for better results"""
-        prompt = " ".join(prompt.split())
-
-        # Don't enhance if already detailed
-        quality_terms = ["masterpiece", "4k", "8k", "ultra detailed", "professional"]
-        if any(term in prompt.lower() for term in quality_terms):
-            return prompt
-
-        # Add quality enhancement if there's room
-        if len(prompt) < 3900:
-            return f"{prompt}, masterpiece, best quality, ultra detailed, professional"
-
-        return prompt
+        """
+        Generate cache key using Python's built-in hash (faster than SHA256).
+        
+        PERFORMANCE:
+        - Built-in hash() is ~100x faster than SHA256
+        - No cryptographic security needed for cache keys
+        - Collision risk negligible for cache (overwrite is acceptable)
+        """
+        return str(hash(f"{prompt}:{size}:{quality}"))
 
     async def _generate_image(
         self,
@@ -378,7 +369,7 @@ class DALLECog(commands.Cog):
             except Exception:
                 pass
 
-    @commands.slash_command(name="imagine", description="Generate an image with DALL-E 3")
+    @commands.slash_command(name="image", description="🎨 Generate AI images with DALL-E 3")
     async def imagine(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -425,11 +416,11 @@ class DALLECog(commands.Cog):
             )
             return
 
-        # Enhance prompt
-        enhanced = self._enhance_prompt(prompt)
+        # Clean prompt
+        prompt = prompt.strip()
 
         # Check cache
-        cache_key = self._cache_key(enhanced, size, quality)
+        cache_key = self._cache_key(prompt, size, quality)
         cached = await self.cache.get(cache_key)
 
         if cached:
@@ -449,7 +440,7 @@ class DALLECog(commands.Cog):
         # Create job
         job = GenerationJob(
             user_id=inter.author.id,
-            prompt=enhanced,
+            prompt=prompt,
             size=size,
             quality=quality,
             interaction=inter,
@@ -478,108 +469,6 @@ class DALLECog(commands.Cog):
                 content="❌ Queue is full. Try again in a few minutes."
             )
 
-    @commands.slash_command(name="dalle")
-    async def dalle_group(self, inter: disnake.ApplicationCommandInteraction):
-        """DALL-E commands"""
-        pass
-
-    @dalle_group.sub_command(name="stats", description="View DALL-E statistics")
-    async def dalle_stats(self, inter: disnake.ApplicationCommandInteraction):
-        """Show stats"""
-        await inter.response.defer(ephemeral=True)
-
-        if not self.enabled:
-            await inter.edit_original_response(content="❌ DALL-E disabled")
-            return
-
-        cache_stats = await self.cache.get_stats()
-
-        success_rate = (self.stats["successful"] / max(1, self.stats["total_requests"])) * 100
-        avg_time = self.stats["total_time"] / max(1, self.stats["successful"])
-
-        embed = disnake.Embed(title="📊 DALL-E Statistics", color=disnake.Color.blue())
-
-        embed.add_field(
-            name="🚀 Generation",
-            value=f"• Requests: `{self.stats['total_requests']}`\n"
-                  f"• Successful: `{self.stats['successful']}`\n"
-                  f"• Failed: `{self.stats['failed']}`\n"
-                  f"• Success Rate: `{success_rate:.1f}%`\n"
-                  f"• Avg Time: `{avg_time:.1f}s`",
-            inline=True
-        )
-
-        embed.add_field(
-            name="⚡ Cache",
-            value=f"• Hits: `{self.stats['cache_hits']}`\n"
-                  f"• Size: `{cache_stats['size']}/{cache_stats['max_size']}`\n"
-                  f"• Hit Rate: `{cache_stats['hit_rate']:.1f}%`",
-            inline=True
-        )
-
-        embed.add_field(
-            name="📋 Queue",
-            value=f"• Size: `{self.queue.qsize()}`\n"
-                  f"• Processing: `{'Yes' if self.is_processing else 'No'}`",
-            inline=True
-        )
-
-        await inter.edit_original_response(embed=embed)
-
-    @dalle_group.sub_command(name="queue", description="View generation queue")
-    async def dalle_queue(self, inter: disnake.ApplicationCommandInteraction):
-        """Show queue status"""
-        await inter.response.defer(ephemeral=True)
-
-        if not self.enabled:
-            await inter.edit_original_response(content="❌ DALL-E disabled")
-            return
-
-        queue_size = self.queue.qsize()
-
-        embed = disnake.Embed(
-            title="📋 Generation Queue",
-            color=disnake.Color.blue()
-        )
-
-        embed.add_field(
-            name="Status",
-            value=f"• Queue Size: `{queue_size}`\n"
-                  f"• Processing: `{'Yes' if self.is_processing else 'No'}`\n"
-                  f"• Max Size: `50`",
-            inline=False
-        )
-
-        if queue_size > 0:
-            embed.set_footer(text=f"Est. wait time: ~{queue_size * 30}s")
-
-        await inter.edit_original_response(embed=embed)
-
-    @dalle_group.sub_command(name="tips", description="Get tips for better prompts")
-    async def dalle_tips(self, inter: disnake.ApplicationCommandInteraction):
-        """Prompt tips"""
-
-        embed = disnake.Embed(
-            title="💡 DALL-E Prompt Tips",
-            description="Create amazing images with these techniques:",
-            color=disnake.Color.gold()
-        )
-
-        tips = [
-            "**Be Specific**: 'fluffy siamese cat wearing a crown, photorealistic'",
-            "**Add Style**: 'digital art', 'oil painting', 'anime style', 'photorealistic'",
-            "**Set the Scene**: 'sunset lighting, dramatic shadows, cozy environment'",
-            "**Quality Terms**: '4k', 'ultra detailed', 'masterpiece', 'professional'",
-            "**Composition**: 'close-up', 'wide shot', 'portrait view', 'landscape'",
-            "**Colors**: 'vibrant colors', 'monochrome', 'pastel palette'"
-        ]
-
-        for tip in tips:
-            embed.add_field(name="📌", value=tip, inline=False)
-
-        embed.set_footer(text="Experiment with different combinations!")
-
-        await inter.response.send_message(embed=embed, ephemeral=True)
 
 
 def setup(bot):

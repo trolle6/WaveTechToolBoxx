@@ -38,6 +38,7 @@ class Config:
         "RATE_LIMIT_WINDOW": (int, 60),
         "VOICE_TIMEOUT": (int, 10),
         "AUTO_DISCONNECT_TIMEOUT": (int, 300),
+        "TTS_ROLE_ID": (int, None),  # Role required for TTS (optional)
     }
 
     def __init__(self):
@@ -64,8 +65,10 @@ class Config:
             raise RuntimeError(f"Missing config: {missing}")
 
         for key, (cast_type, default) in self._optional.items():
-            val = os.getenv(key, default)
-            if cast_type == bool:
+            val = os.getenv(key)
+            if val is None:
+                self.data[key] = default
+            elif cast_type == bool:
                 self.data[key] = str(val).lower() == "true"
             elif cast_type == int:
                 self.data[key] = int(val)
@@ -142,7 +145,22 @@ class HttpManager:
 
 # ============ DISCORD LOGGING ============
 class DiscordLogHandler(logging.Handler):
-    """Custom logging handler that sends messages to Discord channels"""
+    """
+    Custom logging handler that sends messages to Discord channels.
+    
+    FEATURES:
+    - Asynchronous message sending (non-blocking)
+    - Rate limiting (prevents spam from duplicate messages)
+    - Queue-based processing (handles bursts of logs)
+    - Only sends WARNING and above to Discord
+    """
+    
+    # Emoji mapping for log levels
+    _EMOJI_MAP = {
+        "WARNING": "⚠️",
+        "ERROR": "❌",
+        "CRITICAL": "🚨"
+    }
     
     def __init__(self, bot=None, log_channel_id: int = None):
         super().__init__()
@@ -176,7 +194,7 @@ class DiscordLogHandler(logging.Handler):
                 return
                 
             # Format message for Discord
-            emoji = {"WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}.get(record.levelname, "ℹ️")
+            emoji = self._EMOJI_MAP.get(record.levelname, "ℹ️")
             message = f"{emoji} **{record.levelname}** | {record.name}\n```\n{record.getMessage()}\n```"
             
             # Truncate if too long
@@ -328,48 +346,53 @@ bot.ready_once = False
 
 
 # Discord feedback utilities
-async def send_to_discord_log(message: str, level: str = "INFO"):
-    """Send a message to the Discord log channel"""
+# Level emoji mapping (shared by all Discord message functions)
+_LEVEL_EMOJIS = {
+    "INFO": "ℹ️",
+    "WARNING": "⚠️",
+    "ERROR": "❌",
+    "CRITICAL": "🚨",
+    "SUCCESS": "✅"
+}
+
+async def _send_discord_message(channel_id: int, message: str, level: str = "INFO", include_level_text: bool = True):
+    """
+    Internal helper for sending Discord messages with consistent formatting.
+    Reduces code duplication between log and regular channel messages.
+    """
     if not bot.ready_once:
         return
         
     try:
-        log_channel = bot.get_channel(config.DISCORD_LOG_CHANNEL_ID)
-        if not log_channel:
-            return
-            
-        emoji = {"INFO": "ℹ️", "WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨", "SUCCESS": "✅"}.get(level, "ℹ️")
-        formatted_message = f"{emoji} **{level}** | {message}"
-        
-        # Truncate if too long
-        if len(formatted_message) > 2000:
-            formatted_message = formatted_message[:1997] + "..."
-            
-        await log_channel.send(formatted_message)
-    except Exception as e:
-        logger.debug(f"Failed to send Discord log message: {e}")
-
-
-async def send_to_discord_channel(message: str, level: str = "INFO"):
-    """Send a message to the default Discord channel"""
-    if not bot.ready_once:
-        return
-        
-    try:
-        channel = bot.get_channel(config.DISCORD_CHANNEL_ID)
+        channel = bot.get_channel(channel_id)
         if not channel:
             return
             
-        emoji = {"INFO": "ℹ️", "WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨", "SUCCESS": "✅"}.get(level, "ℹ️")
-        formatted_message = f"{emoji} {message}"
+        emoji = _LEVEL_EMOJIS.get(level, "ℹ️")
         
-        # Truncate if too long
+        # Format message based on whether we want level text
+        if include_level_text:
+            formatted_message = f"{emoji} **{level}** | {message}"
+        else:
+            formatted_message = f"{emoji} {message}"
+        
+        # Truncate if too long (Discord limit is 2000 chars)
         if len(formatted_message) > 2000:
             formatted_message = formatted_message[:1997] + "..."
             
         await channel.send(formatted_message)
     except Exception as e:
-        logger.debug(f"Failed to send Discord channel message: {e}")
+        logger.debug(f"Failed to send Discord message: {e}")
+
+
+async def send_to_discord_log(message: str, level: str = "INFO"):
+    """Send a message to the Discord log channel"""
+    await _send_discord_message(config.DISCORD_LOG_CHANNEL_ID, message, level, include_level_text=True)
+
+
+async def send_to_discord_channel(message: str, level: str = "INFO"):
+    """Send a message to the default Discord channel"""
+    await _send_discord_message(config.DISCORD_CHANNEL_ID, message, level, include_level_text=False)
 
 
 # Add utility methods to bot for cogs to use
@@ -414,11 +437,17 @@ async def on_error(event, *args, **kwargs):
 
 
 async def graceful_shutdown():
-    """Clean shutdown ensuring all resources are released"""
+    """
+    Clean shutdown ensuring all resources are released.
+    Called on SIGINT/SIGTERM or when bot crashes.
+    Prevents resource leaks and ensures data is saved.
+    """
     logger.info("Shutting down...")
 
-    # Unload all cogs properly
-    for cog_name in list(bot.cogs.keys()):
+    # Unload all cogs properly (they save state and cleanup resources)
+    # IMPORTANT: Create snapshot to avoid dict modification during iteration
+    cog_names = list(bot.cogs.keys())
+    for cog_name in cog_names:
         try:
             cog = bot.get_cog(cog_name)
             if cog and hasattr(cog, 'cog_unload'):
@@ -429,10 +458,12 @@ async def graceful_shutdown():
         except Exception as e:
             logger.debug(f"Cog unload error for {cog_name}: {e}")
 
-    # Wait a moment for any scheduled async cleanup tasks to start
+    # Wait for any scheduled async cleanup tasks to start
+    # (Some cogs schedule cleanup tasks in cog_unload)
     await asyncio.sleep(0.5)
 
-    # Clear the cogs dictionary to prevent disnake from trying to clean up again
+    # Clear the cogs dictionary to prevent disnake from double-cleanup
+    # This prevents "cog_unload was never awaited" warnings
     try:
         bot.cogs.clear()
     except Exception as e:

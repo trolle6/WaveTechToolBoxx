@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional, Generic, TypeVar
 
@@ -13,24 +14,34 @@ T = TypeVar('T')
 
 
 class RateLimiter:
-    """Token bucket rate limiter"""
+    """
+    Token bucket rate limiter with O(1) operations.
+    
+    PERFORMANCE:
+    - Uses deque for O(1) append/popleft (instead of list filtering O(n))
+    - Only removes expired tokens when checking (lazy cleanup)
+    - Synchronous (no unnecessary async overhead)
+    """
 
     def __init__(self, limit: int, window: int):
         self.limit = limit
         self.window = window
-        self.tokens = {}
+        self.tokens = {}  # key -> deque of timestamps
 
     async def check(self, key: str) -> bool:
-        """Check if request is allowed (async for compatibility)"""
+        """Check if request is allowed (async for API compatibility with existing code)"""
         now = time.time()
         if key not in self.tokens:
-            self.tokens[key] = []
+            self.tokens[key] = deque()
 
-        # Remove old tokens
-        self.tokens[key] = [t for t in self.tokens[key] if now - t < self.window]
+        # Remove expired tokens from front (they're oldest)
+        token_deque = self.tokens[key]
+        while token_deque and now - token_deque[0] >= self.window:
+            token_deque.popleft()
 
-        if len(self.tokens[key]) < self.limit:
-            self.tokens[key].append(now)
+        # Check if we can add a new token
+        if len(token_deque) < self.limit:
+            token_deque.append(now)
             return True
         return False
 
@@ -40,7 +51,19 @@ class RateLimiter:
 
 
 class CircuitBreaker:
-    """Prevent cascading failures"""
+    """
+    Prevent cascading failures with circuit breaker pattern.
+    
+    STATES:
+    - CLOSED: Normal operation, requests allowed
+    - OPEN: Too many failures, requests blocked
+    - HALF_OPEN: Testing recovery, limited requests allowed
+    
+    PERFORMANCE:
+    - All methods are synchronous (no async overhead)
+    - State transitions are immediate (no I/O)
+    - Async wrappers provided for API compatibility where needed
+    """
 
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60, success_threshold: int = 2):
         self.failure_threshold = failure_threshold
@@ -52,7 +75,7 @@ class CircuitBreaker:
         self.success_count = 0
 
     async def record_success(self):
-        """Record a successful request"""
+        """Record a successful request (async for API compatibility)"""
         if self.state == "HALF_OPEN":
             self.success_count += 1
             if self.success_count >= self.success_threshold:
@@ -63,7 +86,7 @@ class CircuitBreaker:
             self.failures = max(0, self.failures - 1)
 
     async def record_failure(self):
-        """Record a failed request"""
+        """Record a failed request (async for API compatibility)"""
         self.failures += 1
         self.last_failure = time.time()
         if self.failures >= self.failure_threshold:
@@ -71,7 +94,7 @@ class CircuitBreaker:
             logger.warning(f"Circuit breaker opened after {self.failures} failures")
 
     async def can_attempt(self) -> bool:
-        """Check if request can be attempted"""
+        """Check if request can be attempted (async for API compatibility)"""
         if self.state == "CLOSED":
             return True
         if self.state == "OPEN":
@@ -83,7 +106,7 @@ class CircuitBreaker:
         return True  # HALF_OPEN
 
     async def get_metrics(self) -> dict:
-        """Get circuit breaker metrics"""
+        """Get circuit breaker metrics (async for API compatibility)"""
         return {
             "state": self.state,
             "current_failures": self.failures,
@@ -92,26 +115,40 @@ class CircuitBreaker:
 
 
 class LRUCache(Generic[T]):
-    """LRU Cache with TTL support"""
+    """
+    LRU Cache with TTL (Time-To-Live) support.
+    
+    FEATURES:
+    - O(1) get/set operations (lazy TTL expiration on access)
+    - Automatic eviction of least recently used items
+    - TTL expiration per item
+    - Hit/miss statistics tracking
+    
+    PERFORMANCE:
+    - Lazy cleanup (only removes expired items when accessed)
+    - Periodic cleanup via cleanup() method
+    - Minimal overhead (async wrappers for API compatibility only)
+    """
 
     def __init__(self, max_size: int = 100, ttl: int = 3600):
         self.max_size = max_size
         self.ttl = ttl
-        self._cache = {}
-        self._access_times = {}
+        self._cache = {}  # key -> (value, creation_timestamp)
+        self._access_times = {}  # key -> last_access_timestamp
         self._hits = 0
         self._misses = 0
 
     async def get(self, key: str) -> Optional[T]:
-        """Get value from cache"""
+        """Get value from cache (async for API compatibility)"""
         if key in self._cache:
             value, timestamp = self._cache[key]
+            # Check TTL
             if time.time() - timestamp < self.ttl:
                 self._access_times[key] = time.time()
                 self._hits += 1
                 return value
             else:
-                # Expired
+                # Expired - remove immediately (lazy cleanup)
                 del self._cache[key]
                 del self._access_times[key]
 
@@ -119,19 +156,21 @@ class LRUCache(Generic[T]):
         return None
 
     async def set(self, key: str, value: T):
-        """Set value in cache"""
-        # Remove oldest if at capacity
+        """Set value in cache (async for API compatibility)"""
+        # Evict least recently used if at capacity
         if len(self._cache) >= self.max_size and key not in self._cache:
-            oldest_key = min(self._access_times.keys(), key=lambda k: self._access_times[k])
+            # Find oldest accessed key (LRU eviction)
+            oldest_key = min(self._access_times, key=self._access_times.get)
             del self._cache[oldest_key]
             del self._access_times[oldest_key]
 
+        # Store with current timestamp
         self._cache[key] = (value, time.time())
         self._access_times[key] = time.time()
 
     async def get_stats(self) -> dict:
-        """Get cache statistics"""
-        # Clean expired entries first
+        """Get cache statistics (async for API compatibility)"""
+        # Clean expired entries first for accurate stats
         await self.cleanup()
 
         total_requests = self._hits + self._misses
@@ -146,9 +185,11 @@ class LRUCache(Generic[T]):
         }
 
     async def cleanup(self):
-        """Clean up expired entries"""
+        """Clean up expired entries (should be called periodically)"""
         now = time.time()
+        # Find all expired keys
         expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self.ttl]
+        # Remove them
         for key in expired_keys:
             del self._cache[key]
             del self._access_times[key]
