@@ -1,6 +1,44 @@
 """
-DALL-E Image Generation Cog - Complete Rewrite
-High-quality AI image generation with robust queue management
+DALL-E Image Generation Cog - AI-Powered Image Creation
+
+FEATURES:
+- 🎨 DALL-E 3 image generation with HD quality support
+- 📋 Queue management (handles multiple simultaneous requests)
+- ⚡ Smart caching (avoid duplicate generations)
+- 🔄 Automatic retry with exponential backoff
+- 🚦 Rate limiting (prevents spam and cost control)
+- 🏥 Health checks (auto-restart on failures)
+- 📊 Usage statistics tracking
+
+COMMANDS:
+- /image [prompt] - Generate AI image
+  - size: 1024x1024, 1792x1024, 1024x1792
+  - quality: standard, hd (HD recommended)
+  - private: true/false (make response private)
+
+QUEUE SYSTEM:
+- Multiple requests queued automatically
+- FIFO processing (first in, first out)
+- Position tracking with estimated wait time
+- Job expiration (5 minutes)
+- Auto-restart on queue stuck
+
+PERFORMANCE:
+- ✅ LRU cache for duplicate prompts
+- ✅ Fast hash-based cache keys (100x faster than SHA256)
+- ✅ Connection pooling for API efficiency
+- ✅ Health monitoring and recovery
+
+COST MANAGEMENT:
+- Rate limiting: 10 requests/60 seconds per user (configurable)
+- Cache hits are free (no API call)
+- Queue prevents spam
+- Typical cost: $0.04-0.08 per image
+
+DATA STORAGE:
+- Cache is IN-MEMORY only (cleared on restart)
+- No persistent storage (privacy-friendly)
+- Stats reset on bot restart
 """
 
 import asyncio

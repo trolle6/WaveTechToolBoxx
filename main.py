@@ -1,3 +1,37 @@
+"""
+WaveTechToolBox - Discord Bot Main Entry Point
+
+FEATURES:
+- 🎤 Text-to-Speech (OpenAI TTS with voice rotation)
+- 🎨 AI Image Generation (DALL-E 3 with queue management)
+- 🎄 Secret Santa Event Management (with history tracking)
+
+ARCHITECTURE:
+- Config management with validation
+- HTTP session pooling for API efficiency
+- Discord logging handler (sends errors to Discord)
+- Graceful shutdown with proper cleanup
+- Automatic retry on connection failures
+
+DEPENDENCIES:
+- disnake: Discord API wrapper
+- aiohttp: Async HTTP client
+- python-dotenv: Environment variable management
+- PyNaCl: Voice support
+- psutil: System monitoring
+
+CONFIGURATION:
+- Edit config.env with your settings
+- Required: DISCORD_TOKEN, OPENAI_API_KEY, channel IDs
+- Optional: Performance tuning, rate limits, timeouts
+
+USAGE:
+- python main.py
+- Bot will validate API keys and load all cogs
+- Logs to bot.log and Discord log channel
+- Ctrl+C for graceful shutdown
+"""
+
 import asyncio
 import logging
 import logging.handlers

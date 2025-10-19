@@ -1,3 +1,38 @@
+"""
+Bot Utilities - Shared Components for All Cogs
+
+COMPONENTS:
+- RateLimiter: Token bucket rate limiter (O(1) operations with deque)
+- CircuitBreaker: Prevents cascading failures with circuit breaker pattern
+- LRUCache: Generic LRU cache with TTL support
+- JsonFile: Thread-safe JSON file operations
+- RequestCache: Simple deduplication cache
+
+OPTIMIZATIONS:
+- ✅ RateLimiter uses deque for O(1) operations (vs O(n) list filtering)
+- ✅ All classes use lazy cleanup (only clean on access)
+- ✅ Minimal async overhead (sync where possible, async wrappers for API compatibility)
+
+USAGE:
+    from . import utils
+    
+    # Rate limiting
+    limiter = utils.RateLimiter(limit=10, window=60)
+    if await limiter.check(user_id):
+        # Allowed
+    
+    # Circuit breaker
+    breaker = utils.CircuitBreaker(failure_threshold=5)
+    if await breaker.can_attempt():
+        # Try operation
+        await breaker.record_success()  # or record_failure()
+    
+    # LRU Cache
+    cache = utils.LRUCache[bytes](max_size=100, ttl=3600)
+    cached = await cache.get(key)
+    await cache.set(key, value)
+"""
+
 import asyncio
 import json
 import logging
