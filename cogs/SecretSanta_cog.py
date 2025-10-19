@@ -726,7 +726,7 @@ class SecretSantaCog(commands.Cog):
         - Useful for test events or accidental re-runs
         
         If archive already exists, saves to backup file instead.
-        Example: 2025.json exists → saves to 2025_backup_20251216_153045.json
+        Example:  2025.json exists → saves to 2025_backup_20251216_153045.json
         
         Returns:
             Filename of the saved archive (e.g., "2025.json" or "2025_backup_20251216_153045.json")
