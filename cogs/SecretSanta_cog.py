@@ -1132,6 +1132,21 @@ class SecretSantaCog(commands.Cog):
             return
 
         year = self.state["current_year"]
+        
+        # Send thank you message to all participants
+        participants = event.get("participants", {})
+        if participants:
+            dm_tasks = [
+                self._send_dm(
+                    int(uid),
+                    f"🎄✨ **SECRET SANTA {year} - EVENT ENDED** ✨🎄\n\n"
+                    f"Thank you for being part of Secret Santa this year! Your kindness made someone's holiday brighter.\n\n"
+                    f"Hope you had as much fun as your giftee! 🎁\n\n"
+                    f"See you next year! 🎅"
+                )
+                for uid in participants
+            ]
+            await asyncio.gather(*dm_tasks, return_exceptions=True)
 
         # Archive event (with automatic backup protection)
         saved_filename = self._archive_event(event, year)
@@ -2165,11 +2180,16 @@ class SecretSantaCog(commands.Cog):
             event["participants"][user_id] = name
             self._save()
 
-        # Send confirmation
+        # Send confirmation (same message as /ss start)
         await self._send_dm(
             payload.user_id,
             f"✅ You've joined Secret Santa {self.state['current_year']}! 🎄\n\n"
-            f"You'll receive your assignment when the event starts!"
+            f"**What happens next:**\n"
+            f"• Build your wishlist: `/ss wishlist add [item]`\n"
+            f"• When the organizer starts assignments, I'll message you here\n"
+            f"• You'll see your giftee's wishlist once you're their Santa\n\n"
+            f"🔒 *Your wishlist is hidden from everyone except your Secret Santa!*\n"
+            f"💡 *Start adding items now so your Santa knows what to get you!*"
         )
 
     @commands.Cog.listener()
