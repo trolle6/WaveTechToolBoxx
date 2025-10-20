@@ -921,11 +921,11 @@ class SecretSantaCog(commands.Cog):
             self._send_dm(
                 int(uid),
                 f"✅ You've joined Secret Santa {current_year}! 🎄\n\n"
-                f"**Next Steps:**\n"
+                f"**What happens next:**\n"
                 f"• Build your wishlist: `/ss wishlist add [item]`\n"
-                f"• Wait for assignments (when organizer runs `/ss shuffle`)\n"
-                f"• You'll get your assignment in DM\n"
-                f"• Then you can see your giftee's wishlist\n\n"
+                f"• When the organizer starts assignments, I'll message you here\n"
+                f"• You'll see your giftee's wishlist once you're their Santa\n\n"
+                f"🔒 *Your wishlist is hidden from everyone except your Secret Santa!*\n"
                 f"💡 *Start adding items now so your Santa knows what to get you!*"
             )
             for uid in participants
