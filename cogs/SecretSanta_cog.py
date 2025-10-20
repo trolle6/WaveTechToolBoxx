@@ -2220,7 +2220,9 @@ class SecretSantaCog(commands.Cog):
 
                 await self._send_dm(
                     payload.user_id,
-                    "❌ You've left Secret Santa. React again to rejoin!"
+                    f"👋 You've left Secret Santa {self.state['current_year']}\n\n"
+                    f"Your wishlist has been removed and you won't receive an assignment.\n\n"
+                    f"💡 *Changed your mind? React to the announcement message again to rejoin!*"
                 )
 
         except Exception as e:
