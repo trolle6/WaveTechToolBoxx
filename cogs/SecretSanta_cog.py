@@ -922,10 +922,11 @@ class SecretSantaCog(commands.Cog):
                 int(uid),
                 f"✅ You've joined Secret Santa {current_year}! 🎄\n\n"
                 f"**Next Steps:**\n"
-                f"• Watch Your Giftee's Wishlist: `/ss wishlist View`\n"
+                f"• Build your wishlist: `/ss wishlist add [item]`\n"
                 f"• Wait for assignments (when organizer runs `/ss shuffle`)\n"
-                f"• You'll get your Secret Santa assignment in DM!\n\n"
-                f"💡 *Add wishlist items to help your Santa find the perfect gift!*"
+                f"• You'll get your assignment in DM\n"
+                f"• Then you can see your giftee's wishlist\n\n"
+                f"💡 *Start adding items now so your Santa knows what to get you!*"
             )
             for uid in participants
         ]
@@ -1062,6 +1063,9 @@ class SecretSantaCog(commands.Cog):
 
         dm_tasks = []
         for giver, receiver in assignments.items():
+            # Get receiver's name for natural messaging
+            receiver_name = event["participants"].get(str(receiver), f"User {receiver}")
+            
             # Create clean, focused assignment message
             msg = f"🎄✨ **SECRET SANTA {self.state['current_year']}** ✨🎄\n\n"
             
@@ -1070,15 +1074,18 @@ class SecretSantaCog(commands.Cog):
             
             msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             
-            # Essential commands (clean & simple)
-            msg += f"**📋 HELPFUL COMMANDS:**\n"
-            msg += f"• `/ss view_giftee_wishlist` - See their wishlist\n"
-            msg += f"• `/ss ask_giftee` - Ask them anonymous questions\n"
+            # Highlight wishlist viewing first!
+            msg += f"**🎁 SEE WHAT THEY WANT:**\n"
+            msg += f"• `/ss view_giftee_wishlist` - Check {receiver_name}'s wishlist\n\n"
+            
+            # Other helpful commands
+            msg += f"**📋 OTHER COMMANDS:**\n"
+            msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions anonymously\n"
             msg += f"• `/ss reply_santa` - Reply if they message you\n"
             msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
             
             msg += f"**💡 BUILD YOUR WISHLIST TOO:**\n"
-            msg += f"• `/ss wishlist add [item]` - Help YOUR Santa!\n\n"
+            msg += f"• `/ss wishlist add [item]` - So your Santa knows what to get you!\n\n"
             
             # Footer
             msg += f"🔐 *Messages are AI-rewritten for anonymity*\n"
