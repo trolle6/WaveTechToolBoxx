@@ -908,7 +908,7 @@ class SecretSantaCog(commands.Cog):
             "guild_id": inter.guild.id,
             "gift_submissions": {},
             "communications": {},
-            "wishlists": {}  # NEW: User wishlists
+            "wishlists": {}  # User wishlists
         }
 
         async with self._lock:
