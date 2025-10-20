@@ -516,6 +516,41 @@ class SecretSantaCog(commands.Cog):
 
         self.logger.info("Secret Santa cog initialized")
     
+    def _create_embed(self, title: str, description: str, color: disnake.Color, **fields) -> disnake.Embed:
+        """
+        Helper to create embeds with consistent formatting.
+        Reduces duplication in command responses.
+        
+        Args:
+            title: Embed title
+            description: Embed description
+            color: Embed color
+            **fields: Optional named fields to add (name=value pairs)
+        
+        Returns:
+            Configured embed
+        """
+        embed = disnake.Embed(title=title, description=description, color=color)
+        for field_name, field_value in fields.items():
+            if isinstance(field_value, tuple):
+                # Support (value, inline) tuples
+                embed.add_field(name=field_name, value=field_value[0], inline=field_value[1])
+            else:
+                embed.add_field(name=field_name, value=field_value, inline=False)
+        return embed
+    
+    def _get_current_event(self) -> Optional[dict]:
+        """
+        Get active event with validation.
+        Extracted to reduce duplication across commands.
+        
+        Returns: Event dict if active, None otherwise
+        """
+        event = self.state.get("current_event")
+        if not event or not event.get("active"):
+            return None
+        return event
+    
     def _load_state_with_fallback(self) -> dict:
         """
         Load state with multi-layer fallback system.
@@ -667,15 +702,17 @@ class SecretSantaCog(commands.Cog):
         try:
             prompts = {
                 "question": (
-                    "Rewrite this Secret Santa message with slightly different wording while keeping the EXACT same meaning and tone. "
-                    "Only change the writing style minimally - use different words but maintain the same message, emotion, and intent. "
-                    "Don't make it more polite or change the personality. Just rephrase it subtly for anonymity.\n\n"
+                    "Rewrite this Secret Santa message with MINIMAL changes - just enough to obscure writing style. "
+                    "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
+                    "Preserve the exact same meaning, tone, personality, slang, and emotion. "
+                    "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
                     f"Original: {text}\n\nRewritten:"
                 ),
                 "reply": (
-                    "Rewrite this Secret Santa reply with slightly different wording while keeping the EXACT same meaning and tone. "
-                    "Only change the writing style minimally - use different words but maintain the same message, emotion, and intent. "
-                    "Don't make it more polite or change the personality. Just rephrase it subtly for anonymity.\n\n"
+                    "Rewrite this Secret Santa reply with MINIMAL changes - just enough to obscure writing style. "
+                    "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
+                    "Preserve the exact same meaning, tone, personality, slang, and emotion. "
+                    "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
                     f"Original: {text}\n\nRewritten:"
                 )
             }
@@ -690,8 +727,8 @@ class SecretSantaCog(commands.Cog):
             payload = {
                 "model": "gpt-3.5-turbo",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 100,  # Shorter to prevent over-elaboration
-                "temperature": 0.3  # Lower temperature for more subtle changes
+                "max_tokens": 150,  # Allow longer responses to preserve original length
+                "temperature": 0.2  # Very low temperature for minimal changes
             }
             
             # Use reasonable timeout for anonymization
@@ -885,7 +922,7 @@ class SecretSantaCog(commands.Cog):
                 int(uid),
                 f"✅ You've joined Secret Santa {current_year}! 🎄\n\n"
                 f"**Next Steps:**\n"
-                f"• Build your wishlist: `/ss wishlist add [item]`\n"
+                f"• Watch Your Giftee's Wishlist: `/ss wishlist View`\n"
                 f"• Wait for assignments (when organizer runs `/ss shuffle`)\n"
                 f"• You'll get your Secret Santa assignment in DM!\n\n"
                 f"💡 *Add wishlist items to help your Santa find the perfect gift!*"
@@ -918,8 +955,8 @@ class SecretSantaCog(commands.Cog):
         """Make assignments with progressive year-based fallback"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        event = self._get_current_event()
+        if not event:
             await inter.edit_original_response(content="❌ No active event")
             return
 
@@ -1082,8 +1119,8 @@ class SecretSantaCog(commands.Cog):
         """Stop event"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        event = self._get_current_event()
+        if not event:
             await inter.edit_original_response(content="❌ No active event")
             return
 
@@ -1132,8 +1169,8 @@ class SecretSantaCog(commands.Cog):
         """Show participants"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        event = self._get_current_event()
+        if not event:
             await inter.edit_original_response(content="❌ No active event")
             return
 
@@ -1169,12 +1206,12 @@ class SecretSantaCog(commands.Cog):
         """Ask giftee anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
-            embed = disnake.Embed(
+            embed = self._create_embed(
                 title="❌ No Assignment",
                 description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
                 color=disnake.Color.red()
@@ -1255,7 +1292,7 @@ class SecretSantaCog(commands.Cog):
         """Reply to Santa anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         # Find who is the user's Santa
@@ -1266,7 +1303,7 @@ class SecretSantaCog(commands.Cog):
                 break
 
         if not santa_id:
-            embed = disnake.Embed(
+            embed = self._create_embed(
                 title="❌ No Secret Santa Found",
                 description="No one has asked you a question yet, or you haven't been assigned a Secret Santa!",
                 color=disnake.Color.red()
@@ -1345,12 +1382,12 @@ class SecretSantaCog(commands.Cog):
         """Submit gift description"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
-            embed = disnake.Embed(
+            embed = self._create_embed(
                 title="❌ No Assignment",
                 description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
                 color=disnake.Color.red()
@@ -1418,7 +1455,7 @@ class SecretSantaCog(commands.Cog):
         """Add item to wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         # Get or create user's wishlist
@@ -1464,7 +1501,7 @@ class SecretSantaCog(commands.Cog):
         """Remove item from wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         wishlists = event.get("wishlists", {})
@@ -1507,7 +1544,7 @@ class SecretSantaCog(commands.Cog):
         """View your wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         wishlists = event.get("wishlists", {})
@@ -1538,7 +1575,7 @@ class SecretSantaCog(commands.Cog):
         """Clear wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         wishlists = event.get("wishlists", {})
@@ -1560,12 +1597,12 @@ class SecretSantaCog(commands.Cog):
         """View giftee's wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
+        event = self._get_current_event()
         user_id = str(inter.author.id)
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
-            embed = disnake.Embed(
+            embed = self._create_embed(
                 title="❌ No Assignment",
                 description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
                 color=disnake.Color.red()
@@ -1604,8 +1641,8 @@ class SecretSantaCog(commands.Cog):
         """Show gift submissions"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        event = self._get_current_event()
+        if not event:
             await inter.edit_original_response(content="❌ No active event")
             return
 
@@ -1655,8 +1692,8 @@ class SecretSantaCog(commands.Cog):
         """Show communication threads"""
         await inter.response.defer(ephemeral=True)
 
-        event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        event = self._get_current_event()
+        if not event:
             await inter.edit_original_response(content="❌ No active event")
             return
 
@@ -1752,7 +1789,7 @@ class SecretSantaCog(commands.Cog):
                 timestamp=dt.datetime.now()
             )
 
-                # Always show assignments, with gift info if available
+            # Always show assignments, with gift info if available
             if has_assignments:
                 # Create consistent emoji mapping for all participants this year
                 emoji_mapping = self._get_year_emoji_mapping(participants)

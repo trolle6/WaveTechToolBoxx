@@ -470,12 +470,22 @@ async def on_error(event, *args, **kwargs):
     logger.error(f"Error in {event}", exc_info=True)
 
 
+_shutdown_in_progress = False
+
 async def graceful_shutdown():
     """
     Clean shutdown ensuring all resources are released.
     Called on SIGINT/SIGTERM or when bot crashes.
     Prevents resource leaks and ensures data is saved.
     """
+    global _shutdown_in_progress
+    
+    # Prevent multiple simultaneous shutdown calls
+    if _shutdown_in_progress:
+        logger.debug("Shutdown already in progress, skipping")
+        return
+    
+    _shutdown_in_progress = True
     logger.info("Shutting down...")
 
     # Unload all cogs properly (they save state and cleanup resources)
@@ -485,23 +495,14 @@ async def graceful_shutdown():
         try:
             cog = bot.get_cog(cog_name)
             if cog and hasattr(cog, 'cog_unload'):
-                # cog_unload is now synchronous but schedules async cleanup
+                # cog_unload is synchronous but schedules async cleanup
                 cog.cog_unload()
-            # Remove the cog after we've unloaded it to prevent disnake from calling cog_unload again
-            bot.remove_cog(cog_name)
+                logger.debug(f"Cog unloaded: {cog_name}")
         except Exception as e:
             logger.debug(f"Cog unload error for {cog_name}: {e}")
 
-    # Wait for any scheduled async cleanup tasks to start
-    # (Some cogs schedule cleanup tasks in cog_unload)
-    await asyncio.sleep(0.5)
-
-    # Clear the cogs dictionary to prevent disnake from double-cleanup
-    # This prevents "cog_unload was never awaited" warnings
-    try:
-        bot.cogs.clear()
-    except Exception as e:
-        logger.debug(f"Error clearing cogs: {e}")
+    # Wait for any scheduled async cleanup tasks to complete
+    await asyncio.sleep(0.8)
 
     # Disconnect all voice clients
     for vc in list(bot.voice_clients):
@@ -539,25 +540,16 @@ def load_cogs() -> int:
 
 # Graceful shutdown on signals
 def handle_signal(signum, frame):
-    logger.info(f"Received signal {signum}")
-    # Create task in the event loop if it's running
+    """Handle shutdown signals (SIGINT, SIGTERM)"""
+    logger.info(f"Received signal {signum} - initiating graceful shutdown")
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Create a task that will also stop the bot
-            async def shutdown_and_stop():
-                await graceful_shutdown()
-                # Force stop the bot to prevent disnake from doing its own cleanup
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-            loop.create_task(shutdown_and_stop())
+            loop.create_task(graceful_shutdown())
         else:
-            # If loop isn't running, run cleanup directly
             asyncio.run(graceful_shutdown())
     except RuntimeError:
-        # No event loop, run cleanup directly
+        # No event loop available
         asyncio.run(graceful_shutdown())
 
 
@@ -585,44 +577,41 @@ if __name__ == "__main__":
 
     logger.info(f"Successfully loaded {num_loaded} cogs")
 
-    max_retries = 5
+    # Run bot with automatic retry on failures
+    MAX_RETRIES = 5
     retry_count = 0
     
     try:
-        while retry_count < max_retries:
+        while retry_count < MAX_RETRIES:
             try:
                 bot.run(config.DISCORD_TOKEN, reconnect=True)
-                break  # If we get here, bot shut down normally
+                break  # Bot shut down normally
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
                 break
             except Exception as e:
                 retry_count += 1
-                logger.critical(f"Bot failed (attempt {retry_count}/{max_retries}): {e}", exc_info=True)
+                logger.critical(f"Bot failed (attempt {retry_count}/{MAX_RETRIES}): {e}", exc_info=True)
                 
-                if retry_count < max_retries:
-                    wait_time = min(30, 5 * retry_count)  # Exponential backoff, max 30s
+                if retry_count < MAX_RETRIES:
+                    # Exponential backoff (max 30 seconds)
+                    wait_time = min(30, 5 * retry_count)
                     logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
                     logger.critical("Max retries exceeded. Bot will not restart.")
     finally:
-        # Ensure cleanup even if bot crashes
+        # Ensure cleanup runs regardless of how bot exits
         try:
-            # Try to run cleanup in existing event loop if possible
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Schedule cleanup task
-                    loop.create_task(graceful_shutdown())
-                else:
-                    asyncio.run(graceful_shutdown())
-            except RuntimeError:
-                # No event loop, create new one
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(graceful_shutdown())
+            else:
                 asyncio.run(graceful_shutdown())
+        except RuntimeError:
+            asyncio.run(graceful_shutdown())
         except Exception as cleanup_error:
             logger.error(f"Cleanup failed: {cleanup_error}")
         finally:
-            # Force exit to prevent hanging
             import os
-            os._exit(0)
+            os._exit(0)  # Force exit to prevent hanging

@@ -89,17 +89,18 @@ class DALLECog(commands.Cog):
         max_queue = getattr(bot.config, 'MAX_QUEUE_SIZE', 50)
         
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
-        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3000)  # URLs expire in ~1 hour
+        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3600)  # URLs expire in 1 hour
 
         # Queue
         self.queue = asyncio.Queue(maxsize=max_queue)
         self.processor_task: Optional[asyncio.Task] = None
         self.is_processing = False
 
-        # Config
+        # API config
         self.api_url = "https://api.openai.com/v1/images/generations"
+        self.max_retries = 3  # Configurable retry count
 
-        # Stats
+        # Statistics tracking
         self.stats = {
             "total_requests": 0,
             "successful": 0,
@@ -212,8 +213,8 @@ class DALLECog(commands.Cog):
 
         self.stats["total_requests"] += 1
 
-        # Try up to 3 times
-        for attempt in range(3):
+        # Retry with exponential backoff
+        for attempt in range(self.max_retries):
             try:
                 session = await self.bot.http_mgr.get_session(timeout=45)
 
@@ -231,7 +232,7 @@ class DALLECog(commands.Cog):
                     elif resp.status == 429:
                         retry_after = resp.headers.get('Retry-After', '60')
 
-                        if attempt < 2:
+                        if attempt < self.max_retries - 1:
                             wait = min(int(retry_after), 30)
                             self.logger.warning(f"Rate limited, waiting {wait}s")
                             await asyncio.sleep(wait)
@@ -252,7 +253,7 @@ class DALLECog(commands.Cog):
                         return {"success": False, "error": "🔒 API authentication failed"}
 
                     else:
-                        if attempt < 2:
+                        if attempt < self.max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                             continue
 
@@ -260,14 +261,14 @@ class DALLECog(commands.Cog):
                         return {"success": False, "error": f"API error {resp.status}"}
 
             except asyncio.TimeoutError:
-                if attempt < 2:
+                if attempt < self.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 return {"success": False, "error": "⏰ Request timeout"}
 
             except Exception as e:
                 self.logger.error(f"Generation error: {e}", exc_info=True)
-                if attempt < 2:
+                if attempt < self.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 return {"success": False, "error": f"Unexpected error: {str(e)[:50]}"}
@@ -280,8 +281,12 @@ class DALLECog(commands.Cog):
         try:
             while not self._shutdown.is_set():
                 try:
-                    # Get next job
+                    # Get next job (check shutdown between waits)
                     job = await asyncio.wait_for(self.queue.get(), timeout=60)
+                    
+                    # Double-check shutdown flag after waiting
+                    if self._shutdown.is_set():
+                        break
 
                     # Check if expired
                     if job.is_expired():
@@ -349,20 +354,31 @@ class DALLECog(commands.Cog):
             while not self._shutdown.is_set():
                 await asyncio.sleep(600)  # Every 10 minutes
                 
+                # Skip health check if shutting down
+                if self._shutdown.is_set():
+                    break
+                
                 # Check if processor task died unexpectedly
                 if self.processor_task and self.processor_task.done():
-                    exc = self.processor_task.exception()
+                    exc = None
+                    try:
+                        exc = self.processor_task.exception()
+                    except (asyncio.CancelledError, asyncio.InvalidStateError):
+                        pass
+                    
                     if exc:
                         self.logger.error(f"Processor task died: {exc}")
-                        # Restart it if queue is not empty
-                        if not self.queue.empty():
-                            self.logger.info("Restarting DALL-E processor task")
-                            self.processor_task = asyncio.create_task(self._process_queue())
+                    
+                    # Restart ONLY if queue has items and no task is running
+                    if not self.queue.empty() and not self.is_processing:
+                        self.logger.info("Restarting DALL-E processor task")
+                        self.processor_task = asyncio.create_task(self._process_queue())
                 
-                # Check for stuck queue
-                if self.queue.qsize() > 0 and not self.is_processing:
-                    self.logger.warning("Queue stuck, attempting restart")
+                # Check for stuck queue (queue has items but processor not running)
+                elif self.queue.qsize() > 0 and not self.is_processing:
+                    # Only restart if task is truly dead or doesn't exist
                     if not self.processor_task or self.processor_task.done():
+                        self.logger.warning("Queue stuck, restarting processor")
                         self.processor_task = asyncio.create_task(self._process_queue())
                 
         except asyncio.CancelledError:

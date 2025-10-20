@@ -456,6 +456,10 @@ class VoiceProcessingCog(commands.Cog):
             while not self._shutdown.is_set():
                 await asyncio.sleep(600)  # Every 10 minutes
                 
+                # Skip if shutting down
+                if self._shutdown.is_set():
+                    break
+                
                 async with self._state_lock:
                     # Create snapshot to avoid modification during iteration
                     guild_states_snapshot = list(self.guild_states.items())
@@ -463,20 +467,27 @@ class VoiceProcessingCog(commands.Cog):
                 for guild_id, state in guild_states_snapshot:
                     # Check if processor task died unexpectedly
                     if state.processor_task and state.processor_task.done():
-                        exc = state.processor_task.exception()
+                        exc = None
+                        try:
+                            exc = state.processor_task.exception()
+                        except (asyncio.CancelledError, asyncio.InvalidStateError):
+                            pass
+                        
                         if exc:
                             self.logger.error(f"Processor task died for guild {guild_id}: {exc}")
-                            # Restart it if queue is not empty
-                            if not state.queue.empty():
-                                self.logger.info(f"Restarting processor for guild {guild_id}")
-                                state.processor_task = asyncio.create_task(
-                                    self._process_queue(guild_id)
-                                )
+                        
+                        # Restart ONLY if queue has items and not currently processing
+                        if not state.queue.empty() and not state.is_processing:
+                            self.logger.info(f"Restarting processor for guild {guild_id}")
+                            state.processor_task = asyncio.create_task(
+                                self._process_queue(guild_id)
+                            )
                     
-                    # Check for very old queued items (stuck queue)
-                    if state.queue.qsize() > 0 and not state.is_processing:
-                        self.logger.warning(f"Queue stuck for guild {guild_id}, attempting restart")
+                    # Check for stuck queue (has items but not processing)
+                    elif state.queue.qsize() > 0 and not state.is_processing:
+                        # Only restart if task is truly dead or doesn't exist
                         if not state.processor_task or state.processor_task.done():
+                            self.logger.warning(f"Queue stuck for guild {guild_id}, restarting processor")
                             state.processor_task = asyncio.create_task(
                                 self._process_queue(guild_id)
                             )
@@ -568,20 +579,19 @@ class VoiceProcessingCog(commands.Cog):
 
     async def _cleanup_temp_file(self, temp_file: str):
         """Clean up temporary file with retry logic for Windows"""
-        max_attempts = 5
-        for attempt in range(max_attempts):
+        for attempt in range(3):  # 3 attempts is sufficient
             try:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
                 return  # Success
             except PermissionError:
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(0.5)  # Wait before retry
-                    continue
+                if attempt < 2:
+                    await asyncio.sleep(0.3)  # Shorter wait
                 else:
-                    self.logger.warning(f"Could not delete temp file after {max_attempts} attempts: {temp_file}")
+                    # Final attempt failed - just log and continue
+                    self.logger.debug(f"Could not delete temp file: {temp_file}")
             except Exception as e:
-                self.logger.error(f"Temp file cleanup error: {e}")
+                self.logger.debug(f"Temp file cleanup error: {e}")
                 break
 
     async def _get_or_create_state(self, guild_id: int) -> GuildVoiceState:
@@ -644,12 +654,11 @@ class VoiceProcessingCog(commands.Cog):
                 except Exception:
                     pass
 
-        # Try to connect with retry logic (NO race condition check on first attempt after switch!)
+        # Try to connect with retry logic
         try:
             vc = None
             for attempt in range(3):
                 try:
-                    # Attempt connection (removed confusing race condition check here)
                     self.logger.debug(f"Attempting connection to {channel.name} (attempt {attempt + 1}/3)")
                     
                     # Attempt connection
@@ -664,20 +673,28 @@ class VoiceProcessingCog(commands.Cog):
                     error_msg = str(e).lower()
                     if "already connected" in error_msg:
                         self.logger.debug("Already connected - retrieving existing connection")
-                        # Return existing connection if valid
+                        # Return existing connection if valid and in correct channel
                         if guild.voice_client and guild.voice_client.is_connected():
-                            vc = guild.voice_client
-                            break
-                        # If not valid, try again
+                            if guild.voice_client.channel and guild.voice_client.channel.id == channel.id:
+                                vc = guild.voice_client
+                                break
+                            else:
+                                # Connected to wrong channel, need to disconnect first
+                                try:
+                                    await guild.voice_client.disconnect(force=True)
+                                    await asyncio.sleep(0.5)
+                                except Exception:
+                                    pass
+                        # Try again on next iteration
                         if attempt < 2:
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.8)
                             continue
                     raise
                     
                 except Exception as e:
                     if attempt < 2:
                         self.logger.warning(f"Connection attempt {attempt + 1} failed: {e}, retrying...")
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.8)
                         continue
                     else:
                         raise  # Last attempt failed, re-raise exception
@@ -1110,6 +1127,11 @@ class VoiceProcessingCog(commands.Cog):
                 try:
                     # Get next item in FIFO order (5 min timeout)
                     item = await asyncio.wait_for(state.queue.get(), timeout=300)
+                    
+                    # Double-check shutdown flag after waiting
+                    if self._shutdown.is_set():
+                        break
+                    
                     state.mark_active()
 
                     # Check if expired
@@ -1192,39 +1214,51 @@ class VoiceProcessingCog(commands.Cog):
             # Remove state
             await self._remove_state(guild_id)
 
-    @commands.Cog.listener()
-    async def on_message(self, message: disnake.Message):
-        """Handle incoming messages for TTS"""
-
+    def _should_process_message(self, message: disnake.Message) -> bool:
+        """
+        Quick validation of whether message should be processed for TTS.
+        Extracted for clarity and to reduce nesting in on_message.
+        
+        Returns: True if message should be processed, False otherwise
+        """
         # Skip if disabled or bot message
         if not self.enabled or message.author.bot:
-            return
+            return False
 
         # Skip if not in guild
         if not message.guild:
-            return
+            return False
 
         # Check for duplicate message processing
         message_key = f"{message.id}:{message.author.id}:{message.content[:50]}"
         if message_key in self._processed_messages:
-            return
+            return False
         self._processed_messages.add(message_key)
 
         # Check channel whitelist
         if self.allowed_channel and message.channel.id != self.allowed_channel:
-            return
+            return False
 
         # Check if user is in voice
         if not message.author.voice or not message.author.voice.channel:
-            return
+            return False
 
         # Check if TTS role is required
         if self.tts_role_id:
-            # Check if user has the required role
             has_role = any(role.id == self.tts_role_id for role in message.author.roles)
             if not has_role:
                 self.logger.debug(f"User {message.author.id} doesn't have TTS role, skipping")
-                return
+                return False
+
+        return True
+
+    @commands.Cog.listener()
+    async def on_message(self, message: disnake.Message):
+        """Handle incoming messages for TTS"""
+        
+        # Quick validation checks
+        if not self._should_process_message(message):
+            return
 
         # Check rate limit
         if not await self.rate_limiter.check(str(message.author.id)):
@@ -1354,32 +1388,40 @@ class VoiceProcessingCog(commands.Cog):
         """
         if not self.enabled:
             return
+        
+        try:
+            # Bot was disconnected - cleanup
+            if member.id == self.bot.user.id and before.channel and not after.channel:
+                await self._remove_state(member.guild.id)
+                return
 
-        # Bot was disconnected - cleanup
-        if member.id == self.bot.user.id and before.channel and not after.channel:
-            await self._remove_state(member.guild.id)
-            return
-
-        # User left VC - clear announcement status so they get re-announced
-        if before.channel and not after.channel:
-            if member.guild.id in self._announced_users:
-                self._announced_users[member.guild.id].discard(member.id)
-                self.logger.debug(f"Cleared announcement for {member.display_name} (left VC)")
-            
-            # Check if we should disconnect from empty channel
-            await asyncio.sleep(5)  # Let voice state settle
-            
-            if await self._should_disconnect_from_empty_channel(member.guild):
-                try:
-                    await member.guild.voice_client.disconnect()
-                    await self._remove_state(member.guild.id)
-                except Exception as e:
-                    self.logger.error(f"Disconnect error: {e}")
+            # User left VC - clear announcement status so they get re-announced
+            if before.channel and not after.channel:
+                if member.guild.id in self._announced_users:
+                    self._announced_users[member.guild.id].discard(member.id)
+                    self.logger.debug(f"Cleared announcement for {member.display_name} (left VC)")
+                
+                # Check if we should disconnect from empty channel
+                await asyncio.sleep(5)  # Let voice state settle
+                
+                if await self._should_disconnect_from_empty_channel(member.guild):
+                    try:
+                        await member.guild.voice_client.disconnect()
+                        await self._remove_state(member.guild.id)
+                    except Exception as e:
+                        self.logger.error(f"Disconnect error: {e}")
+        except Exception as e:
+            self.logger.error(f"Error in voice state update handler: {e}", exc_info=True)
 
     @commands.slash_command(name="tts")
     async def tts_cmd(self, inter: disnake.ApplicationCommandInteraction):
         """TTS commands"""
         pass
+
+    def _create_progress_bar(self, percentage: float, length: int = 10) -> str:
+        """Create a visual progress bar for stats display"""
+        filled = int(percentage / 10)
+        return "▓" * filled + "░" * (length - filled)
 
     @tts_cmd.sub_command(name="stats", description="📊 View beautiful TTS statistics and performance metrics")
     async def tts_stats(self, inter: disnake.ApplicationCommandInteraction):
@@ -1402,7 +1444,6 @@ class VoiceProcessingCog(commands.Cog):
         # Calculate success rate and other metrics
         total_attempts = self.total_requests + self.total_failed
         success_rate = (self.total_requests / max(1, total_attempts)) * 100
-        cache_efficiency = (self.total_cached / max(1, self.total_requests + self.total_cached)) * 100
 
         embed = disnake.Embed(
             title="🎤✨ TTS Performance Dashboard",
@@ -1439,20 +1480,20 @@ class VoiceProcessingCog(commands.Cog):
         )
 
         # Active Guilds
-        active_guilds = len([state for state in self.guild_states.values() 
-                           if time.time() - state.last_activity < 600])
+        active_guilds = len([s for s in self.guild_states.values() if time.time() - s.last_activity < 600])
+        processing_guilds = sum(1 for s in self.guild_states.values() if s.is_processing)
         
         embed.add_field(
             name="🌐 Activity Status",
             value=f"🏠 **Active Guilds:** `{active_guilds}`\n"
                   f"📊 **Total Guilds:** `{len(self.guild_states)}`\n"
-                  f"🔄 **Processing:** `{sum(1 for s in self.guild_states.values() if s.is_processing)}`",
+                  f"🔄 **Processing:** `{processing_guilds}`",
             inline=True
         )
 
-        # Add progress bars for visual appeal
-        cache_bar = "▓" * int(cache_stats['hit_rate'] / 10) + "░" * (10 - int(cache_stats['hit_rate'] / 10))
-        success_bar = "▓" * int(success_rate / 10) + "░" * (10 - int(success_rate / 10))
+        # Visual progress bars
+        cache_bar = self._create_progress_bar(cache_stats['hit_rate'])
+        success_bar = self._create_progress_bar(success_rate)
         
         embed.add_field(
             name="📊 Visual Metrics",
