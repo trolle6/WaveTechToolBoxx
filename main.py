@@ -457,12 +457,12 @@ async def on_ready():
 
 @bot.event
 async def on_disconnect():
-    logger.warning("Bot disconnected from Discord")
+    logger.debug("Bot disconnected from Discord")  # Changed to debug (too noisy for Discord channel)
 
 
 @bot.event
 async def on_resumed():
-    logger.info("Bot reconnected to Discord")
+    logger.debug("Bot reconnected to Discord")  # Changed to debug (reconnects are normal)
 
 
 @bot.event
@@ -526,7 +526,12 @@ async def graceful_shutdown():
 
 def load_cogs() -> int:
     """Load cogs and return count of successfully loaded cogs"""
-    cogs = ["cogs.voice_processing_cog", "cogs.DALLE_cog", "cogs.SecretSanta_cog"]
+    cogs = [
+        "cogs.voice_processing_cog",
+        "cogs.DALLE_cog",
+        "cogs.SecretSanta_cog",
+        "cogs.CustomEvents_cog"  # New modular event system!
+    ]
     loaded = 0
     for cog in cogs:
         try:

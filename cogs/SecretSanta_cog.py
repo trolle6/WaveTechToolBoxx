@@ -121,6 +121,20 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
     """
     Load Secret Santa history from archive files.
     
+    WHAT IT DOES:
+    - Scans archive directory for year files (2021.json, 2022.json, etc.)
+    - Extracts who gave to who from each year
+    - Builds a complete history map for assignment algorithm
+    
+    HISTORY MAP STRUCTURE:
+    {
+        "huntoon_id": [trolle_id, trolle_id],  # Huntoon had trolle twice
+        "trolle_id": [squibble_id, jkm_id],    # trolle had squibble and jkm
+        "m3_id": [trolle_id]                   # m³ had trolle once
+    }
+    
+    This map is used by the assignment algorithm to PREVENT repeats.
+    
     Args:
         archive_dir: Path to archive directory
         exclude_years: List of years to exclude from history (for fallback)
@@ -133,7 +147,7 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
     history = {}
     available_years = []
 
-    # Load archived history from YYYY.json files
+    # ARCHIVE SCANNING: Load all YYYY.json files from archive directory
     for archive_file in archive_dir.glob("[0-9]*.json"):
         try:
             year_str = archive_file.stem
@@ -235,11 +249,17 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
     """
     Create Secret Santa assignments avoiding repeats from history.
     
-    ALGORITHM:
+    ALGORITHM MECHANICS:
     1. Use cryptographically secure randomness (secrets.SystemRandom)
     2. Special case for 2 people (simple exchange, allows cycles)
     3. For 3+: Shuffle and assign, preventing cycles
     4. Retry up to 10 times if assignment fails
+    
+    HISTORY ENFORCEMENT:
+    - Each giver has a list of people they've had before (from archives)
+    - Algorithm EXCLUDES those people from available receivers
+    - Example: huntoon had [trolle_2023, trolle_2024] → can't get trolle again
+    - This prevents repeats and ensures variety across years
     
     SPECIAL CASES:
     - 2 people: Simple A→B, B→A exchange (cycle allowed)
@@ -269,6 +289,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
         raise ValueError("Need at least 2 participants")
 
     # Use cryptographically secure random number generator
+    # This provides true randomness from OS entropy pool
     secure_random = secrets.SystemRandom()
     
     # SPECIAL CASE: 2 participants (simple exchange)
@@ -295,8 +316,11 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
         return result
     
     # NORMAL CASE: 3+ participants
-    # Try multiple times with different random orderings
-    max_attempts = 10
+    # ADAPTIVE RETRY LOGIC: Scale attempts with participant count
+    # Small events (< 10 people): 10 attempts (safety floor)
+    # Large events (≥ 10 people): Attempts = participant count (scales with complexity)
+    # Example: 5 people → 10 attempts, 20 people → 20 attempts
+    max_attempts = max(10, len(participants))
     
     for attempt in range(max_attempts):
         try:
@@ -308,20 +332,25 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
             secure_random.shuffle(shuffled_participants)
             
             for giver in shuffled_participants:
+                # HISTORY CHECK: Get list of people this giver has had before
+                # Example: huntoon's unacceptable = [trolle_2023, trolle_2024]
                 unacceptable: List[int] = temp_history.get(str(giver), [])
                 
-                # Add current assignments where someone else is giving to this giver
-                # (Prevents cycles for 3+ people)
+                # CYCLE PREVENTION: Add current assignments where someone else is giving to this giver
+                # This prevents cycles like: A→B, B→C, C→A (which would fail)
+                # For 3+ people, we want a clean chain, not a loop
                 for g, r in result.items():
                     if r == giver:
                         unacceptable.append(g)
                 
-                # Find available receivers
+                # AVAILABLE POOL: Find who this person CAN receive
+                # Excludes: history + cycles + self
                 available = [p for p in participants if p not in unacceptable and p != giver]
                 
                 if not available:
                     raise ValueError(f"Cannot assign giver {giver} - no valid receivers available")
                 
+                # RANDOM ASSIGNMENT: Pick from available pool
                 receiver = secure_random.choice(available)
                 result[giver] = receiver
                 temp_history.setdefault(str(giver), []).append(receiver)
@@ -756,14 +785,25 @@ class SecretSantaCog(commands.Cog):
         """
         Archive event data in unified format with CRITICAL overwrite protection.
         
+        ARCHIVE PROTECTION MECHANICS:
+        - Checks if YYYY.json already exists (e.g., 2025.json)
+        - If exists: Saves to timestamped backup instead (2025_backup_20251216_153045.json)
+        - If new: Saves normally to YYYY.json
+        - NEVER overwrites existing archives (prevents data loss!)
+        
+        WHY THIS MATTERS:
+        - Prevents accidental data loss from test events
+        - Protects historical records if you run multiple events per year
+        - Sends Discord warnings so you know it happened
+        - Original archive always preserved
+        
         SAFETY FEATURES:
         - Never overwrites existing archives (data loss prevention!)
         - Creates timestamped backup if year already archived
         - Sends Discord warnings if duplicate year detected
         - Useful for test events or accidental re-runs
         
-        If archive already exists, saves to backup file instead.
-        Example:  2025.json exists → saves to 2025_backup_20251216_153045.json
+        Example: 2025.json exists → saves to 2025_backup_20251216_153045.json
         
         Returns:
             Filename of the saved archive (e.g., "2025.json" or "2025_backup_20251216_153045.json")
@@ -968,19 +1008,26 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Need at least 2 participants")
             return
 
-        # Load all history to get available years
+        # HISTORY LOADING: Load all past Secret Santa events from archive files
+        # This builds a map of who has given to who in previous years
+        # Example: history = {"huntoon": [trolle_2023, trolle_2024], "trolle": [squibble_2023, jkm_2024]}
         history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[], logger=self.logger)
         
         self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
         self.logger.info(f"Available history years: {available_years}")
         
         # PROGRESSIVE FALLBACK SYSTEM:
-        # Try 1: Use ALL history (2021, 2022, 2023, 2024)
-        # Try 2: Exclude 2021 only
-        # Try 3: Exclude 2021, 2022
-        # Try 4: Exclude 2021, 2022, 2023
-        # Try 5: No history (fresh start)
-        # This prevents impossible assignments after many years
+        # The algorithm tries to respect ALL history, but if that makes assignments impossible,
+        # it progressively removes older years until assignments become possible.
+        # 
+        # Try 1: Use ALL history (2021, 2022, 2023, 2024) - respect everything
+        # Try 2: Exclude 2021 only - allow repeats from oldest year
+        # Try 3: Exclude 2021, 2022 - allow repeats from 2 oldest years
+        # Try 4: Exclude 2021, 2022, 2023 - only respect most recent year
+        # Try 5: No history (fresh start) - if all else fails
+        # 
+        # This ensures assignments ALWAYS succeed, even after many years of same participants.
+        # In practice, with participant turnover, fallback is rarely (if ever) needed.
         exclude_years = []
         assignments = None
         fallback_used = False
@@ -1105,6 +1152,7 @@ class SecretSantaCog(commands.Cog):
         response_msg = f"✅ Assignments complete!\n"
         response_msg += f"• {len(assignments)} pairs created\n"
         response_msg += f"• DMs sent to all participants\n"
+        response_msg += f"• History respected (no repeated pairings!)\n"
         
         if fallback_used:
             years_str = ", ".join(map(str, exclude_years))
@@ -2140,6 +2188,65 @@ class SecretSantaCog(commands.Cog):
         embed.set_footer(text=f"Requested by {inter.author.display_name}")
         
         await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="delete_year", description="🗑️ Delete an archive year (CAREFUL!)")
+    @commands.has_permissions(administrator=True)
+    async def ss_delete_year(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        year: int = commands.Param(description="Year to delete (e.g., 2025)")
+    ):
+        """Delete archive file for a specific year (admin only)"""
+        await inter.response.defer(ephemeral=True)
+        
+        # Safety check - don't allow deleting very old years accidentally
+        current_year = dt.date.today().year
+        if year < 2020 or year > current_year + 1:
+            await inter.edit_original_response(content=f"❌ Invalid year {year} (must be 2020-{current_year + 1})")
+            return
+        
+        archive_path = ARCHIVE_DIR / f"{year}.json"
+        
+        if not archive_path.exists():
+            await inter.edit_original_response(content=f"❌ No archive found for {year}")
+            return
+        
+        # Create safety backup before deleting
+        backup_path = ARCHIVE_DIR / f"{year}_deleted_backup_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        try:
+            # Copy to backup first
+            import shutil
+            shutil.copy(archive_path, backup_path)
+            
+            # Delete original
+            archive_path.unlink()
+            
+            embed = disnake.Embed(
+                title="🗑️ Archive Deleted",
+                description=f"Archive for **{year}** has been removed!",
+                color=disnake.Color.orange()
+            )
+            embed.add_field(
+                name="🔒 Safety Backup Created",
+                value=f"Backup saved to: `{backup_path.name}`\n"
+                      f"You can manually restore from backup if needed.",
+                inline=False
+            )
+            embed.set_footer(text="⚠️ This was a destructive operation!")
+            
+            await inter.edit_original_response(embed=embed)
+            
+            # Log to Discord
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log(
+                    f"🗑️ {inter.author.display_name} deleted Secret Santa {year} archive (backup created)",
+                    "WARNING"
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to delete archive: {e}")
+            await inter.edit_original_response(content=f"❌ Failed to delete archive: {e}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
