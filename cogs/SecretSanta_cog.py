@@ -504,10 +504,14 @@ def mod_check():
             return True
 
         # Check config for mod role
-        if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
-            mod_role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
-            if mod_role_id and any(r.id == mod_role_id for r in inter.author.roles):
-                return True
+        try:
+            if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
+                mod_role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
+                if mod_role_id and any(r.id == mod_role_id for r in inter.author.roles):
+                    return True
+        except (AttributeError, TypeError):
+            # Config doesn't exist or is malformed, fall back to admin-only
+            pass
 
         return False
 
@@ -517,15 +521,19 @@ def mod_check():
 def participant_check():
     """Check if user is a participant"""
     async def predicate(inter: disnake.ApplicationCommandInteraction):
-        cog = inter.bot.get_cog("SecretSantaCog")
-        if not cog:
-            return False
+        try:
+            cog = inter.bot.get_cog("SecretSantaCog")
+            if not cog:
+                return False
 
-        event = cog.state.get("current_event")
-        if not event or not event.get("active"):
-            return False
+            event = cog.state.get("current_event")
+            if not event or not event.get("active"):
+                return False
 
-        return str(inter.author.id) in event.get("participants", {})
+            return str(inter.author.id) in event.get("participants", {})
+        except Exception:
+            # If anything goes wrong, deny access
+            return False
 
     return commands.check(predicate)
 

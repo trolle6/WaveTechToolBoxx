@@ -913,21 +913,37 @@ class CustomEventsCog(commands.Cog):
         """Create new event"""
         await inter.response.defer(ephemeral=True)
         
-        # Create event
-        async with self._lock:
-            event_id = self._next_event_id
-            self._next_event_id += 1
+        try:
+            # Validate name length
+            if len(name) > 100:
+                await inter.edit_original_response(content="❌ Event name too long (max 100 characters)")
+                return
             
-            event = Event(
-                event_id=event_id,
-                name=name,
-                matcher_type=matcher,
-                config={"team_size": team_size},
-                guild_id=inter.guild.id
-            )
+            # Check for duplicate names in this guild
+            existing_names = [e.name for e in self.events.values() if e.guild_id == inter.guild.id]
+            if name in existing_names:
+                await inter.edit_original_response(content="❌ An event with this name already exists in this server")
+                return
             
-            self.events[event_id] = event
-            self._save_event(event)
+            # Create event
+            async with self._lock:
+                event_id = self._next_event_id
+                self._next_event_id += 1
+                
+                event = Event(
+                    event_id=event_id,
+                    name=name,
+                    matcher_type=matcher,
+                    config={"team_size": team_size},
+                    guild_id=inter.guild.id
+                )
+                
+                self.events[event_id] = event
+                self._save_event(event)
+        except Exception as e:
+            self.logger.error(f"Event creation failed: {e}")
+            await inter.edit_original_response(content="❌ Failed to create event. Please try again.")
+            return
         
         embed = disnake.Embed(
             title="✅ Event Created!",
