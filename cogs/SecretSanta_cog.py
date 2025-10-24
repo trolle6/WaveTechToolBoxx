@@ -697,17 +697,22 @@ class SecretSantaReplyView(disnake.ui.View):
 class SecretSantaReplyModal(disnake.ui.Modal):
     """Modal for Secret Santa replies"""
     def __init__(self, santa_id: int, giftee_id: int):
-        super().__init__(title="💬 Reply to Your Secret Santa")
-        self.santa_id = santa_id
-        self.giftee_id = giftee_id
-        
-        self.add_item(disnake.ui.TextInput(
+        # Create the text input component
+        text_input = disnake.ui.TextInput(
             label="Your Reply",
             placeholder="Type your reply here...",
             style=disnake.TextInputStyle.paragraph,
             max_length=500,
             required=True
-        ))
+        )
+        
+        # Initialize modal with components
+        super().__init__(
+            title="💬 Reply to Your Secret Santa",
+            components=[text_input]
+        )
+        self.santa_id = santa_id
+        self.giftee_id = giftee_id
     
     async def callback(self, inter: disnake.ModalInteraction):
         """Handle modal submission"""
