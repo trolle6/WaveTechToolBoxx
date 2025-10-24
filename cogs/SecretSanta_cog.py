@@ -74,9 +74,11 @@ from disnake.ext import commands
 ROOT = Path(__file__).parent  # This is the 'cogs' directory
 STATE_FILE = ROOT / "secret_santa_state.json"
 ARCHIVE_DIR = ROOT / "archive"
+BACKUPS_DIR = ARCHIVE_DIR / "backups"
 
-# Ensure archive directory exists
+# Ensure archive and backups directories exist
 ARCHIVE_DIR.mkdir(exist_ok=True)
+BACKUPS_DIR.mkdir(exist_ok=True)
 
 # Log the paths for debugging
 import logging
@@ -148,7 +150,12 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
     available_years = []
 
     # ARCHIVE SCANNING: Load all YYYY.json files from archive directory
+    # CRITICAL: Ignore backups folder (indestructible backup system)
     for archive_file in archive_dir.glob("[0-9]*.json"):
+        # Skip files in backups subdirectory
+        if "backups" in archive_file.parts:
+            continue
+            
         try:
             year_str = archive_file.stem
             if not year_str.isdigit() or len(year_str) != 4:
@@ -467,6 +474,10 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
     archives = {}
     
     for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
+        # Skip files in backups subdirectory (indestructible backup system)
+        if "backups" in archive_file.parts:
+            continue
+            
         year_str = archive_file.stem
         
         # Skip non-4-digit year files (e.g., backup files)
@@ -2364,42 +2375,199 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content=f"❌ No archive found for {year}")
             return
         
-        # Create safety backup before deleting
-        backup_path = ARCHIVE_DIR / f"{year}_deleted_backup_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        # INDESTRUCTIBLE BACKUP SYSTEM: Move to backups folder instead of deleting
+        backup_path = BACKUPS_DIR / f"{year}.json"
         
-        try:
-            # Copy to backup first
-            import shutil
-            shutil.copy(archive_path, backup_path)
-            
-            # Delete original
-            archive_path.unlink()
-            
+        # Check if backup already exists
+        if backup_path.exists():
             embed = disnake.Embed(
-                title="🗑️ Archive Deleted",
-                description=f"Archive for **{year}** has been removed!",
-                color=disnake.Color.orange()
+                title="⚠️ Backup Already Exists",
+                description=f"A backup for **{year}** already exists in the backups folder!",
+                color=disnake.Color.yellow()
             )
             embed.add_field(
-                name="🔒 Safety Backup Created",
-                value=f"Backup saved to: `{backup_path.name}`\n"
-                      f"You can manually restore from backup if needed.",
+                name="🤔 What happened?",
+                value=f"You've already deleted {year} before. The backup is preserved.\n\n"
+                      f"If you want to replace it:\n"
+                      f"1. Manually delete `backups/{year}.json`\n"
+                      f"2. Run this command again",
                 inline=False
             )
-            embed.set_footer(text="⚠️ This was a destructive operation!")
+            embed.set_footer(text="The current archive was NOT moved to prevent overwriting the existing backup.")
+            await inter.edit_original_response(embed=embed)
+            return
+        
+        try:
+            # MOVE to backups folder (not copy - this is the key!)
+            import shutil
+            shutil.move(str(archive_path), str(backup_path))
+            
+            embed = disnake.Embed(
+                title="🛡️ Archive Moved to Backups",
+                description=f"Archive for **{year}** has been safely moved to backups!",
+                color=disnake.Color.green()
+            )
+            embed.add_field(
+                name="✅ Indestructible Backup",
+                value=f"**Location:** `archive/backups/{year}.json`\n\n"
+                      f"• Not permanently deleted - just isolated\n"
+                      f"• Bot commands ignore backups folder\n"
+                      f"• Restore anytime with `/ss restore_year {year}`\n\n"
+                      f"**This system makes data loss nearly impossible!**",
+                inline=False
+            )
+            embed.set_footer(text="💡 Use /ss list_backups to view all backed-up years")
             
             await inter.edit_original_response(embed=embed)
             
             # Log to Discord
             if hasattr(self.bot, 'send_to_discord_log'):
                 await self.bot.send_to_discord_log(
-                    f"🗑️ {inter.author.display_name} deleted Secret Santa {year} archive (backup created)",
-                    "WARNING"
+                    f"🛡️ {inter.author.display_name} moved Secret Santa {year} to backups (safely archived)",
+                    "INFO"
                 )
             
         except Exception as e:
-            self.logger.error(f"Failed to delete archive: {e}")
-            await inter.edit_original_response(content=f"❌ Failed to delete archive: {e}")
+            self.logger.error(f"Failed to move archive to backups: {e}")
+            await inter.edit_original_response(content=f"❌ Failed to move archive: {e}")
+
+    @ss_root.sub_command(name="restore_year", description="♻️ Restore a year from backups")
+    @commands.has_permissions(administrator=True)
+    async def ss_restore_year(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        year: int = commands.Param(description="Year to restore (e.g., 2023)")
+    ):
+        """Restore archive file from backups folder (admin only)"""
+        await inter.response.defer(ephemeral=True)
+        
+        backup_path = BACKUPS_DIR / f"{year}.json"
+        archive_path = ARCHIVE_DIR / f"{year}.json"
+        
+        # Check if backup exists
+        if not backup_path.exists():
+            # List available backups to help user
+            available_backups = sorted([int(f.stem) for f in BACKUPS_DIR.glob("[0-9][0-9][0-9][0-9].json")])
+            
+            if available_backups:
+                backups_str = ", ".join(str(y) for y in available_backups)
+                await inter.edit_original_response(
+                    content=f"❌ No backup found for {year}\n\n**Available backups:** {backups_str}"
+                )
+            else:
+                await inter.edit_original_response(
+                    content=f"❌ No backup found for {year} (backups folder is empty)"
+                )
+            return
+        
+        # Check if archive already exists (don't overwrite!)
+        if archive_path.exists():
+            embed = disnake.Embed(
+                title="⚠️ Archive Already Exists",
+                description=f"An archive for **{year}** already exists in the active archives!",
+                color=disnake.Color.yellow()
+            )
+            embed.add_field(
+                name="🤔 What happened?",
+                value=f"Cannot restore because `{year}.json` already exists.\n\n"
+                      f"**Options:**\n"
+                      f"1. Delete the current archive with `/ss delete_year {year}`\n"
+                      f"2. Manually move/rename the current archive\n"
+                      f"3. Keep the current archive (backup remains safe)",
+                inline=False
+            )
+            embed.set_footer(text="Protection: Prevents accidental overwrites!")
+            await inter.edit_original_response(embed=embed)
+            return
+        
+        try:
+            # MOVE from backups to active archives
+            import shutil
+            shutil.move(str(backup_path), str(archive_path))
+            
+            embed = disnake.Embed(
+                title="♻️ Archive Restored Successfully",
+                description=f"Archive for **{year}** has been restored to active archives!",
+                color=disnake.Color.green()
+            )
+            embed.add_field(
+                name="✅ What Changed",
+                value=f"**From:** `archive/backups/{year}.json`\n"
+                      f"**To:** `archive/{year}.json`\n\n"
+                      f"• Now visible in `/ss history`\n"
+                      f"• Used by shuffle algorithm\n"
+                      f"• Counts toward user history\n\n"
+                      f"**The year is back in action!**",
+                inline=False
+            )
+            embed.set_footer(text="💡 Restoration complete!")
+            
+            await inter.edit_original_response(embed=embed)
+            
+            # Log to Discord
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log(
+                    f"♻️ {inter.author.display_name} restored Secret Santa {year} from backups",
+                    "INFO"
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to restore archive from backups: {e}")
+            await inter.edit_original_response(content=f"❌ Failed to restore archive: {e}")
+
+    @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
+    @commands.has_permissions(administrator=True)
+    async def ss_list_backups(self, inter: disnake.ApplicationCommandInteraction):
+        """List all years in the backups folder (admin only)"""
+        await inter.response.defer(ephemeral=True)
+        
+        # Scan backups folder for year files
+        backup_files = sorted(BACKUPS_DIR.glob("[0-9][0-9][0-9][0-9].json"))
+        
+        if not backup_files:
+            embed = disnake.Embed(
+                title="📋 Backed-Up Years",
+                description="✅ No years in backups (all archives are active!)",
+                color=disnake.Color.green()
+            )
+            embed.set_footer(text="Use /ss delete_year to move archives to backups")
+            await inter.edit_original_response(embed=embed)
+            return
+        
+        # Build list of backed-up years with file sizes
+        backup_list = []
+        for backup_file in backup_files:
+            year = backup_file.stem
+            size_kb = backup_file.stat().st_size / 1024
+            backup_list.append(f"**{year}** - {size_kb:.1f} KB")
+        
+        embed = disnake.Embed(
+            title="📋 Backed-Up Years",
+            description=f"Found **{len(backup_files)}** year(s) in backups folder:",
+            color=disnake.Color.blue()
+        )
+        
+        # Split into chunks if too many
+        chunk_size = 15
+        for i in range(0, len(backup_list), chunk_size):
+            chunk = backup_list[i:i+chunk_size]
+            field_name = "Years" if i == 0 else f"Years (continued)"
+            embed.add_field(
+                name=field_name,
+                value="\n".join(chunk),
+                inline=False
+            )
+        
+        embed.add_field(
+            name="🔧 Actions",
+            value=f"• Restore a year: `/ss restore_year [year]`\n"
+                  f"• View all active years: `/ss history`\n"
+                  f"• Bot ignores backups folder automatically",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Location: archive/backups/")
+        await inter.edit_original_response(embed=embed)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):

@@ -6,11 +6,12 @@ This directory contains completed Secret Santa event data from past years.
 
 ```
 archive/
-├── 2021.json  ← Secret Santa 2021 event data
-├── 2022.json  ← Secret Santa 2022 event data
-├── 2023.json  ← Secret Santa 2023 event data
-├── 2024.json  ← Secret Santa 2024 event data
-└── README.md  ← This file
+├── backups/        ← 🛡️ INDESTRUCTIBLE BACKUP FOLDER (bot never touches!)
+│   └── 2023.json   ← Deleted years moved here for safe keeping
+├── 2021.json       ← Secret Santa 2021 event data
+├── 2022.json       ← Secret Santa 2022 event data
+├── 2024.json       ← Secret Santa 2024 event data
+└── README.md       ← This file
 ```
 
 ## 📋 Archive File Format
@@ -78,6 +79,28 @@ If you try to archive an event for a year that already has an archive:
 2024.json already exists
 → New archive saves as: 2024_backup_20251215_183045.json
 ```
+
+## 🛡️ Indestructible Backup System
+
+**NEW:** When you delete a year's archive, it's moved to the `backups/` folder instead of being destroyed!
+
+### How It Works
+1. **Delete a year:** `/ss delete_year 2023`
+   - Moves `2023.json` → `backups/2023.json`
+   - **NOT permanently deleted!** Just isolated
+2. **Bot ignores backups:** All commands (`/ss history`, shuffle algorithm, etc.) ignore the `backups/` folder completely
+3. **Restore if needed:** `/ss restore_year 2023` moves it back to active archives
+
+### Why This Is Awesome
+- ✅ **Impossible to destroy data** via bot commands
+- ✅ **"Undo" button** for deletions
+- ✅ **Clear separation** between active and backed-up years
+- ✅ **Manual safety net** - only admins can access backups folder
+
+### Commands
+- `/ss delete_year [year]` - Move year to backups (safe deletion)
+- `/ss restore_year [year]` - Restore year from backups
+- `/ss list_backups` - View all backed-up years
 
 ## 🔧 Manual Editing
 
