@@ -786,12 +786,13 @@ class VoiceProcessingCog(commands.Cog):
         Detect if text has patterns that need AI pronunciation help.
         Returns True if text contains acronyms, all-caps words, or tricky patterns.
         """
-        # Check for all-caps words (likely acronyms or usernames)
-        all_caps_words = re.findall(r'\b[A-Z]{2,}\b', text)
+        # Check for all-caps words (likely acronyms or usernames) - but be more selective
+        # Only trigger for very short all-caps words (2-4 chars) that are likely acronyms
+        all_caps_words = re.findall(r'\b[A-Z]{2,4}\b', text)
         if all_caps_words:
             return True
         
-        # Check for mixed case usernames (e.g., "xXDarkLordXx")
+        # Check for mixed case usernames (e.g., "xXDarkLordXx") - but skip simple capital letters
         mixed_case = re.findall(r'\b[a-z]+[A-Z]+[a-z]*\b|\b[A-Z]+[a-z]+[A-Z]+\b', text)
         if mixed_case:
             return True
@@ -831,8 +832,9 @@ class VoiceProcessingCog(commands.Cog):
         try:
             prompt = (
                 "Rewrite this text ONLY to improve pronunciation for text-to-speech. "
-                "Expand acronyms into their letter names (e.g., 'JKM' → 'Jay Kay Em', 'NASA' → 'N A S A'). "
-                "Convert usernames/gamertags to speakable form (e.g., 'xXDarkLordXx' → 'Dark Lord'). "
+                "Only expand very short acronyms (2-4 letters) into their letter names (e.g., 'JKM' → 'Jay Kay Em'). "
+                "Convert complex usernames/gamertags to speakable form (e.g., 'xXDarkLordXx' → 'Dark Lord'). "
+                "DO NOT expand normal capitalized words or sentences - leave them as-is. "
                 "Keep all other words exactly the same. Don't change grammar, meaning, or add extra words.\n\n"
                 f"Text: {text}\n\n"
                 "Improved:"
