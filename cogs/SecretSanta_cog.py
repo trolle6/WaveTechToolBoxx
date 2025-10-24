@@ -661,7 +661,7 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
 
 class SecretSantaReplyView(disnake.ui.View):
     """View with reply button for Secret Santa messages"""
-    def __init__(self, santa_id: int, giftee_id: int, timeout: float = 300):
+    def __init__(self, santa_id: int, giftee_id: int, timeout: float = 3600):
         super().__init__(timeout=timeout)
         self.santa_id = santa_id
         self.giftee_id = giftee_id
@@ -669,26 +669,33 @@ class SecretSantaReplyView(disnake.ui.View):
     @disnake.ui.button(label="💬 Reply to Santa", style=disnake.ButtonStyle.primary, emoji="🎅")
     async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         """Handle reply button click"""
-        # Get the cog instance
-        cog = inter.bot.get_cog("SecretSantaCog")
-        if not cog:
-            await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
-            return
-        
-        # Check if user is the giftee
-        if inter.author.id != self.giftee_id:
-            await inter.response.send_message(content="❌ This message is not for you", ephemeral=True)
-            return
-        
-        # Check if there's an active event
-        event = cog._get_current_event()
-        if not event:
-            await inter.response.send_message(content="❌ No active Secret Santa event", ephemeral=True)
-            return
-        
-        # Create a modal for the reply
-        modal = SecretSantaReplyModal(self.santa_id, self.giftee_id)
-        await inter.response.send_modal(modal)
+        try:
+            # Get the cog instance
+            cog = inter.bot.get_cog("SecretSantaCog")
+            if not cog:
+                await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
+                return
+            
+            # Check if user is the giftee
+            if inter.author.id != self.giftee_id:
+                await inter.response.send_message(content="❌ This message is not for you", ephemeral=True)
+                return
+            
+            # Check if there's an active event
+            event = cog._get_current_event()
+            if not event:
+                await inter.response.send_message(content="❌ No active Secret Santa event", ephemeral=True)
+                return
+            
+            # Create a modal for the reply
+            modal = SecretSantaReplyModal(self.santa_id, self.giftee_id)
+            await inter.response.send_modal(modal)
+            
+        except Exception as e:
+            # Log the error for debugging
+            if hasattr(inter.bot, 'logger'):
+                inter.bot.logger.error(f"Reply button error: {e}")
+            await inter.response.send_message(content="❌ An error occurred while opening the reply form", ephemeral=True)
 
 
 class SecretSantaReplyModal(disnake.ui.Modal):
@@ -1729,8 +1736,11 @@ class SecretSantaCog(commands.Cog):
         question_msg += "Click the button below to reply instantly!\n\n"
         question_msg += "*Your Secret Santa is excited to learn more about you!*"
 
-        # Create reply view
+        # Create reply view (santa_id, giftee_id)
         reply_view = SecretSantaReplyView(int(user_id), receiver_id)
+        
+        # Debug: Log the view creation
+        self.logger.info(f"Created reply view for santa {user_id} -> giftee {receiver_id}")
         
         # Send question with reply button
         success = await self._send_dm(receiver_id, question_msg, reply_view)
