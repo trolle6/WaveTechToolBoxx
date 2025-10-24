@@ -727,7 +727,7 @@ class VoiceProcessingCog(commands.Cog):
         This is called once during initialization instead of on every message.
         """
         corrections = {
-            # Contractions
+            # Only keep contractions (apostrophe corrections)
             r'\bim\b': "I'm",
             r'\byoure\b': "you're", 
             r'\btheyre\b': "they're",
@@ -740,41 +740,19 @@ class VoiceProcessingCog(commands.Cog):
             r'\bshouldnt\b': "shouldn't",
             r'\bcouldnt\b': "couldn't",
             r'\bwouldnt\b': "wouldn't",
-            # Common spelling mistakes
-            r'\batmospher\w*\b': "atmosphere",
-            r'\brecieve\b': "receive",
-            r'\bdefin\w*ly\b': "definitely",
-            r'\bseperat\w*\b': "separate",
-            r'\boccur\w*nce\b': "occurrence",
-            r'\bneccesary\b': "necessary",
-            r'\bnecesary\b': "necessary",
-            r'\btommorow\b': "tomorrow",
-            r'\btomorow\b': "tomorrow",
-            r'\bwierd\b': "weird",
-            r'\baccomodat\w*\b': "accommodate",
-            r'\bembarass\w*\b': "embarrass",
-            r'\bconsious\b': "conscious",
-            # Article corrections
-            r'\ba apple\b': "an apple",
-            r'\ba orange\b': "an orange",
-            r'\ba elephant\b': "an elephant",
-            r'\ba umbrella\b': "an umbrella",
-            r'\ba hour\b': "an hour",
-            # Common word confusions
-            r'\byour welcome\b': "you're welcome",
-            r'\bits ok\b': "it's okay",
-            r'\balright\b': "all right",
-            # Abbreviations
-            r'\bu\b': "you",
-            r'\bur\b': "your",
-            # Basic grammar fixes
-            r'\bi are\b': "I am",
-            r'\bhe are\b': "he is",
-            r'\bshe are\b': "she is",
-            # Proper nouns
-            r'\bdiscord\b': "Discord",
-            r'\byoutube\b': "YouTube",
-            r'\bgoogle\b': "Google",
+            r'\bhavent\b': "haven't",
+            r'\bhasnt\b': "hasn't",
+            r'\bhadnt\b': "hadn't",
+            r'\barent\b': "aren't",
+            r'\bwerent\b': "weren't",
+            r'\bwasnt\b': "wasn't",
+            r'\bwouldnt\b': "wouldn't",
+            r'\bshouldnt\b': "shouldn't",
+            r'\bcouldnt\b': "couldn't",
+            r'\bmustnt\b': "mustn't",
+            r'\bneednt\b': "needn't",
+            r'\boughtnt\b': "oughtn't",
+            r'\bshant\b': "shan't",
         }
         
         # Compile all patterns with IGNORECASE flag
