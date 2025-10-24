@@ -728,7 +728,7 @@ class SecretSantaReplyModal(disnake.ui.Modal):
         # Get the cog instance
         cog = inter.bot.get_cog("SecretSantaCog")
         if not cog:
-            await inter.edit_original_response(content="❌ Secret Santa system not available")
+            await inter.followup.send(content="❌ Secret Santa system not available", ephemeral=True)
             return
         
         # Process the reply using the existing logic
@@ -1118,18 +1118,18 @@ class SecretSantaCog(commands.Cog):
                 )
                 embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
                 
-                await inter.edit_original_response(embed=embed)
+                await inter.followup.send(embed=embed, ephemeral=True)
             else:
                 embed = disnake.Embed(
                     title="❌ Delivery Failed",
                     description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
                     color=disnake.Color.red()
                 )
-                await inter.edit_original_response(embed=embed)
+                await inter.followup.send(embed=embed, ephemeral=True)
                 
         except Exception as e:
             self.logger.error(f"Error processing reply: {e}")
-            await inter.edit_original_response(content="❌ An error occurred while sending your reply")
+            await inter.followup.send(content="❌ An error occurred while sending your reply", ephemeral=True)
 
     def _get_year_emoji_mapping(self, participants: Dict[str, str]) -> Dict[str, str]:
         """Create consistent emoji mapping for all participants in a year"""
