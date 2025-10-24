@@ -350,8 +350,14 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
                     if r == giver:
                         unacceptable.append(g)
                 
+                # DUPLICATE PREVENTION: Add people who are already assigned as receivers
+                # This prevents multiple people from giving to the same receiver
+                for g, r in result.items():
+                    if r not in unacceptable:
+                        unacceptable.append(r)
+                
                 # AVAILABLE POOL: Find who this person CAN receive
-                # Excludes: history + cycles + self
+                # Excludes: history + cycles + duplicates + self
                 available = [p for p in participants if p not in unacceptable and p != giver]
                 
                 if not available:

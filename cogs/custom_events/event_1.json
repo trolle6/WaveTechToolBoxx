@@ -1,0 +1,14 @@
+{
+  "event_id": 1,
+  "name": "Alright",
+  "matcher_type": "fully_random",
+  "config": {
+    "team_size": 4
+  },
+  "guild_id": 627896843149508609,
+  "participants": {},
+  "results": null,
+  "status": "setup",
+  "created_at": 1761157818.7934656,
+  "timestamp": "2025-10-22T21:39:44.201264"
+}
