@@ -370,7 +370,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
             
             # CRITICAL VALIDATION: Ensure assignment integrity before accepting
             # This prevents the duplicate receiver bug from EVER happening again
-            self._validate_assignment_integrity(result, participants)
+            _validate_assignment_integrity(result, participants)
             
             # Success! Update the real history
             for giver, receiver in result.items():
