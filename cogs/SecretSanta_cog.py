@@ -1656,10 +1656,9 @@ class SecretSantaCog(commands.Cog):
     async def ss_reply(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        reply: str = commands.Param(description="Your reply (sent as-is for anonymity)", max_length=500),
-        use_ai_rewrite: bool = commands.Param(default=False, description="Use AI to rewrite for extra anonymity")
+        reply: str = commands.Param(description="Your reply (sent anonymously)", max_length=500)
     ):
-        """Reply to Santa anonymously with AI rewriting"""
+        """Reply to Santa anonymously"""
         await inter.response.defer(ephemeral=True)
 
         event = self._get_current_event()
@@ -1682,12 +1681,9 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(embed=embed)
             return
 
-        # Rewrite reply for anonymity (only if requested)
-        if use_ai_rewrite:
-            await inter.edit_original_response(content="🤖 Rewriting your reply for extra anonymity...")
-            rewritten_reply = await self._anonymize_text(reply, "reply")
-        else:
-            rewritten_reply = reply
+        # No AI rewriting needed - giftee doesn't know who their Santa is
+        # The anonymity is already protected by the assignment system
+        rewritten_reply = reply
 
         # Create beautiful reply message
         reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
@@ -1725,12 +1721,7 @@ class SecretSantaCog(commands.Cog):
                 value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
                 inline=False
             )
-            if use_ai_rewrite and rewritten_reply != reply:
-                embed.add_field(
-                    name="🤖 Rewritten", 
-                    value=f"*{rewritten_reply[:100]}{'...' if len(rewritten_reply) > 100 else ''}*", 
-                    inline=False
-                )
+            # No AI rewriting for giftee replies - anonymity already protected
             embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
             
             await inter.edit_original_response(embed=embed)
