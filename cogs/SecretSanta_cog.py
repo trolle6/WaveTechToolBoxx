@@ -1432,7 +1432,7 @@ class SecretSantaCog(commands.Cog):
             
             # Footer
             msg += f"🔐 *Messages are AI-rewritten for anonymity*\n"
-            msg += f"✨ *Your identity stays secret until you reveal it!*"
+            msg += f"✨ *Don't reveal your identity during the event!*"
             
             dm_tasks.append(self._send_dm(giver, msg))
 
