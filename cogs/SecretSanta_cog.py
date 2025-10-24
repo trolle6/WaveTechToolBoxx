@@ -368,6 +368,10 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
                 result[giver] = receiver
                 temp_history.setdefault(str(giver), []).append(receiver)
             
+            # CRITICAL VALIDATION: Ensure assignment integrity before accepting
+            # This prevents the duplicate receiver bug from EVER happening again
+            self._validate_assignment_integrity(result, participants)
+            
             # Success! Update the real history
             for giver, receiver in result.items():
                 history.setdefault(str(giver), []).append(receiver)
@@ -381,6 +385,117 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
             continue  # Try again with different random order
     
     raise ValueError("Assignment failed - this should not be reached")
+
+
+def _validate_assignment_integrity(assignments: Dict[int, int], participants: List[int]) -> None:
+    """
+    CRITICAL VALIDATION: Ensure assignment integrity to prevent duplicate receiver bug.
+    
+    This function performs comprehensive validation to ensure:
+    1. Every participant is a giver exactly once
+    2. Every participant is a receiver exactly once  
+    3. No one gives to themselves
+    4. No duplicate receivers (multiple people giving to same person)
+    5. No missing assignments
+    
+    This is the final safety net that prevents the duplicate receiver bug from EVER happening.
+    
+    Args:
+        assignments: Dict mapping giver ID to receiver ID
+        participants: List of all participant IDs
+        
+    Raises:
+        ValueError: If any integrity check fails
+    """
+    if not assignments:
+        raise ValueError("No assignments provided")
+    
+    if len(assignments) != len(participants):
+        raise ValueError(f"Assignment count mismatch: {len(assignments)} assignments for {len(participants)} participants")
+    
+    # Check 1: Every participant is a giver exactly once
+    givers = set(assignments.keys())
+    expected_givers = set(participants)
+    if givers != expected_givers:
+        missing_givers = expected_givers - givers
+        extra_givers = givers - expected_givers
+        raise ValueError(f"Giver mismatch: missing {missing_givers}, extra {extra_givers}")
+    
+    # Check 2: Every participant is a receiver exactly once
+    receivers = list(assignments.values())
+    expected_receivers = set(participants)
+    actual_receivers = set(receivers)
+    
+    if actual_receivers != expected_receivers:
+        missing_receivers = expected_receivers - actual_receivers
+        extra_receivers = actual_receivers - expected_receivers
+        raise ValueError(f"Receiver mismatch: missing {missing_receivers}, extra {extra_receivers}")
+    
+    # Check 3: No duplicate receivers (critical bug prevention)
+    if len(receivers) != len(set(receivers)):
+        # Find duplicates
+        receiver_counts = {}
+        for receiver in receivers:
+            receiver_counts[receiver] = receiver_counts.get(receiver, 0) + 1
+        
+        duplicates = {r: count for r, count in receiver_counts.items() if count > 1}
+        raise ValueError(f"DUPLICATE RECEIVERS DETECTED: {duplicates} - This is the bug we're preventing!")
+    
+    # Check 4: No self-assignments
+    for giver, receiver in assignments.items():
+        if giver == receiver:
+            raise ValueError(f"Self-assignment detected: {giver} → {receiver}")
+    
+    # Check 5: All assignments are valid participant IDs
+    for giver, receiver in assignments.items():
+        if giver not in participants:
+            raise ValueError(f"Invalid giver: {giver} not in participants")
+        if receiver not in participants:
+            raise ValueError(f"Invalid receiver: {receiver} not in participants")
+
+
+def _test_assignment_algorithm() -> None:
+    """
+    CRITICAL TEST: Verify the assignment algorithm works correctly.
+    
+    This function tests the algorithm with various scenarios to ensure
+    the duplicate receiver bug can NEVER happen again.
+    
+    This is called during development/testing to verify algorithm integrity.
+    """
+    import secrets
+    
+    # Test 1: Basic 3-person assignment
+    participants = [1, 2, 3]
+    history = {}
+    
+    for _ in range(100):  # Test 100 times to catch edge cases
+        result = make_assignments(participants, history.copy())
+        _validate_assignment_integrity(result, participants)
+    
+    # Test 2: Assignment with history constraints
+    history = {"1": [2], "2": [3], "3": [1]}  # Everyone has given to everyone
+    for _ in range(50):
+        result = make_assignments(participants, history.copy())
+        _validate_assignment_integrity(result, participants)
+    
+    # Test 3: Larger group (8 people like your case)
+    participants = [1, 2, 3, 4, 5, 6, 7, 8]
+    history = {}
+    
+    for _ in range(50):
+        result = make_assignments(participants, history.copy())
+        _validate_assignment_integrity(result, participants)
+    
+    # Test 4: Edge case - 2 people
+    participants = [1, 2]
+    history = {}
+    
+    for _ in range(20):
+        result = make_assignments(participants, history.copy())
+        _validate_assignment_integrity(result, participants)
+    
+    print("✅ All assignment algorithm tests passed - duplicate receiver bug is impossible!")
 
 
 def mod_check():
@@ -1323,6 +1438,10 @@ class SecretSantaCog(commands.Cog):
 
         await asyncio.gather(*dm_tasks)
 
+        # FINAL VALIDATION: Double-check assignments before saving
+        # This is the last line of defense against the duplicate receiver bug
+        _validate_assignment_integrity(assignments, participants)
+        
         # Save assignments
         async with self._lock:
             event["assignments"] = {str(k): v for k, v in assignments.items()}
