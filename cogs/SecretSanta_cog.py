@@ -1289,7 +1289,7 @@ class SecretSantaCog(commands.Cog):
 
         event = self._get_current_event()
         if not event:
-            await inter.edit_original_response(content="❌ No active event")
+            await inter.edit_original_response(content="❌ No active event - use `/ss start` to create one first")
             return
 
         # Convert participant IDs to integers
@@ -2530,6 +2530,15 @@ class SecretSantaCog(commands.Cog):
                       f"• Bot commands ignore backups folder\n"
                       f"• Restore anytime with `/ss restore_year {year}`\n\n"
                       f"**This system makes data loss nearly impossible!**",
+                inline=False
+            )
+            embed.add_field(
+                name="⚠️ Important Note",
+                value=f"**This command does NOT start a new Secret Santa event!**\n\n"
+                      f"• It only moves the {year} archive to backups\n"
+                      f"• No new event is created\n"
+                      f"• To start a new event, use `/ss start`\n"
+                      f"• To shuffle an existing event, use `/ss shuffle`",
                 inline=False
             )
             embed.set_footer(text="💡 Use /ss list_backups to view all backed-up years")
