@@ -148,7 +148,14 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
     available_years = []
 
     # ARCHIVE SCANNING: Load all YYYY.json files from archive directory
+    # 🔒 INDESTRUCTIBLE BACKUP PROTECTION: Skip files starting with "back_"
     for archive_file in archive_dir.glob("[0-9]*.json"):
+        # Skip indestructible backups (back_YYYY.json files)
+        if archive_file.name.startswith("back_"):
+            if logger:
+                logger.debug(f"Skipping indestructible backup: {archive_file.name}")
+            continue
+            
         try:
             year_str = archive_file.stem
             if not year_str.isdigit() or len(year_str) != 4:
@@ -467,6 +474,12 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
     archives = {}
     
     for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
+        # 🔒 INDESTRUCTIBLE BACKUP PROTECTION: Skip files starting with "back_"
+        if archive_file.name.startswith("back_"):
+            if logger:
+                logger.debug(f"Skipping indestructible backup: {archive_file.name}")
+            continue
+            
         year_str = archive_file.stem
         
         # Skip non-4-digit year files (e.g., backup files)
@@ -983,6 +996,14 @@ class SecretSantaCog(commands.Cog):
             timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = ARCHIVE_DIR / f"{year}_backup_{timestamp}.json"
             save_json(backup_path, archive_data)
+            
+            # 🔒 INDESTRUCTIBLE BACKUP: Also create back_ file for ultimate protection
+            indestructible_path = ARCHIVE_DIR / f"back_{year}.json"
+            if not indestructible_path.exists():
+                save_json(indestructible_path, archive_data)
+                self.logger.info(f"🔒 Created indestructible backup: {indestructible_path.name}")
+            else:
+                self.logger.info(f"🔒 Indestructible backup already exists: {indestructible_path.name}")
             
             self.logger.warning(f"⚠️ Archive {year}.json already exists! Saved to {backup_path.name} instead")
             self.logger.warning(f"This suggests you ran multiple events in {year}. Please review archives manually!")
@@ -2362,10 +2383,20 @@ class SecretSantaCog(commands.Cog):
         # Create safety backup before deleting
         backup_path = ARCHIVE_DIR / f"{year}_deleted_backup_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
+        # 🔒 INDESTRUCTIBLE BACKUP: Also create back_ file for ultimate protection
+        indestructible_path = ARCHIVE_DIR / f"back_{year}.json"
+        
         try:
             # Copy to backup first
             import shutil
             shutil.copy(archive_path, backup_path)
+            
+            # 🔒 Create indestructible backup if it doesn't exist
+            if not indestructible_path.exists():
+                shutil.copy(archive_path, indestructible_path)
+                self.logger.info(f"🔒 Created indestructible backup before deletion: {indestructible_path.name}")
+            else:
+                self.logger.info(f"🔒 Indestructible backup already exists: {indestructible_path.name}")
             
             # Delete original
             archive_path.unlink()
@@ -2376,9 +2407,10 @@ class SecretSantaCog(commands.Cog):
                 color=disnake.Color.orange()
             )
             embed.add_field(
-                name="🔒 Safety Backup Created",
-                value=f"Backup saved to: `{backup_path.name}`\n"
-                      f"You can manually restore from backup if needed.",
+                name="🔒 Safety Backups Created",
+                value=f"Timestamped backup: `{backup_path.name}`\n"
+                      f"Indestructible backup: `{indestructible_path.name}`\n"
+                      f"You can manually restore from either backup if needed.",
                 inline=False
             )
             embed.set_footer(text="⚠️ This was a destructive operation!")
@@ -2395,6 +2427,93 @@ class SecretSantaCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Failed to delete archive: {e}")
             await inter.edit_original_response(content=f"❌ Failed to delete archive: {e}")
+
+    @ss_root.sub_command(name="create_backup", description="🔒 Create indestructible backup of a year (admin only)")
+    @commands.has_permissions(administrator=True)
+    async def ss_create_backup(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        year: int = commands.Param(description="Year to backup (e.g., 2024)")
+    ):
+        """Create an indestructible backup of an archived year (admin only)"""
+        await inter.response.defer(ephemeral=True)
+        
+        # Validate year
+        current_year = dt.date.today().year
+        if year < 2020 or year > current_year + 1:
+            await inter.edit_original_response(content=f"❌ Invalid year {year} (must be 2020-{current_year + 1})")
+            return
+        
+        archive_path = ARCHIVE_DIR / f"{year}.json"
+        if not archive_path.exists():
+            await inter.edit_original_response(content=f"❌ No archive found for {year}")
+            return
+        
+        # Create indestructible backup
+        indestructible_path = ARCHIVE_DIR / f"back_{year}.json"
+        
+        try:
+            import shutil
+            
+            if indestructible_path.exists():
+                embed = disnake.Embed(
+                    title="🔒 Backup Already Exists",
+                    description=f"Indestructible backup for **{year}** already exists!",
+                    color=disnake.Color.yellow()
+                )
+                embed.add_field(
+                    name="📁 Existing Backup",
+                    value=f"File: `{indestructible_path.name}`\n"
+                          f"This backup is already protected from all commands.",
+                    inline=False
+                )
+                embed.set_footer(text="No action needed - your data is already safe!")
+                await inter.edit_original_response(embed=embed)
+                return
+            
+            # Create the indestructible backup
+            shutil.copy(archive_path, indestructible_path)
+            
+            embed = disnake.Embed(
+                title="🔒 Indestructible Backup Created",
+                description=f"Successfully created indestructible backup for **{year}**!",
+                color=disnake.Color.green()
+            )
+            embed.add_field(
+                name="🛡️ Protection Features",
+                value=f"• File: `{indestructible_path.name}`\n"
+                      f"• **Invisible** to all bot commands\n"
+                      f"• **Cannot** be deleted by bot\n"
+                      f"• **Only** manual admin access\n"
+                      f"• **Perfect** for critical data protection",
+                inline=False
+            )
+            embed.add_field(
+                name="📋 How to Use",
+                value="To restore this backup:\n"
+                      "1. Manually rename `back_YYYY.json` → `YYYY.json`\n"
+                      "2. Move to archive folder if needed\n"
+                      "3. Bot will automatically detect it",
+                inline=False
+            )
+            embed.set_footer(text="🔒 This backup is now INDESTRUCTIBLE!")
+            
+            await inter.edit_original_response(embed=embed)
+            
+            self.logger.info(f"🔒 Manual indestructible backup created: {indestructible_path.name}")
+            
+            # Log to Discord
+            if hasattr(self.bot, 'send_to_discord_log'):
+                asyncio.create_task(
+                    self.bot.send_to_discord_log(
+                        f"🔒 {inter.author.display_name} created indestructible backup: {indestructible_path.name}",
+                        "INFO"
+                    )
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Failed to create indestructible backup: {e}")
+            await inter.edit_original_response(content=f"❌ Failed to create backup: {e}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):

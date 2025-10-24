@@ -1,0 +1,18 @@
+{
+  "year": 2024,
+  "archived_at": 1703001234.567,
+  "timestamp": "2024-12-15T18:30:45.123456",
+  "event": {
+    "active": false,
+    "participants": {
+      "test_user_1": "TestUser1",
+      "test_user_2": "TestUser2"
+    },
+    "assignments": {
+      "test_user_1": "test_user_2",
+      "test_user_2": "test_user_1"
+    },
+    "gift_submissions": {},
+    "communications": {}
+  }
+}
