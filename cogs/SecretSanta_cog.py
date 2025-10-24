@@ -1293,6 +1293,11 @@ class SecretSantaCog(commands.Cog):
             msg += f"**💡 BUILD YOUR WISHLIST TOO:**\n"
             msg += f"• `/ss wishlist add [item]` - So your Santa knows what to get you!\n\n"
             
+            # Support section
+            msg += f"**🆘 NEED HELP?**\n"
+            msg += f"• Contact a moderator if you have any issues\n"
+            msg += f"• They'll sort it out for you!\n\n"
+            
             # Footer
             msg += f"🔐 *Messages are AI-rewritten for anonymity*\n"
             msg += f"✨ *Your identity stays secret until you reveal it!*"
