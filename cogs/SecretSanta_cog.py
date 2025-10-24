@@ -1560,6 +1560,8 @@ class SecretSantaCog(commands.Cog):
             msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions (includes instant reply button)\n"
             msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
             
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            
             msg += f"**BUILD YOUR WISHLIST TOO:**\n"
             msg += f"• `/ss wishlist add [item]` - So your Santa knows what to get you!\n\n"
             
@@ -1567,6 +1569,8 @@ class SecretSantaCog(commands.Cog):
             msg += f"**NEED HELP?**\n"
             msg += f"• Contact a moderator if you have any issues\n"
             msg += f"• They'll sort it out for you!\n\n"
+            
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Footer
             msg += f"*Messages are AI-rewritten for anonymity*\n"
@@ -1627,6 +1631,7 @@ class SecretSantaCog(commands.Cog):
                     int(uid),
                     f"**SECRET SANTA {year} - EVENT ENDED**\n\n"
                     f"Thank you for being part of Secret Santa this year! Your kindness made someone's holiday brighter.\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"Hope you had as much fun as your giftee!\n\n"
                     f"See you next year!"
                 )
