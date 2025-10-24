@@ -18,8 +18,7 @@ COMMANDS (Moderator):
 - /ss view_comms - View communication threads
 
 COMMANDS (Participant):
-- /ss ask_giftee [question] - Ask your giftee anonymously
-- /ss reply_santa [reply] - Reply to your Secret Santa
+- /ss ask_giftee [question] - Ask your giftee anonymously (includes instant reply button)
 - /ss submit_gift [description] - Record your gift
 - /ss wishlist add [item] - Add item to your wishlist
 - /ss wishlist remove [number] - Remove item from wishlist
@@ -660,6 +659,72 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
     return archives
 
 
+class SecretSantaReplyView(disnake.ui.View):
+    """View with reply button for Secret Santa messages"""
+    def __init__(self, santa_id: int, giftee_id: int, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.santa_id = santa_id
+        self.giftee_id = giftee_id
+    
+    @disnake.ui.button(label="💬 Reply to Santa", style=disnake.ButtonStyle.primary, emoji="🎅")
+    async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        """Handle reply button click"""
+        # Defer the interaction
+        await inter.response.defer(ephemeral=True)
+        
+        # Get the cog instance
+        cog = inter.bot.get_cog("SecretSantaCog")
+        if not cog:
+            await inter.edit_original_response(content="❌ Secret Santa system not available")
+            return
+        
+        # Check if user is the giftee
+        if inter.author.id != self.giftee_id:
+            await inter.edit_original_response(content="❌ This message is not for you")
+            return
+        
+        # Check if there's an active event
+        event = cog._get_current_event()
+        if not event:
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
+        # Create a modal for the reply
+        modal = SecretSantaReplyModal(self.santa_id, self.giftee_id)
+        await inter.response.send_modal(modal)
+
+
+class SecretSantaReplyModal(disnake.ui.Modal):
+    """Modal for Secret Santa replies"""
+    def __init__(self, santa_id: int, giftee_id: int):
+        super().__init__(title="💬 Reply to Your Secret Santa")
+        self.santa_id = santa_id
+        self.giftee_id = giftee_id
+        
+        self.add_item(disnake.ui.TextInput(
+            label="Your Reply",
+            placeholder="Type your reply here...",
+            style=disnake.TextInputStyle.paragraph,
+            max_length=500,
+            required=True
+        ))
+    
+    async def callback(self, inter: disnake.ModalInteraction):
+        """Handle modal submission"""
+        await inter.response.defer(ephemeral=True)
+        
+        reply = inter.text_values["Your Reply"]
+        
+        # Get the cog instance
+        cog = inter.bot.get_cog("SecretSantaCog")
+        if not cog:
+            await inter.edit_original_response(content="❌ Secret Santa system not available")
+            return
+        
+        # Process the reply using the existing logic
+        await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
+
+
 class YearHistoryPaginator(disnake.ui.View):
     """
     Paginated view for year history with assignments.
@@ -990,15 +1055,71 @@ class SecretSantaCog(commands.Cog):
         except asyncio.CancelledError:
             pass
 
-    async def _send_dm(self, user_id: int, message: str) -> bool:
-        """Send DM to user"""
+    async def _send_dm(self, user_id: int, message: str, view: disnake.ui.View = None) -> bool:
+        """Send DM to user with optional view"""
         try:
             user = await self.bot.fetch_user(user_id)
-            await user.send(message)
+            await user.send(message, view=view)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to DM {user_id}: {e}")
             return False
+
+    async def _process_reply(self, inter: disnake.ModalInteraction, reply: str, santa_id: int, giftee_id: int):
+        """Process a reply from giftee to santa"""
+        try:
+            # Create beautiful reply message
+            reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
+            reply_msg += f"📨 **Anonymous reply from your giftee:**\n\n"
+            reply_msg += f"*\"{reply}\"*\n\n"
+            reply_msg += "─────────────────────\n"
+            reply_msg += "🎯 **Keep the conversation going:**\n"
+            reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
+            reply_msg += "✨ *Your giftee is happy to help you find the perfect gift!*"
+
+            # Send reply to santa
+            success = await self._send_dm(santa_id, reply_msg)
+
+            if success:
+                # Save communication
+                event = self._get_current_event()
+                if event:
+                    async with self._lock:
+                        comms = event.setdefault("communications", {})
+                        thread = comms.setdefault(str(santa_id), {"giftee_id": str(giftee_id), "thread": []})
+                        thread["thread"].append({
+                            "type": "reply",
+                            "message": reply,
+                            "rewritten": reply,  # No AI rewriting for giftee replies
+                            "timestamp": time.time()
+                        })
+                        self._save()
+
+                # Success embed for giftee
+                embed = disnake.Embed(
+                    title="✅ Reply Sent!",
+                    description="Your reply has been delivered to your Secret Santa!",
+                    color=disnake.Color.green()
+                )
+                embed.add_field(
+                    name="📝 Your Reply", 
+                    value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
+                    inline=False
+                )
+                embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
+                
+                await inter.edit_original_response(embed=embed)
+            else:
+                embed = disnake.Embed(
+                    title="❌ Delivery Failed",
+                    description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
+                    color=disnake.Color.red()
+                )
+                await inter.edit_original_response(embed=embed)
+                
+        except Exception as e:
+            self.logger.error(f"Error processing reply: {e}")
+            await inter.edit_original_response(content="❌ An error occurred while sending your reply")
 
     def _get_year_emoji_mapping(self, participants: Dict[str, str]) -> Dict[str, str]:
         """Create consistent emoji mapping for all participants in a year"""
@@ -1418,8 +1539,7 @@ class SecretSantaCog(commands.Cog):
             
             # Other helpful commands
             msg += f"**📋 OTHER COMMANDS:**\n"
-            msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions anonymously\n"
-            msg += f"• `/ss reply_santa` - Reply if they message you\n"
+            msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions (includes instant reply button)\n"
             msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
             
             msg += f"**💡 BUILD YOUR WISHLIST TOO:**\n"
@@ -1598,17 +1718,20 @@ class SecretSantaCog(commands.Cog):
         else:
             rewritten_question = question
 
-        # Create beautiful question message
+        # Create beautiful question message with reply button
         question_msg = f"🎅✨ **SECRET SANTA MESSAGE** ✨🎅\n\n"
         question_msg += f"💌 **Anonymous question from your Secret Santa:**\n\n"
         question_msg += f"*\"{rewritten_question}\"*\n\n"
         question_msg += "─────────────────────\n"
-        question_msg += "🎯 **How to reply:**\n"
-        question_msg += "Use `/ss reply_santa` to send an anonymous reply back!\n\n"
+        question_msg += "🎯 **Quick Reply:**\n"
+        question_msg += "Click the button below to reply instantly!\n\n"
         question_msg += "✨ *Your Secret Santa is excited to learn more about you!*"
 
-        # Send question
-        success = await self._send_dm(receiver_id, question_msg)
+        # Create reply view
+        reply_view = SecretSantaReplyView(int(user_id), receiver_id)
+        
+        # Send question with reply button
+        success = await self._send_dm(receiver_id, question_msg, reply_view)
 
         if success:
             # Save communication
@@ -1651,87 +1774,6 @@ class SecretSantaCog(commands.Cog):
             )
             await inter.edit_original_response(embed=embed)
 
-    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (sent anonymously)")
-    @participant_check()
-    async def ss_reply(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        reply: str = commands.Param(description="Your reply (sent anonymously)", max_length=500)
-    ):
-        """Reply to Santa anonymously"""
-        await inter.response.defer(ephemeral=True)
-
-        event = self._get_current_event()
-        user_id = str(inter.author.id)
-
-        # Find who is the user's Santa
-        santa_id = None
-        for giver, receiver in event.get("assignments", {}).items():
-            if receiver == int(user_id):
-                santa_id = int(giver)
-                break
-
-        if not santa_id:
-            embed = self._create_embed(
-                title="❌ No Secret Santa Found",
-                description="No one has asked you a question yet, or you haven't been assigned a Secret Santa!",
-                color=disnake.Color.red()
-            )
-            embed.set_footer(text="💡 Wait for your Secret Santa to ask you something first!")
-            await inter.edit_original_response(embed=embed)
-            return
-
-        # No AI rewriting needed - giftee doesn't know who their Santa is
-        # The anonymity is already protected by the assignment system
-        rewritten_reply = reply
-
-        # Create beautiful reply message
-        reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
-        reply_msg += f"📨 **Anonymous reply from your giftee:**\n\n"
-        reply_msg += f"*\"{rewritten_reply}\"*\n\n"
-        reply_msg += "─────────────────────\n"
-        reply_msg += "🎯 **Keep the conversation going:**\n"
-        reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
-        reply_msg += "✨ *Your giftee is happy to help you find the perfect gift!*"
-
-        # Send reply
-        success = await self._send_dm(santa_id, reply_msg)
-
-        if success:
-            # Save communication
-            async with self._lock:
-                comms = event.setdefault("communications", {})
-                thread = comms.setdefault(str(santa_id), {"giftee_id": user_id, "thread": []})
-                thread["thread"].append({
-                    "type": "reply",
-                    "message": reply,
-                    "rewritten": rewritten_reply,
-                    "timestamp": time.time()
-                })
-                self._save()
-
-            # Success embed
-            embed = disnake.Embed(
-                title="✅ Reply Sent!",
-                description="Your reply has been delivered to your Secret Santa!",
-                color=disnake.Color.green()
-            )
-            embed.add_field(
-                name="📝 Original", 
-                value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
-                inline=False
-            )
-            # No AI rewriting for giftee replies - anonymity already protected
-            embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
-            
-            await inter.edit_original_response(embed=embed)
-        else:
-            embed = disnake.Embed(
-                title="❌ Delivery Failed",
-                description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
-                color=disnake.Color.red()
-            )
-            await inter.edit_original_response(embed=embed)
 
     @ss_root.sub_command(name="submit_gift", description="Submit your gift for records")
     @participant_check()
