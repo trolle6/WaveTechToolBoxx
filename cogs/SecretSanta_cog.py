@@ -704,6 +704,7 @@ class SecretSantaReplyModal(disnake.ui.Modal):
         # Create the text input component
         text_input = disnake.ui.TextInput(
             label="Your Reply",
+            custom_id="reply_text",
             placeholder="Type your reply here...",
             style=disnake.TextInputStyle.paragraph,
             max_length=500,
@@ -722,7 +723,7 @@ class SecretSantaReplyModal(disnake.ui.Modal):
         """Handle modal submission"""
         await inter.response.defer(ephemeral=True)
         
-        reply = inter.text_values["Your Reply"]
+        reply = inter.text_values["reply_text"]
         
         # Get the cog instance
         cog = inter.bot.get_cog("SecretSantaCog")
