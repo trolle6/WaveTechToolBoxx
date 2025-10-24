@@ -1069,13 +1069,13 @@ class SecretSantaCog(commands.Cog):
         """Process a reply from giftee to santa"""
         try:
             # Create beautiful reply message
-            reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
-            reply_msg += f"📨 **Anonymous reply from your giftee:**\n\n"
+            reply_msg = f"**SECRET SANTA REPLY**\n\n"
+            reply_msg += f"**Anonymous reply from your giftee:**\n\n"
             reply_msg += f"*\"{reply}\"*\n\n"
             reply_msg += "─────────────────────\n"
-            reply_msg += "🎯 **Keep the conversation going:**\n"
+            reply_msg += "**Keep the conversation going:**\n"
             reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
-            reply_msg += "✨ *Your giftee is happy to help you find the perfect gift!*"
+            reply_msg += "*Your giftee is happy to help you find the perfect gift!*"
 
             # Send reply to santa
             success = await self._send_dm(santa_id, reply_msg)
@@ -1526,33 +1526,33 @@ class SecretSantaCog(commands.Cog):
             receiver_name = event["participants"].get(str(receiver), f"User {receiver}")
             
             # Create clean, focused assignment message
-            msg = f"🎄✨ **SECRET SANTA {self.state['current_year']}** ✨🎄\n\n"
+            msg = f"**SECRET SANTA {self.state['current_year']}**\n\n"
             
             # WHO YOU GOT (most important!)
-            msg += f"🎯 **YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver}> ({receiver_name})')}\n\n"
+            msg += f"**YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver}> ({receiver_name})')}\n\n"
             
             msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Highlight wishlist viewing first!
-            msg += f"**🎁 SEE WHAT THEY WANT:**\n"
+            msg += f"**SEE WHAT THEY WANT:**\n"
             msg += f"• `/ss view_giftee_wishlist` - Check {receiver_name}'s wishlist\n\n"
             
             # Other helpful commands
-            msg += f"**📋 OTHER COMMANDS:**\n"
+            msg += f"**OTHER COMMANDS:**\n"
             msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions (includes instant reply button)\n"
             msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
             
-            msg += f"**💡 BUILD YOUR WISHLIST TOO:**\n"
+            msg += f"**BUILD YOUR WISHLIST TOO:**\n"
             msg += f"• `/ss wishlist add [item]` - So your Santa knows what to get you!\n\n"
             
             # Support section
-            msg += f"**🆘 NEED HELP?**\n"
+            msg += f"**NEED HELP?**\n"
             msg += f"• Contact a moderator if you have any issues\n"
             msg += f"• They'll sort it out for you!\n\n"
             
             # Footer
-            msg += f"🔐 *Messages are AI-rewritten for anonymity*\n"
-            msg += f"✨ *Don't reveal your identity during the event!*"
+            msg += f"*Messages are AI-rewritten for anonymity*\n"
+            msg += f"*Don't reveal your identity during the event!*"
             
             dm_tasks.append(self._send_dm(giver, msg))
 
@@ -1607,10 +1607,10 @@ class SecretSantaCog(commands.Cog):
             dm_tasks = [
                 self._send_dm(
                     int(uid),
-                    f"🎄✨ **SECRET SANTA {year} - EVENT ENDED** ✨🎄\n\n"
+                    f"**SECRET SANTA {year} - EVENT ENDED**\n\n"
                     f"Thank you for being part of Secret Santa this year! Your kindness made someone's holiday brighter.\n\n"
-                    f"Hope you had as much fun as your giftee! 🎁\n\n"
-                    f"See you next year! 🎅"
+                    f"Hope you had as much fun as your giftee!\n\n"
+                    f"See you next year!"
                 )
                 for uid in participants
             ]
@@ -1719,13 +1719,13 @@ class SecretSantaCog(commands.Cog):
             rewritten_question = question
 
         # Create beautiful question message with reply button
-        question_msg = f"🎅✨ **SECRET SANTA MESSAGE** ✨🎅\n\n"
-        question_msg += f"💌 **Anonymous question from your Secret Santa:**\n\n"
+        question_msg = f"**SECRET SANTA MESSAGE**\n\n"
+        question_msg += f"**Anonymous question from your Secret Santa:**\n\n"
         question_msg += f"*\"{rewritten_question}\"*\n\n"
         question_msg += "─────────────────────\n"
-        question_msg += "🎯 **Quick Reply:**\n"
+        question_msg += "**Quick Reply:**\n"
         question_msg += "Click the button below to reply instantly!\n\n"
-        question_msg += "✨ *Your Secret Santa is excited to learn more about you!*"
+        question_msg += "*Your Secret Santa is excited to learn more about you!*"
 
         # Create reply view
         reply_view = SecretSantaReplyView(int(user_id), receiver_id)
