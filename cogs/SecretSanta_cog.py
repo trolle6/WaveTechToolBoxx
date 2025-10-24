@@ -1565,13 +1565,13 @@ class SecretSantaCog(commands.Cog):
 
         await inter.edit_original_response(embed=embed)
 
-    @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question (anonymously rewritten)")
+    @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question (sent anonymously)")
     @participant_check()
     async def ss_ask(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        question: str = commands.Param(description="Your question (will be rewritten for anonymity)", max_length=500),
-        skip_rewrite: bool = commands.Param(default=False, description="Skip AI rewriting (less anonymous)")
+        question: str = commands.Param(description="Your question (sent as-is for anonymity)", max_length=500),
+        use_ai_rewrite: bool = commands.Param(default=False, description="Use AI to rewrite for extra anonymity")
     ):
         """Ask giftee anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
@@ -1591,9 +1591,9 @@ class SecretSantaCog(commands.Cog):
 
         receiver_id = event["assignments"][user_id]
 
-        # Rewrite question for anonymity (unless skipped)
-        if not skip_rewrite:
-            await inter.edit_original_response(content="🤖 Rewriting your question for anonymity...")
+        # Rewrite question for anonymity (only if requested)
+        if use_ai_rewrite:
+            await inter.edit_original_response(content="🤖 Rewriting your question for extra anonymity...")
             rewritten_question = await self._anonymize_text(question, "question")
         else:
             rewritten_question = question
@@ -1634,7 +1634,7 @@ class SecretSantaCog(commands.Cog):
                 value=f"*{question[:100]}{'...' if len(question) > 100 else ''}*", 
                 inline=False
             )
-            if not skip_rewrite and rewritten_question != question:
+            if use_ai_rewrite and rewritten_question != question:
                 embed.add_field(
                     name="🤖 Rewritten", 
                     value=f"*{rewritten_question[:100]}{'...' if len(rewritten_question) > 100 else ''}*", 
@@ -1651,13 +1651,13 @@ class SecretSantaCog(commands.Cog):
             )
             await inter.edit_original_response(embed=embed)
 
-    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (anonymously rewritten)")
+    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (sent anonymously)")
     @participant_check()
     async def ss_reply(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        reply: str = commands.Param(description="Your reply (will be rewritten for anonymity)", max_length=500),
-        skip_rewrite: bool = commands.Param(default=False, description="Skip AI rewriting (less anonymous)")
+        reply: str = commands.Param(description="Your reply (sent as-is for anonymity)", max_length=500),
+        use_ai_rewrite: bool = commands.Param(default=False, description="Use AI to rewrite for extra anonymity")
     ):
         """Reply to Santa anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
@@ -1682,9 +1682,9 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(embed=embed)
             return
 
-        # Rewrite reply for anonymity (unless skipped)
-        if not skip_rewrite:
-            await inter.edit_original_response(content="🤖 Rewriting your reply for anonymity...")
+        # Rewrite reply for anonymity (only if requested)
+        if use_ai_rewrite:
+            await inter.edit_original_response(content="🤖 Rewriting your reply for extra anonymity...")
             rewritten_reply = await self._anonymize_text(reply, "reply")
         else:
             rewritten_reply = reply
@@ -1725,7 +1725,7 @@ class SecretSantaCog(commands.Cog):
                 value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
                 inline=False
             )
-            if not skip_rewrite and rewritten_reply != reply:
+            if use_ai_rewrite and rewritten_reply != reply:
                 embed.add_field(
                     name="🤖 Rewritten", 
                     value=f"*{rewritten_reply[:100]}{'...' if len(rewritten_reply) > 100 else ''}*", 
