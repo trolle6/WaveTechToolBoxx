@@ -669,24 +669,21 @@ class SecretSantaReplyView(disnake.ui.View):
     @disnake.ui.button(label="💬 Reply to Santa", style=disnake.ButtonStyle.primary, emoji="🎅")
     async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         """Handle reply button click"""
-        # Defer the interaction
-        await inter.response.defer(ephemeral=True)
-        
         # Get the cog instance
         cog = inter.bot.get_cog("SecretSantaCog")
         if not cog:
-            await inter.edit_original_response(content="❌ Secret Santa system not available")
+            await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
             return
         
         # Check if user is the giftee
         if inter.author.id != self.giftee_id:
-            await inter.edit_original_response(content="❌ This message is not for you")
+            await inter.response.send_message(content="❌ This message is not for you", ephemeral=True)
             return
         
         # Check if there's an active event
         event = cog._get_current_event()
         if not event:
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            await inter.response.send_message(content="❌ No active Secret Santa event", ephemeral=True)
             return
         
         # Create a modal for the reply
