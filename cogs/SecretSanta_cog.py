@@ -1529,7 +1529,7 @@ class SecretSantaCog(commands.Cog):
             msg = f"🎄✨ **SECRET SANTA {self.state['current_year']}** ✨🎄\n\n"
             
             # WHO YOU GOT (most important!)
-            msg += f"🎯 **YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver}>')}\n\n"
+            msg += f"🎯 **YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver}> ({receiver_name})')}\n\n"
             
             msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             
