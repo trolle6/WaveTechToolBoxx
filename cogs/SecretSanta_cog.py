@@ -1768,7 +1768,8 @@ class SecretSantaCog(commands.Cog):
         question_msg += f"*\"{rewritten_question}\"*\n\n"
         question_msg += "─────────────────────\n"
         question_msg += "**Quick Reply:**\n"
-        question_msg += "Click the button below to reply instantly!\n\n"
+        question_msg += "Click the button below to reply instantly!\n"
+        question_msg += "*If the button doesn't work, use `/ss reply_santa [your reply]`*\n\n"
         question_msg += "*Your Secret Santa is excited to learn more about you!*"
 
         # Create reply view - it will dynamically look up the santa/giftee relationship
