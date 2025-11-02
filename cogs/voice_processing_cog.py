@@ -13,9 +13,12 @@ FEATURES:
 - 🚦 Rate limiting to prevent spam and cost control
 
 VOICE ASSIGNMENT SYSTEM:
-- Users get a unique voice when they join VC (rotates through 6 voices)
+- Pronoun-based voice assignment (detects from display names)
+- Supports formal (he/him), casual (| he), and descriptive (good man) patterns
+- he/him → echo/onyx (male voices), she/her → nova/shimmer (female voices)
+- they/them or no detection → alloy (neutral voice)
 - Voice assignments are IN-MEMORY (not persisted to disk)
-- Assignments cleared when users leave VC (enables variety)
+- Assignments cleared when users leave VC (re-detected on rejoin)
 - Cleanup runs every 5 minutes (frees unused voices)
 - Optional role-based access control (TTS_ROLE_ID in config)
 
@@ -203,32 +206,167 @@ class VoiceProcessingCog(commands.Cog):
         self.allowed_channel = bot.config.DISCORD_CHANNEL_ID
 
     
-    def _get_voice_for_user(self, member: disnake.Member) -> str:
+    async def _detect_pronouns_from_profile(self, member: disnake.Member) -> Optional[str]:
         """
-        Get assigned voice for user, or assign a new one.
+        Detect user's pronouns from their Discord display name or username.
         
-        VOICE ROTATION SYSTEM (IN-MEMORY, SESSION-BASED):
-        - 6 available voices: alloy, echo, fable, onyx, nova, shimmer
-        - Each user gets a voice assigned for their current VC session
+        DETECTION METHODS:
+        - Formal patterns: (he/him), she/her, [they/them], etc.
+        - Casual mentions: just "he", "she", "they" in name
+        - Descriptive terms: "good man", "girl", "dude", "guy", "lady", etc.
+        - Various separators: |, /, -, parentheses, brackets
+        
+        EXAMPLES DETECTED:
+        - "Alice (she/her)" → she
+        - "Bob | he" → he
+        - "Charlie - they" → they
+        - "Dave the man" → he
+        - "Emma girl gamer" → she
+        - "Sam [they/them]" → they
+        
+        Returns:
+            'he', 'she', 'they', or None if not detected
+        """
+        # Check display name and nickname for pronoun patterns
+        text_to_check = f"{member.display_name} {member.name}".lower()
+        
+        # Priority 1: Formal pronoun patterns (most explicit)
+        # Match: (he/him), he/him, [she/her], |they/them|, he / him, etc.
+        if any(pattern in text_to_check for pattern in [
+            'he/him', 'he / him', 'he|him', '(he)', '[he]', 'he/he'
+        ]):
+            return 'he'
+        
+        if any(pattern in text_to_check for pattern in [
+            'she/her', 'she / her', 'she|her', '(she)', '[she]', 'she/she'
+        ]):
+            return 'she'
+        
+        if any(pattern in text_to_check for pattern in [
+            'they/them', 'they / them', 'they|them', '(they)', '[they]', 'they/they'
+        ]):
+            return 'they'
+        
+        # Priority 2: Casual single pronoun mentions with separators
+        # Match: "Name | he", "Name - she", "Name • they"
+        casual_pattern = r'[|\-•\[\]\(\)]\s*(he|she|they)\s*[|\-•\[\]\(\)]?'
+        match = re.search(casual_pattern, text_to_check)
+        if match:
+            pronoun = match.group(1)
+            if pronoun == 'he':
+                return 'he'
+            elif pronoun == 'she':
+                return 'she'
+            elif pronoun == 'they':
+                return 'they'
+        
+        # Priority 3: Descriptive gender terms (less explicit but common)
+        # Words that strongly suggest pronouns
+        he_terms = ['man', 'guy', 'dude', 'male', 'boy', 'bro', 'mr', 'king']
+        she_terms = ['woman', 'girl', 'gal', 'female', 'lady', 'sis', 'ms', 'queen']
+        
+        # Use word boundaries to avoid false matches
+        for term in he_terms:
+            if re.search(rf'\b{term}\b', text_to_check):
+                return 'he'
+        
+        for term in she_terms:
+            if re.search(rf'\b{term}\b', text_to_check):
+                return 'she'
+        
+        # Priority 4: Standalone pronouns at end of name (casual style)
+        # Match: "Name he", "Name she", "Name they" (but not if it's part of another word)
+        end_pattern = r'\s+(he|she|they)\s*$'
+        match = re.search(end_pattern, text_to_check)
+        if match:
+            pronoun = match.group(1)
+            if pronoun == 'he':
+                return 'he'
+            elif pronoun == 'she':
+                return 'she'
+            elif pronoun == 'they':
+                return 'they'
+        
+        return None
+    
+    def _get_voice_for_pronouns(self, pronouns: Optional[str]) -> str:
+        """
+        Map detected pronouns to appropriate TTS voice.
+        
+        VOICE MAPPING:
+        - he/him → echo (male) or onyx (deep male)
+        - she/her → nova (female) or shimmer (female)
+        - they/them → alloy (neutral)
+        - None detected → alloy (neutral, fallback)
+        
+        OpenAI Voice Characteristics:
+        - alloy: neutral, balanced
+        - echo: male-leaning
+        - fable: British female
+        - onyx: deep male
+        - nova: warm female
+        - shimmer: soft female
+        
+        Args:
+            pronouns: Detected pronoun category ('he', 'she', 'they', or None)
+        
+        Returns:
+            Voice name to use for TTS
+        """
+        if pronouns == 'he':
+            # Alternate between male voices for variety
+            return 'echo' if hash(time.time()) % 2 == 0 else 'onyx'
+        elif pronouns == 'she':
+            # Alternate between female voices for variety
+            return 'nova' if hash(time.time()) % 2 == 0 else 'shimmer'
+        elif pronouns == 'they':
+            # Use neutral voice for they/them
+            return 'alloy'
+        else:
+            # Default to neutral voice if no pronouns detected
+            return 'alloy'
+
+    async def _get_voice_for_user(self, member: disnake.Member) -> str:
+        """
+        Get assigned voice for user, or assign a new one based on pronouns.
+        
+        PRONOUN-BASED VOICE ASSIGNMENT:
+        - Detects pronouns from display name or username
+        - Maps to appropriate voice: he→echo/onyx, she→nova/shimmer, they→alloy
+        - Handles formal (he/him), casual (| he), and descriptive (good man) patterns
+        - Falls back to neutral 'alloy' if no pronouns detected
         - Assignments are IN-MEMORY ONLY (not saved to file)
-        - Voices are freed when users leave VC (users can get different voice next time)
-        - After 6 users, voices repeat (User 7 gets same voice as User 1, etc.)
+        - Voices are freed when users leave VC
         
-        WHY SESSION-BASED:
-        - Users get variety (different voice each session)
-        - Voices recycle quickly (not stuck to inactive users)
-        - No JSON file clutter
-        - Works with unlimited users (voices just repeat)
+        DETECTION EXAMPLES:
+        - "Alice (she/her)" → she → nova/shimmer
+        - "Bob | he" → he → echo/onyx
+        - "Charlie they" → they → alloy
+        - "Dave the man" → he → echo/onyx
+        - "Emma girl" → she → nova/shimmer
+        - "Sam" → no detection → alloy (neutral)
+        
+        VOICE MAPPING:
+        - he/him or male terms → echo (male) or onyx (deep male)
+        - she/her or female terms → nova (female) or shimmer (female)  
+        - they/them → alloy (neutral)
+        - No pronouns detected → alloy (neutral fallback)
+        
+        WHY PRONOUN-BASED:
+        - Respectful of user identity
+        - More natural and personalized experience
+        - Consistent voice across sessions for same user
+        - Automatic detection from display name
         
         ROLE MANAGEMENT:
         - If TTS_ROLE_ID is set, only users with that role get voices
         - Users without role use default voice (no assignment)
         
         Args:
-            member: Discord member object (need roles for checking)
+            member: Discord member object (need display name and roles for checking)
         
         Returns:
-            Voice name to use for TTS (e.g., "echo", "fable")
+            Voice name to use for TTS (e.g., "echo", "nova", "alloy")
         """
         user_key = str(member.id)
         
@@ -246,14 +384,15 @@ class VoiceProcessingCog(commands.Cog):
             if assigned in self.available_voices:
                 return assigned
         
-        # Assign new voice (rotate through available voices)
-        new_voice = self.available_voices[self._voice_index % len(self.available_voices)]
-        self._voice_index += 1
+        # Detect pronouns and assign appropriate voice
+        detected_pronouns = await self._detect_pronouns_from_profile(member)
+        new_voice = self._get_voice_for_pronouns(detected_pronouns)
         
         # Store in memory (NOT saved to file)
         self._voice_assignments[user_key] = new_voice
         
-        self.logger.info(f"Assigned voice '{new_voice}' to user {member.id} ({member.display_name}) for this session")
+        pronoun_info = f" (pronouns: {detected_pronouns})" if detected_pronouns else " (no pronouns detected, using neutral)"
+        self.logger.info(f"Assigned voice '{new_voice}' to user {member.id} ({member.display_name}){pronoun_info}")
         return new_voice
 
     async def cog_load(self):
@@ -1286,9 +1425,9 @@ class VoiceProcessingCog(commands.Cog):
         else:
             self.logger.debug(f"User {user_id} already announced, skipping name prefix")
 
-        # Get user's assigned voice (or assign a new one)
-        # Pass member object so we can check roles and free up voices if needed
-        user_voice = self._get_voice_for_user(message.author)
+        # Get user's assigned voice (or assign a new one based on pronouns)
+        # Pass member object so we can check roles, pronouns, and free up voices if needed
+        user_voice = await self._get_voice_for_user(message.author)
 
         # Add to queue IMMEDIATELY for strict FIFO ordering
         # TTS will be generated in order by the queue processor

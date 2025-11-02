@@ -564,6 +564,30 @@ for sig in (signal.SIGINT, signal.SIGTERM):
 if __name__ == "__main__":
     logger.info("Starting bot...")
 
+    # Production deployment checks
+    logger.info("Running production deployment checks...")
+    
+    # Check Python version
+    if sys.version_info < (3, 9):
+        logger.critical("Python 3.9+ required. Current: {}.{}.{}".format(*sys.version_info[:3]))
+        sys.exit(1)
+    
+    # Check required directories
+    from pathlib import Path
+    required_dirs = ['cogs/archive', 'cogs/archive/backups']
+    for dir_path in required_dirs:
+        Path(dir_path).mkdir(parents=True, exist_ok=True)
+        logger.info(f"Ensured directory exists: {dir_path}")
+    
+    # Check file permissions
+    critical_files = ['main.py', 'cogs/SecretSanta_cog.py']
+    for file_path in critical_files:
+        if not os.access(file_path, os.R_OK):
+            logger.critical(f"Cannot read {file_path} - check permissions")
+            sys.exit(1)
+    
+    logger.info("Production deployment checks passed")
+
     # Validate API key before loading cogs (unless skipped)
     if config.SKIP_API_VALIDATION:
         logger.warning("API key validation skipped (SKIP_API_VALIDATION=true)")
