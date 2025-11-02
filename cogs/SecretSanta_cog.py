@@ -927,10 +927,6 @@ class SecretSantaCog(commands.Cog):
         self._lock = asyncio.Lock()
         self._backup_task: Optional[asyncio.Task] = None
         self._unloaded = False  # Track if already unloaded
-
-        # Register persistent reply button view - works even after bot restarts
-        # The view dynamically looks up santa/giftee relationships from event data
-        self.bot.add_view(SecretSantaReplyView())  # Button uses dynamic lookup
         
         self.logger.info("Secret Santa cog initialized with persistent reply buttons")
     
@@ -1854,13 +1850,13 @@ class SecretSantaCog(commands.Cog):
         rewritten_reply = reply
 
         # Create beautiful reply message
-        reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
-        reply_msg += f"📨 **Anonymous reply from your giftee:**\n\n"
+        reply_msg = f"**SECRET SANTA REPLY**\n\n"
+        reply_msg += f"**Anonymous reply from your giftee:**\n\n"
         reply_msg += f"*\"{rewritten_reply}\"*\n\n"
         reply_msg += "─────────────────────\n"
-        reply_msg += "🎯 **Keep the conversation going:**\n"
+        reply_msg += "**Keep the conversation going:**\n"
         reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
-        reply_msg += "✨ *Your giftee is happy to help you find the perfect gift!*"
+        reply_msg += "*Your giftee is happy to help you find the perfect gift!*"
 
         # Send reply
         success = await self._send_dm(santa_id, reply_msg)
@@ -3045,6 +3041,12 @@ class SecretSantaCog(commands.Cog):
 
         except Exception as e:
             self.logger.error(f"Error handling reaction remove: {e}")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Register persistent reply button view - works even after bot restarts
+        # The view dynamically looks up santa/giftee relationships from event data
+        self.bot.add_view(SecretSantaReplyView())  # Button uses dynamic lookup
 
 
 def setup(bot):
