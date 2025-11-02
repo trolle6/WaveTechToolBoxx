@@ -1239,9 +1239,13 @@ class VoiceProcessingCog(commands.Cog):
         guild = self.bot.get_guild(guild_id)
 
         if not guild:
+            state.is_processing = False  # Reset flag if guild not found
+            self.logger.warning(f"Guild {guild_id} not found, stopping processor")
             return
 
         self.logger.debug(f"Starting queue processor for {guild.name}")
+        # Note: is_processing already set to True in on_message before task creation
+        # This is redundant but ensures flag is correct even if called from elsewhere
         state.is_processing = True
 
         try:
@@ -1456,10 +1460,14 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.debug(f"Queued message from {message.author.display_name}: '{text[:50]}...' (queue size: {state.queue.qsize()})")
 
             # Start processor if not running
-            if not state.is_processing:
-                state.processor_task = asyncio.create_task(
-                    self._process_queue(message.guild.id)
-                )
+            # Protected by state_lock to prevent race condition where two messages
+            # arrive simultaneously and both try to start the processor
+            async with self._state_lock:
+                if not state.is_processing:
+                    state.is_processing = True  # Set BEFORE creating task
+                    state.processor_task = asyncio.create_task(
+                        self._process_queue(message.guild.id)
+                    )
 
         except asyncio.QueueFull:
             self.logger.warning(f"Queue full for {message.guild.name}")
