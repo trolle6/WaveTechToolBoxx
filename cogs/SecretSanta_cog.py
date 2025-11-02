@@ -19,6 +19,7 @@ COMMANDS (Moderator):
 
 COMMANDS (Participant):
 - /ss ask_giftee [question] - Ask your giftee anonymously (includes instant reply button)
+- /ss reply_santa [reply] - Reply to your Secret Santa
 - /ss submit_gift [description] - Record your gift
 - /ss wishlist add [item] - Add item to your wishlist
 - /ss wishlist remove [number] - Remove item from wishlist
@@ -30,6 +31,7 @@ COMMANDS (Anyone):
 - /ss history - View all years overview
 - /ss history [year] - View specific year details
 - /ss user_history @user - View one user's complete history
+- /ss test_emoji_consistency @user - Test emoji consistency across years
 
 SAFETY FEATURES:
 - ✅ Cryptographic randomness (secrets.SystemRandom)
@@ -352,8 +354,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
                 # DUPLICATE PREVENTION: Add people who are already assigned as receivers
                 # This prevents multiple people from giving to the same receiver
                 for g, r in result.items():
-                    if r not in unacceptable:
-                        unacceptable.append(r)
+                    unacceptable.append(r)
                 
                 # AVAILABLE POOL: Find who this person CAN receive
                 # Excludes: history + cycles + duplicates + self
@@ -668,25 +669,23 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
 
 
 class SecretSantaReplyView(disnake.ui.View):
-    """View with reply button for Secret Santa messages"""
-    def __init__(self, santa_id: int, giftee_id: int, timeout: float = 3600):
-        super().__init__(timeout=timeout)
-        self.santa_id = santa_id
-        self.giftee_id = giftee_id
+    """View with reply button for Secret Santa messages - persists across bot restarts"""
+    def __init__(self):
+        super().__init__(timeout=None)  # Never expires - button stays active forever
     
-    @disnake.ui.button(label="💬 Reply to Santa", style=disnake.ButtonStyle.primary, emoji="🎅")
+    @disnake.ui.button(
+        label="💬 Reply to Santa", 
+        style=disnake.ButtonStyle.primary, 
+        emoji="🎅",
+        custom_id="ss_reply:persist"  # Persistent ID so Discord remembers it after restart
+    )
     async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Handle reply button click"""
+        """Handle reply button click - works even after bot restart"""
         try:
             # Get the cog instance
             cog = inter.bot.get_cog("SecretSantaCog")
             if not cog:
                 await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
-                return
-            
-            # Check if user is the giftee
-            if inter.author.id != self.giftee_id:
-                await inter.response.send_message(content="❌ This message is not for you", ephemeral=True)
                 return
             
             # Check if there's an active event
@@ -695,8 +694,20 @@ class SecretSantaReplyView(disnake.ui.View):
                 await inter.response.send_message(content="❌ No active Secret Santa event", ephemeral=True)
                 return
             
+            # Find who is the user's Santa (dynamic lookup from event data)
+            user_id = inter.author.id
+            santa_id = None
+            for giver, receiver in event.get("assignments", {}).items():
+                if receiver == user_id:
+                    santa_id = int(giver)
+                    break
+            
+            if not santa_id:
+                await inter.response.send_message(content="❌ You don't have a Secret Santa assigned yet", ephemeral=True)
+                return
+            
             # Create a modal for the reply
-            modal = SecretSantaReplyModal(self.santa_id, self.giftee_id)
+            modal = SecretSantaReplyModal(santa_id, user_id)
             await inter.response.send_modal(modal)
             
         except Exception as e:
@@ -917,7 +928,11 @@ class SecretSantaCog(commands.Cog):
         self._backup_task: Optional[asyncio.Task] = None
         self._unloaded = False  # Track if already unloaded
 
-        self.logger.info("Secret Santa cog initialized")
+        # Register persistent reply button view - works even after bot restarts
+        # The view dynamically looks up santa/giftee relationships from event data
+        self.bot.add_view(SecretSantaReplyView())  # Button uses dynamic lookup
+        
+        self.logger.info("Secret Santa cog initialized with persistent reply buttons")
     
     def _create_embed(self, title: str, description: str, color: disnake.Color, **fields) -> disnake.Embed:
         """
@@ -1140,16 +1155,21 @@ class SecretSantaCog(commands.Cog):
             await inter.followup.send(content="❌ An error occurred while sending your reply", ephemeral=True)
 
     def _get_year_emoji_mapping(self, participants: Dict[str, str]) -> Dict[str, str]:
-        """Create consistent emoji mapping for all participants in a year"""
+        """
+        Create consistent emoji mapping for all participants.
+        Each user gets the same emoji across ALL years based on their user ID hash.
+        This makes it easy to track a specific user's participation across history.
+        """
         # Christmas emoji pool for participants
         emoji_pattern = ["🎁", "🎄", "🎅", "⭐", "❄️", "☃️", "🦌", "🔔", "🍪", "🥛", "🕯️", "✨", "🌟", "🎈", "🧸", "🍭", "🎂", "🎪", "🎨", "🎯"]
         
-        # Sort participants by ID for consistent assignment
-        sorted_participants = sorted(participants.keys())
-        
         emoji_mapping = {}
-        for i, participant_id in enumerate(sorted_participants):
-            emoji_mapping[participant_id] = emoji_pattern[i % len(emoji_pattern)]
+        for participant_id in participants.keys():
+            # Use hash of user ID to get consistent emoji across all years
+            # Same user = same emoji, always!
+            user_hash = hash(int(participant_id) if participant_id.isdigit() else participant_id)
+            emoji_index = user_hash % len(emoji_pattern)
+            emoji_mapping[participant_id] = emoji_pattern[emoji_index]
         
         return emoji_mapping
 
@@ -1557,7 +1577,8 @@ class SecretSantaCog(commands.Cog):
             
             # Other helpful commands
             msg += f"**OTHER COMMANDS:**\n"
-            msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions (includes instant reply button)\n"
+            msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions anonymously\n"
+            msg += f"• `/ss reply_santa` - Reply if they message you\n"
             msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
             
             msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1573,7 +1594,7 @@ class SecretSantaCog(commands.Cog):
             msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Footer
-            msg += f"*Messages are AI-rewritten for anonymity*\n"
+            msg += f"*Optional: Use `/ss ask_giftee use_ai_rewrite:True` for extra anonymity*\n"
             msg += f"*Don't reveal your identity during the event!*"
             
             dm_tasks.append(self._send_dm(giver, msg))
@@ -1750,11 +1771,8 @@ class SecretSantaCog(commands.Cog):
         question_msg += "Click the button below to reply instantly!\n\n"
         question_msg += "*Your Secret Santa is excited to learn more about you!*"
 
-        # Create reply view (santa_id, giftee_id)
-        reply_view = SecretSantaReplyView(int(user_id), receiver_id)
-        
-        # Debug: Log the view creation
-        self.logger.info(f"Created reply view for santa {user_id} -> giftee {receiver_id}")
+        # Create reply view - it will dynamically look up the santa/giftee relationship
+        reply_view = SecretSantaReplyView()
         
         # Send question with reply button
         success = await self._send_dm(receiver_id, question_msg, reply_view)
@@ -1796,6 +1814,88 @@ class SecretSantaCog(commands.Cog):
             embed = disnake.Embed(
                 title="❌ Delivery Failed",
                 description="Couldn't send your question. Your giftee may have DMs disabled.",
+                color=disnake.Color.red()
+            )
+            await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (sent anonymously)")
+    @participant_check()
+    async def ss_reply(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        reply: str = commands.Param(description="Your reply (sent anonymously)", max_length=500)
+    ):
+        """Reply to Santa anonymously"""
+        await inter.response.defer(ephemeral=True)
+
+        event = self._get_current_event()
+        user_id = str(inter.author.id)
+
+        # Find who is the user's Santa
+        santa_id = None
+        for giver, receiver in event.get("assignments", {}).items():
+            if receiver == int(user_id):
+                santa_id = int(giver)
+                break
+
+        if not santa_id:
+            embed = self._create_embed(
+                title="❌ No Secret Santa Found",
+                description="No one has asked you a question yet, or you haven't been assigned a Secret Santa!",
+                color=disnake.Color.red()
+            )
+            embed.set_footer(text="💡 Wait for your Secret Santa to ask you something first!")
+            await inter.edit_original_response(embed=embed)
+            return
+
+        # No AI rewriting needed - giftee doesn't know who their Santa is
+        # The anonymity is already protected by the assignment system
+        rewritten_reply = reply
+
+        # Create beautiful reply message
+        reply_msg = f"🎁✨ **SECRET SANTA REPLY** ✨🎁\n\n"
+        reply_msg += f"📨 **Anonymous reply from your giftee:**\n\n"
+        reply_msg += f"*\"{rewritten_reply}\"*\n\n"
+        reply_msg += "─────────────────────\n"
+        reply_msg += "🎯 **Keep the conversation going:**\n"
+        reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
+        reply_msg += "✨ *Your giftee is happy to help you find the perfect gift!*"
+
+        # Send reply
+        success = await self._send_dm(santa_id, reply_msg)
+
+        if success:
+            # Save communication
+            async with self._lock:
+                comms = event.setdefault("communications", {})
+                thread = comms.setdefault(str(santa_id), {"giftee_id": user_id, "thread": []})
+                thread["thread"].append({
+                    "type": "reply",
+                    "message": reply,
+                    "rewritten": rewritten_reply,
+                    "timestamp": time.time()
+                })
+                self._save()
+
+            # Success embed
+            embed = disnake.Embed(
+                title="✅ Reply Sent!",
+                description="Your reply has been delivered to your Secret Santa!",
+                color=disnake.Color.green()
+            )
+            embed.add_field(
+                name="📝 Original", 
+                value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
+                inline=False
+            )
+            # No AI rewriting for giftee replies - anonymity already protected
+            embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
+            
+            await inter.edit_original_response(embed=embed)
+        else:
+            embed = disnake.Embed(
+                title="❌ Delivery Failed",
+                description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
                 color=disnake.Color.red()
             )
             await inter.edit_original_response(embed=embed)
@@ -2511,6 +2611,82 @@ class SecretSantaCog(commands.Cog):
         
         embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
         embed.set_footer(text=f"Requested by {inter.author.display_name}")
+        
+        await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="test_emoji_consistency", description="🎨 Test emoji consistency across years for a user")
+    async def ss_test_emoji_consistency(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        user: disnake.User = commands.Param(description="User to check emoji consistency for")
+    ):
+        """Test that a user gets the same emoji across all years"""
+        await inter.response.defer(ephemeral=True)
+        
+        user_id = str(user.id)
+        
+        # Load all archives
+        archives = load_all_archives(logger=self.logger)
+        
+        if not archives:
+            await inter.edit_original_response(content="❌ No archived events found")
+            return
+        
+        # Check emoji for this user across all years
+        emoji_results = []
+        
+        for year in sorted(archives.keys()):
+            event_data = archives[year].get("event", {})
+            participants = event_data.get("participants", {})
+            
+            # Check if user participated this year
+            if user_id in participants:
+                # Generate emoji mapping for this year
+                emoji_mapping = self._get_year_emoji_mapping(participants)
+                user_emoji = emoji_mapping.get(user_id, "❓")
+                user_name = participants[user_id]
+                
+                emoji_results.append(f"**{year}**: {user_emoji} {user_name}")
+        
+        if not emoji_results:
+            await inter.edit_original_response(
+                content=f"❌ {user.mention} has never participated in Secret Santa"
+            )
+            return
+        
+        # Build response
+        embed = disnake.Embed(
+            title=f"🎨 Emoji Consistency Test",
+            description=f"Testing emoji assignment for {user.mention} across all years",
+            color=disnake.Color.blue()
+        )
+        
+        embed.add_field(
+            name="📅 Participation History",
+            value="\n".join(emoji_results),
+            inline=False
+        )
+        
+        # Check if all emojis are the same (they should be!)
+        emojis = [line.split()[1] for line in emoji_results]
+        all_same = len(set(emojis)) == 1
+        
+        if all_same:
+            embed.add_field(
+                name="✅ Consistency Check",
+                value=f"**PASS**: {user.display_name} has the same emoji ({emojis[0]}) across all {len(emoji_results)} years!",
+                inline=False
+            )
+            embed.color = disnake.Color.green()
+        else:
+            embed.add_field(
+                name="⚠️ Consistency Check",
+                value=f"**INCONSISTENT**: Found different emojis: {', '.join(set(emojis))}",
+                inline=False
+            )
+            embed.color = disnake.Color.red()
+        
+        embed.set_footer(text="Each user should have the same emoji across all years based on their user ID")
         
         await inter.edit_original_response(embed=embed)
 
