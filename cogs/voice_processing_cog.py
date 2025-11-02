@@ -174,6 +174,7 @@ class VoiceProcessingCog(commands.Cog):
         # Track users who have had name announced in current VC session
         # Format: {guild_id: {user_id, user_id, ...}}
         self._announced_users: Dict[int, set] = {}
+        self._announcement_lock = asyncio.Lock()  # Prevent race conditions on name announcements
 
         # TTS configuration
         self.tts_url = "https://api.openai.com/v1/audio/speech"
@@ -688,25 +689,27 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.debug(f"Voice assignment cleanup: freed {len(users_to_remove)} voice(s)")
                 
                 # Also clean up announced_users tracking for users not in voice
+                # Protected by lock to prevent race conditions during cleanup
                 total_cleared = 0
-                for guild_id, announced_set in list(self._announced_users.items()):
-                    guild = self.bot.get_guild(guild_id)
-                    if not guild:
-                        # Guild not found, clear entire set
-                        self._announced_users.pop(guild_id, None)
-                        continue
-                    
-                    # Find users who are no longer in ANY voice channel in this guild
-                    users_to_unannounce = []
-                    for announced_user_id in list(announced_set):
-                        member = guild.get_member(announced_user_id)
-                        if not member or not member.voice or not member.voice.channel:
-                            users_to_unannounce.append(announced_user_id)
-                    
-                    # Remove them from announced set
-                    for user_id_to_remove in users_to_unannounce:
-                        announced_set.discard(user_id_to_remove)
-                        total_cleared += 1
+                async with self._announcement_lock:
+                    for guild_id, announced_set in list(self._announced_users.items()):
+                        guild = self.bot.get_guild(guild_id)
+                        if not guild:
+                            # Guild not found, clear entire set
+                            self._announced_users.pop(guild_id, None)
+                            continue
+                        
+                        # Find users who are no longer in ANY voice channel in this guild
+                        users_to_unannounce = []
+                        for announced_user_id in list(announced_set):
+                            member = guild.get_member(announced_user_id)
+                            if not member or not member.voice or not member.voice.channel:
+                                users_to_unannounce.append(announced_user_id)
+                        
+                        # Remove them from announced set
+                        for user_id_to_remove in users_to_unannounce:
+                            announced_set.discard(user_id_to_remove)
+                            total_cleared += 1
                 
                 if total_cleared > 0:
                     self.logger.debug(f"Cleanup: Cleared announcement status for {total_cleared} user(s) who left VC")
@@ -1397,14 +1400,23 @@ class VoiceProcessingCog(commands.Cog):
         guild_id = message.guild.id
         user_id = message.author.id
         
-        # Initialize announced users tracking for this guild if needed
-        if guild_id not in self._announced_users:
-            self._announced_users[guild_id] = set()
-            self.logger.debug(f"Initialized announced_users set for guild {guild_id}")
+        # CRITICAL SECTION: Protected by lock to prevent race conditions
+        # If two messages arrive at the exact same microsecond, only one will announce the name
+        async with self._announcement_lock:
+            # Initialize announced users tracking for this guild if needed
+            if guild_id not in self._announced_users:
+                self._announced_users[guild_id] = set()
+                self.logger.debug(f"Initialized announced_users set for guild {guild_id}")
+            
+            # Check if this is user's first message in current VC session
+            is_first_message = user_id not in self._announced_users[guild_id]
+            
+            if is_first_message:
+                # Mark user as announced IMMEDIATELY (before AI processing)
+                # This ensures no duplicate announcements even if messages arrive simultaneously
+                self._announced_users[guild_id].add(user_id)
         
-        # Check if this is user's first message in current VC session
-        is_first_message = user_id not in self._announced_users[guild_id]
-        
+        # AI processing and text modification happens OUTSIDE the lock for better performance
         if is_first_message:
             # Get user's display name and make it pronounceable
             display_name = message.author.display_name
@@ -1417,9 +1429,6 @@ class VoiceProcessingCog(commands.Cog):
             
             # Prepend name announcement
             text = f"{pronounceable_name} says: {text}"
-            
-            # Mark user as announced for this VC session
-            self._announced_users[guild_id].add(user_id)
             
             self.logger.info(f"✅ Announcing {display_name} (user {user_id}) - first message in session")
         else:
@@ -1515,10 +1524,12 @@ class VoiceProcessingCog(commands.Cog):
                 return
 
             # User left VC - clear announcement status so they get re-announced
+            # Protected by lock to prevent race conditions
             if before.channel and not after.channel:
-                if member.guild.id in self._announced_users:
-                    self._announced_users[member.guild.id].discard(member.id)
-                    self.logger.debug(f"Cleared announcement for {member.display_name} (left VC)")
+                async with self._announcement_lock:
+                    if member.guild.id in self._announced_users:
+                        self._announced_users[member.guild.id].discard(member.id)
+                        self.logger.debug(f"Cleared announcement for {member.display_name} (left VC)")
                 
                 # Check if we should disconnect from empty channel
                 await asyncio.sleep(5)  # Let voice state settle
