@@ -12,6 +12,7 @@ __pycache__/
 # Logs
 *.log
 bot.log*
+debug.log*
 
 # IDE files
 .vscode/

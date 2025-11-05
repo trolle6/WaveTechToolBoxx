@@ -64,6 +64,8 @@ class Config:
     _optional = {
         "DEBUG_MODE": (bool, False),
         "LOG_LEVEL": (str, "INFO"),
+        "ENABLE_DEBUG_LOG": (bool, False),  # Enable persistent debug logging
+        "DEBUG_LOG_DAYS": (int, 30),  # Days of debug logs to keep
         "MAX_TTS_CACHE": (int, 50),
         "TTS_TIMEOUT": (int, 15),
         "SKIP_API_VALIDATION": (bool, False),
@@ -291,12 +293,37 @@ def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler with rotation
+    # File handler with rotation (standard logs)
     fh = logging.handlers.RotatingFileHandler(
         "bot.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )
     fh.setFormatter(fmt)
     logger.addHandler(fh)
+
+    # Debug file handler (persistent debug logging)
+    # This creates a separate debug.log with time-based rotation
+    # Keeps detailed logs for troubleshooting that persist across sessions
+    if config.ENABLE_DEBUG_LOG:
+        debug_fmt = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        
+        # TimedRotatingFileHandler rotates at midnight, keeps N days of logs
+        debug_fh = logging.handlers.TimedRotatingFileHandler(
+            "debug.log",
+            when="midnight",
+            interval=1,
+            backupCount=config.DEBUG_LOG_DAYS,
+            encoding="utf-8"
+        )
+        debug_fh.setLevel(logging.DEBUG)  # Capture everything
+        debug_fh.setFormatter(debug_fmt)
+        logger.addHandler(debug_fh)
+        
+        # Also set logger to DEBUG if debug logging is enabled
+        logger.setLevel(logging.DEBUG)
+        logger.info(f"Debug logging enabled - keeping {config.DEBUG_LOG_DAYS} days of logs")
 
     # Console handler
     ch = logging.StreamHandler(sys.stdout)
