@@ -274,7 +274,8 @@ class DiscordLogHandler(logging.Handler):
 # ============ SETUP ============
 def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
     logger = logging.getLogger("bot")
-    logger.setLevel(config.LOG_LEVEL)
+    # When DEBUG_MODE is enabled, force logger level to DEBUG to capture everything
+    logger.setLevel(logging.DEBUG if config.DEBUG_MODE else config.LOG_LEVEL)
 
     # Prevent duplicate handlers
     if logger.handlers:
@@ -302,6 +303,24 @@ def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
+
+    # Debug log handler (for test environments) - captures ALL logs including DEBUG
+    # Only enabled when DEBUG_MODE is True
+    if config.DEBUG_MODE:
+        # Detailed format with file, line, and function name for debugging
+        debug_fmt = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d:%(funcName)s] - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        
+        # Large rotation limit to keep extensive debug history (50MB per file, 10 backups = 550MB total)
+        debug_fh = logging.handlers.RotatingFileHandler(
+            "debug.log", maxBytes=50_000_000, backupCount=10, encoding="utf-8"
+        )
+        debug_fh.setFormatter(debug_fmt)
+        debug_fh.setLevel(logging.DEBUG)  # Capture everything including DEBUG level
+        logger.addHandler(debug_fh)
+        logger.info("Debug logging enabled - writing to debug.log")
 
     # Discord handler (will be connected to bot later)
     discord_handler = DiscordLogHandler(log_channel_id=config.DISCORD_LOG_CHANNEL_ID)
