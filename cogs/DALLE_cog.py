@@ -108,6 +108,7 @@ class DALLECog(commands.Cog):
             "cache_hits": 0,
             "total_time": 0.0
         }
+        self._stats_lock = asyncio.Lock()
 
         self._shutdown = asyncio.Event()
         self._unloaded = False  # Track if already unloaded
@@ -211,7 +212,8 @@ class DALLECog(commands.Cog):
             "style": "vivid"
         }
 
-        self.stats["total_requests"] += 1
+        async with self._stats_lock:
+            self.stats["total_requests"] += 1
 
         # Retry with exponential backoff
         for attempt in range(self.max_retries):
@@ -226,7 +228,8 @@ class DALLECog(commands.Cog):
 
                     if resp.status == 200:
                         result = await resp.json()
-                        self.stats["successful"] += 1
+                        async with self._stats_lock:
+                            self.stats["successful"] += 1
                         return {"success": True, "data": result}
 
                     elif resp.status == 429:
@@ -273,7 +276,8 @@ class DALLECog(commands.Cog):
                     continue
                 return {"success": False, "error": f"Unexpected error: {str(e)[:50]}"}
 
-        self.stats["failed"] += 1
+        async with self._stats_lock:
+            self.stats["failed"] += 1
         return {"success": False, "error": "Max retries exceeded"}
 
     async def _process_queue(self):
@@ -324,7 +328,8 @@ class DALLECog(commands.Cog):
                     start = time.time()
                     result = await self._generate_image(job.prompt, job.size, job.quality)
                     elapsed = time.time() - start
-                    self.stats["total_time"] += elapsed
+                    async with self._stats_lock:
+                        self.stats["total_time"] += elapsed
 
                     # Cache if successful
                     if result.get("success") and result.get("data"):
@@ -478,7 +483,8 @@ class DALLECog(commands.Cog):
         cached = await self.cache.get(cache_key)
 
         if cached:
-            self.stats["cache_hits"] += 1
+            async with self._stats_lock:
+                self.stats["cache_hits"] += 1
 
             embed = disnake.Embed(
                 title="🎨 Image (Cached)",

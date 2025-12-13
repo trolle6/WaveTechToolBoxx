@@ -73,6 +73,7 @@ class Config:
         "VOICE_TIMEOUT": (int, 10),
         "AUTO_DISCONNECT_TIMEOUT": (int, 300),
         "TTS_ROLE_ID": (int, None),  # Role required for TTS (optional)
+        "BOT_OWNER_USERNAME": (str, "trolle6"),  # Bot owner username for owner-only commands
     }
 
     def __init__(self):
@@ -530,7 +531,8 @@ def load_cogs() -> int:
         "cogs.voice_processing_cog",
         "cogs.DALLE_cog",
         "cogs.SecretSanta_cog",
-        "cogs.CustomEvents_cog"  # New modular event system!
+        "cogs.CustomEvents_cog",  # New modular event system!
+        "cogs.DistributeZip_cog"  # Zip file distribution (e.g., Minecraft texture packs)
     ]
     loaded = 0
     for cog in cogs:

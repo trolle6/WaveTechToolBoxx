@@ -169,6 +169,7 @@ class VoiceProcessingCog(commands.Cog):
         
         # Message deduplication
         self._processed_messages = set()
+        self._processed_messages_lock = asyncio.Lock()
         self._message_cleanup_task = None
         
         # Track users who have had name announced in current VC session
@@ -186,6 +187,7 @@ class VoiceProcessingCog(commands.Cog):
         
         # In-memory voice assignments (session-based, not persisted)
         self._voice_assignments = {}  # user_id -> voice_name (cleared when they leave VC)
+        self._voice_lock = asyncio.Lock()  # Protect voice assignments from race conditions
         
         # TTS role requirement (optional)
         self.tts_role_id = getattr(bot.config, 'TTS_ROLE_ID', None)
@@ -379,18 +381,20 @@ class VoiceProcessingCog(commands.Cog):
                 return self.default_voice
         
         # If user already has a voice assigned (in this session), return it
-        if user_key in self._voice_assignments:
-            assigned = self._voice_assignments[user_key]
-            # Validate it's still a valid voice
-            if assigned in self.available_voices:
-                return assigned
+        async with self._voice_lock:
+            if user_key in self._voice_assignments:
+                assigned = self._voice_assignments[user_key]
+                # Validate it's still a valid voice
+                if assigned in self.available_voices:
+                    return assigned
         
         # Detect pronouns and assign appropriate voice
         detected_pronouns = await self._detect_pronouns_from_profile(member)
         new_voice = self._get_voice_for_pronouns(detected_pronouns)
         
         # Store in memory (NOT saved to file)
-        self._voice_assignments[user_key] = new_voice
+        async with self._voice_lock:
+            self._voice_assignments[user_key] = new_voice
         
         pronoun_info = f" (pronouns: {detected_pronouns})" if detected_pronouns else " (no pronouns detected, using neutral)"
         self.logger.info(f"Assigned voice '{new_voice}' to user {member.id} ({member.display_name}){pronoun_info}")
@@ -580,10 +584,11 @@ class VoiceProcessingCog(commands.Cog):
                 await asyncio.sleep(300)  # Every 5 minutes
                 
                 # Keep only recent message IDs (last 1000)
-                if len(self._processed_messages) > 1000:
-                    # Convert to list, sort by timestamp, keep newest 500
-                    message_list = list(self._processed_messages)
-                    self._processed_messages = set(message_list[-500:])
+                async with self._processed_messages_lock:
+                    if len(self._processed_messages) > 1000:
+                        # Convert to list, sort by timestamp, keep newest 500
+                        message_list = list(self._processed_messages)
+                        self._processed_messages = set(message_list[-500:])
                     
         except asyncio.CancelledError:
             pass
@@ -659,7 +664,11 @@ class VoiceProcessingCog(commands.Cog):
                 # Check all voice assignments and remove ones for users not in any voice channel
                 users_to_remove = []
                 
-                for user_id_str in list(self._voice_assignments.keys()):
+                # Get snapshot of current assignments (thread-safe)
+                async with self._voice_lock:
+                    user_id_strs = list(self._voice_assignments.keys())
+                
+                for user_id_str in user_id_strs:
                     try:
                         user_id = int(user_id_str)
                         user_in_voice = False
@@ -681,10 +690,11 @@ class VoiceProcessingCog(commands.Cog):
                 
                 # Remove assignments (in-memory only, no file save needed)
                 if users_to_remove:
-                    for user_id_str in users_to_remove:
-                        old_voice = self._voice_assignments.pop(user_id_str, None)
-                        if old_voice:
-                            self.logger.debug(f"Cleanup: Freed voice '{old_voice}' from user {user_id_str} (left VC)")
+                    async with self._voice_lock:
+                        for user_id_str in users_to_remove:
+                            old_voice = self._voice_assignments.pop(user_id_str, None)
+                            if old_voice:
+                                self.logger.debug(f"Cleanup: Freed voice '{old_voice}' from user {user_id_str} (left VC)")
                     
                     self.logger.debug(f"Voice assignment cleanup: freed {len(users_to_remove)} voice(s)")
                 
@@ -1340,7 +1350,7 @@ class VoiceProcessingCog(commands.Cog):
             # Remove state
             await self._remove_state(guild_id)
 
-    def _should_process_message(self, message: disnake.Message) -> bool:
+    async def _should_process_message(self, message: disnake.Message) -> bool:
         """
         Quick validation of whether message should be processed for TTS.
         Extracted for clarity and to reduce nesting in on_message.
@@ -1357,9 +1367,10 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check for duplicate message processing
         message_key = f"{message.id}:{message.author.id}:{message.content[:50]}"
-        if message_key in self._processed_messages:
-            return False
-        self._processed_messages.add(message_key)
+        async with self._processed_messages_lock:
+            if message_key in self._processed_messages:
+                return False
+            self._processed_messages.add(message_key)
 
         # Check channel whitelist
         if self.allowed_channel and message.channel.id != self.allowed_channel:
@@ -1383,7 +1394,7 @@ class VoiceProcessingCog(commands.Cog):
         """Handle incoming messages for TTS"""
         
         # Quick validation checks
-        if not self._should_process_message(message):
+        if not await self._should_process_message(message):
             return
 
         # Check rate limit

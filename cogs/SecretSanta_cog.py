@@ -69,6 +69,8 @@ from typing import Any, Dict, List, Optional
 import disnake
 from disnake.ext import commands
 
+from .owner_utils import owner_check, get_owner_mention
+
 # Paths
 # The cog file is at: PROJECT_ROOT/cogs/SecretSanta_cog.py
 # We want archive at: PROJECT_ROOT/cogs/archive/
@@ -695,7 +697,7 @@ class SecretSantaReplyView(disnake.ui.View):
                 return
             
             # Find who is the user's Santa (dynamic lookup from event data)
-            user_id = inter.author.id
+            user_id = str(inter.author.id)  # Convert to string to match dict keys
             santa_id = None
             for giver, receiver in event.get("assignments", {}).items():
                 if receiver == user_id:
@@ -706,8 +708,8 @@ class SecretSantaReplyView(disnake.ui.View):
                 await inter.response.send_message(content="❌ You don't have a Secret Santa assigned yet", ephemeral=True)
                 return
             
-            # Create a modal for the reply
-            modal = SecretSantaReplyModal(santa_id, user_id)
+            # Create a modal for the reply (modal needs int IDs for DM sending)
+            modal = SecretSantaReplyModal(santa_id, int(user_id))
             await inter.response.send_modal(modal)
             
         except Exception as e:
@@ -726,7 +728,7 @@ class SecretSantaReplyModal(disnake.ui.Modal):
             custom_id="reply_text",
             placeholder="Type your reply here...",
             style=disnake.TextInputStyle.paragraph,
-            max_length=500,
+            max_length=2000,
             required=True
         )
         
@@ -1296,7 +1298,7 @@ class SecretSantaCog(commands.Cog):
         pass
 
     @ss_root.sub_command(name="start", description="Start a Secret Santa event")
-    @mod_check()
+    @owner_check()
     async def ss_start(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -1437,7 +1439,7 @@ class SecretSantaCog(commands.Cog):
             )
 
     @ss_root.sub_command(name="shuffle", description="Assign Secret Santas")
-    @mod_check()
+    @owner_check()
     async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
         """Make assignments with progressive year-based fallback"""
         await inter.response.defer(ephemeral=True)
@@ -1726,18 +1728,26 @@ class SecretSantaCog(commands.Cog):
         await inter.edit_original_response(embed=embed)
 
     @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question (sent anonymously)")
-    @participant_check()
     async def ss_ask(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        question: str = commands.Param(description="Your question (sent as-is for anonymity)", max_length=500),
+        question: str = commands.Param(description="Your question (sent as-is for anonymity)", max_length=2000),
         use_ai_rewrite: bool = commands.Param(default=False, description="Use AI to rewrite for extra anonymity")
     ):
         """Ask giftee anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
@@ -1816,17 +1826,25 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(embed=embed)
 
     @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (sent anonymously)")
-    @participant_check()
     async def ss_reply(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        reply: str = commands.Param(description="Your reply (sent anonymously)", max_length=500)
+        reply: str = commands.Param(description="Your reply (sent anonymously)", max_length=2000)
     ):
         """Reply to Santa anonymously"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         # Find who is the user's Santa
         santa_id = None
@@ -1899,17 +1917,25 @@ class SecretSantaCog(commands.Cog):
 
 
     @ss_root.sub_command(name="submit_gift", description="Submit your gift for records")
-    @participant_check()
     async def ss_submit(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        gift_description: str = commands.Param(description="Describe what you gave", max_length=500)
+        gift_description: str = commands.Param(description="Describe what you gave", max_length=2000)
     ):
         """Submit gift description"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):
@@ -1924,7 +1950,11 @@ class SecretSantaCog(commands.Cog):
         receiver_id = event["assignments"][user_id]
         receiver_name = event["participants"].get(str(receiver_id), f"User {receiver_id}")
 
-        # Save gift
+        # Check if this is updating an existing submission
+        existing_submission = event.get("gift_submissions", {}).get(user_id)
+        is_update = existing_submission is not None
+
+        # Save gift (overwrites if already exists - simple approach!)
         async with self._lock:
             event.setdefault("gift_submissions", {})[user_id] = {
                 "gift": gift_description,
@@ -1936,9 +1966,12 @@ class SecretSantaCog(commands.Cog):
             self._save()
 
         # Create beautiful success embed
+        title = "🎁 Gift Updated Successfully!" if is_update else "🎁 Gift Submitted Successfully!"
+        description = "Your gift submission has been updated in the Secret Santa archives!" if is_update else "Your gift has been recorded in the Secret Santa archives!"
+        
         embed = disnake.Embed(
-            title="🎁 Gift Submitted Successfully!",
-            description="Your gift has been recorded in the Secret Santa archives!",
+            title=title,
+            description=description,
             color=disnake.Color.green()
         )
         embed.add_field(
@@ -1972,17 +2005,25 @@ class SecretSantaCog(commands.Cog):
         pass
 
     @ss_wishlist.sub_command(name="add", description="Add item to your wishlist")
-    @participant_check()
     async def wishlist_add(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        item: str = commands.Param(description="Item to add to wishlist", max_length=200)
+        item: str = commands.Param(description="Item to add to wishlist", max_length=500)
     ):
         """Add item to wishlist"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         # Get or create user's wishlist
         async with self._lock:
@@ -2018,7 +2059,6 @@ class SecretSantaCog(commands.Cog):
         await inter.edit_original_response(embed=embed)
 
     @ss_wishlist.sub_command(name="remove", description="Remove item from your wishlist")
-    @participant_check()
     async def wishlist_remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -2027,8 +2067,17 @@ class SecretSantaCog(commands.Cog):
         """Remove item from wishlist"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         wishlists = event.get("wishlists", {})
         user_wishlist = wishlists.get(user_id, [])
@@ -2065,13 +2114,21 @@ class SecretSantaCog(commands.Cog):
         await inter.edit_original_response(embed=embed)
 
     @ss_wishlist.sub_command(name="view", description="View your wishlist")
-    @participant_check()
     async def wishlist_view(self, inter: disnake.ApplicationCommandInteraction):
         """View your wishlist"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         wishlists = event.get("wishlists", {})
         user_wishlist = wishlists.get(user_id, [])
@@ -2096,13 +2153,21 @@ class SecretSantaCog(commands.Cog):
         await inter.edit_original_response(embed=embed)
 
     @ss_wishlist.sub_command(name="clear", description="Clear your entire wishlist")
-    @participant_check()
     async def wishlist_clear(self, inter: disnake.ApplicationCommandInteraction):
         """Clear wishlist"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         wishlists = event.get("wishlists", {})
         
@@ -2118,13 +2183,21 @@ class SecretSantaCog(commands.Cog):
         await inter.edit_original_response(content="✅ Wishlist cleared!")
 
     @ss_root.sub_command(name="view_giftee_wishlist", description="View your giftee's wishlist")
-    @participant_check()
     async def ss_view_giftee_wishlist(self, inter: disnake.ApplicationCommandInteraction):
         """View giftee's wishlist"""
         await inter.response.defer(ephemeral=True)
 
+        # Manual participant check (after defer to prevent timeout)
         event = self._get_current_event()
+        if not event or not event.get("active"):
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return
+        
         user_id = str(inter.author.id)
+        
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return
 
         # Check if user has assignment
         if user_id not in event.get("assignments", {}):

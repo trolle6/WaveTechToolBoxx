@@ -55,34 +55,37 @@ class RateLimiter:
     PERFORMANCE:
     - Uses deque for O(1) append/popleft (instead of list filtering O(n))
     - Only removes expired tokens when checking (lazy cleanup)
-    - Synchronous (no unnecessary async overhead)
+    - Thread-safe with asyncio.Lock for concurrent async access
     """
 
     def __init__(self, limit: int, window: int):
         self.limit = limit
         self.window = window
         self.tokens = {}  # key -> deque of timestamps
+        self._lock = asyncio.Lock()
 
     async def check(self, key: str) -> bool:
-        """Check if request is allowed (async for API compatibility with existing code)"""
-        now = time.time()
-        if key not in self.tokens:
-            self.tokens[key] = deque()
+        """Check if request is allowed (thread-safe)"""
+        async with self._lock:
+            now = time.time()
+            if key not in self.tokens:
+                self.tokens[key] = deque()
 
-        # Remove expired tokens from front (they're oldest)
-        token_deque = self.tokens[key]
-        while token_deque and now - token_deque[0] >= self.window:
-            token_deque.popleft()
+            # Remove expired tokens from front (they're oldest)
+            token_deque = self.tokens[key]
+            while token_deque and now - token_deque[0] >= self.window:
+                token_deque.popleft()
 
-        # Check if we can add a new token
-        if len(token_deque) < self.limit:
-            token_deque.append(now)
-            return True
-        return False
+            # Check if we can add a new token
+            if len(token_deque) < self.limit:
+                token_deque.append(now)
+                return True
+            return False
 
-    def reset(self, key: str):
-        """Reset rate limit for a key"""
-        self.tokens.pop(key, None)
+    async def reset(self, key: str):
+        """Reset rate limit for a key (thread-safe)"""
+        async with self._lock:
+            self.tokens.pop(key, None)
 
 
 class CircuitBreaker:
@@ -95,9 +98,9 @@ class CircuitBreaker:
     - HALF_OPEN: Testing recovery, limited requests allowed
     
     PERFORMANCE:
-    - All methods are synchronous (no async overhead)
+    - Thread-safe with asyncio.Lock for concurrent async access
     - State transitions are immediate (no I/O)
-    - Async wrappers provided for API compatibility where needed
+    - Async methods for consistent API
     """
 
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60, success_threshold: int = 2):
@@ -108,45 +111,50 @@ class CircuitBreaker:
         self.last_failure = None
         self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
         self.success_count = 0
+        self._lock = asyncio.Lock()
 
     async def record_success(self):
-        """Record a successful request (async for API compatibility)"""
-        if self.state == "HALF_OPEN":
-            self.success_count += 1
-            if self.success_count >= self.success_threshold:
-                self.state = "CLOSED"
-                self.failures = 0
-                self.success_count = 0
-        else:
-            self.failures = max(0, self.failures - 1)
+        """Record a successful request (thread-safe)"""
+        async with self._lock:
+            if self.state == "HALF_OPEN":
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    self.state = "CLOSED"
+                    self.failures = 0
+                    self.success_count = 0
+            else:
+                self.failures = max(0, self.failures - 1)
 
     async def record_failure(self):
-        """Record a failed request (async for API compatibility)"""
-        self.failures += 1
-        self.last_failure = time.time()
-        if self.failures >= self.failure_threshold:
-            self.state = "OPEN"
-            logger.warning(f"Circuit breaker opened after {self.failures} failures")
+        """Record a failed request (thread-safe)"""
+        async with self._lock:
+            self.failures += 1
+            self.last_failure = time.time()
+            if self.failures >= self.failure_threshold:
+                self.state = "OPEN"
+                logger.warning(f"Circuit breaker opened after {self.failures} failures")
 
     async def can_attempt(self) -> bool:
-        """Check if request can be attempted (async for API compatibility)"""
-        if self.state == "CLOSED":
-            return True
-        if self.state == "OPEN":
-            if self.last_failure and time.time() - self.last_failure > self.recovery_timeout:
-                self.state = "HALF_OPEN"
-                self.success_count = 0
+        """Check if request can be attempted (thread-safe)"""
+        async with self._lock:
+            if self.state == "CLOSED":
                 return True
-            return False
-        return True  # HALF_OPEN
+            if self.state == "OPEN":
+                if self.last_failure and time.time() - self.last_failure > self.recovery_timeout:
+                    self.state = "HALF_OPEN"
+                    self.success_count = 0
+                    return True
+                return False
+            return True  # HALF_OPEN
 
     async def get_metrics(self) -> dict:
-        """Get circuit breaker metrics (async for API compatibility)"""
-        return {
-            "state": self.state,
-            "current_failures": self.failures,
-            "uptime_percentage": 100.0 if self.state == "CLOSED" else 0.0
-        }
+        """Get circuit breaker metrics (thread-safe)"""
+        async with self._lock:
+            return {
+                "state": self.state,
+                "current_failures": self.failures,
+                "uptime_percentage": 100.0 if self.state == "CLOSED" else 0.0
+            }
 
 
 class LRUCache(Generic[T]):
@@ -162,7 +170,7 @@ class LRUCache(Generic[T]):
     PERFORMANCE:
     - Lazy cleanup (only removes expired items when accessed)
     - Periodic cleanup via cleanup() method
-    - Minimal overhead (async wrappers for API compatibility only)
+    - Thread-safe with asyncio.Lock for concurrent async access
     """
 
     def __init__(self, max_size: int = 100, ttl: int = 3600):
@@ -172,62 +180,67 @@ class LRUCache(Generic[T]):
         self._access_times = {}  # key -> last_access_timestamp
         self._hits = 0
         self._misses = 0
+        self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Optional[T]:
-        """Get value from cache (async for API compatibility)"""
-        if key in self._cache:
-            value, timestamp = self._cache[key]
-            # Check TTL
-            if time.time() - timestamp < self.ttl:
-                self._access_times[key] = time.time()
-                self._hits += 1
-                return value
-            else:
-                # Expired - remove immediately (lazy cleanup)
-                del self._cache[key]
-                del self._access_times[key]
+        """Get value from cache (thread-safe)"""
+        async with self._lock:
+            if key in self._cache:
+                value, timestamp = self._cache[key]
+                # Check TTL
+                if time.time() - timestamp < self.ttl:
+                    self._access_times[key] = time.time()
+                    self._hits += 1
+                    return value
+                else:
+                    # Expired - remove immediately (lazy cleanup)
+                    del self._cache[key]
+                    del self._access_times[key]
 
-        self._misses += 1
-        return None
+            self._misses += 1
+            return None
 
     async def set(self, key: str, value: T):
-        """Set value in cache (async for API compatibility)"""
-        # Evict least recently used if at capacity
-        if len(self._cache) >= self.max_size and key not in self._cache:
-            # Find oldest accessed key (LRU eviction)
-            oldest_key = min(self._access_times, key=self._access_times.get)
-            del self._cache[oldest_key]
-            del self._access_times[oldest_key]
+        """Set value in cache (thread-safe)"""
+        async with self._lock:
+            # Evict least recently used if at capacity
+            if len(self._cache) >= self.max_size and key not in self._cache:
+                # Find oldest accessed key (LRU eviction)
+                oldest_key = min(self._access_times, key=self._access_times.get)
+                del self._cache[oldest_key]
+                del self._access_times[oldest_key]
 
-        # Store with current timestamp
-        self._cache[key] = (value, time.time())
-        self._access_times[key] = time.time()
+            # Store with current timestamp
+            self._cache[key] = (value, time.time())
+            self._access_times[key] = time.time()
 
     async def get_stats(self) -> dict:
-        """Get cache statistics (async for API compatibility)"""
+        """Get cache statistics (thread-safe)"""
         # Clean expired entries first for accurate stats
         await self.cleanup()
 
-        total_requests = self._hits + self._misses
-        hit_rate = (self._hits / total_requests * 100) if total_requests > 0 else 0.0
+        async with self._lock:
+            total_requests = self._hits + self._misses
+            hit_rate = (self._hits / total_requests * 100) if total_requests > 0 else 0.0
 
-        return {
-            "size": len(self._cache),
-            "max_size": self.max_size,
-            "hit_rate": hit_rate,
-            "hits": self._hits,
-            "misses": self._misses
-        }
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "hit_rate": hit_rate,
+                "hits": self._hits,
+                "misses": self._misses
+            }
 
     async def cleanup(self):
-        """Clean up expired entries (should be called periodically)"""
-        now = time.time()
-        # Find all expired keys
-        expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self.ttl]
-        # Remove them
-        for key in expired_keys:
-            del self._cache[key]
-            del self._access_times[key]
+        """Clean up expired entries (thread-safe)"""
+        async with self._lock:
+            now = time.time()
+            # Find all expired keys
+            expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self.ttl]
+            # Remove them
+            for key in expired_keys:
+                del self._cache[key]
+                del self._access_times[key]
 
 
 # HttpManager moved to main.py to avoid duplication
@@ -259,24 +272,30 @@ class JsonFile:
 
 
 class RequestCache:
-    """Deduplication cache for expensive operations"""
+    """Deduplication cache for expensive operations (thread-safe)"""
 
     def __init__(self, ttl: int = 3600):
         self.cache = {}
         self.ttl = ttl
+        self._lock = asyncio.Lock()
 
-    def get(self, key: str) -> Optional[Any]:
-        if key in self.cache:
-            val, expires = self.cache[key]
-            if time.time() < expires:
-                return val
-            del self.cache[key]
-        return None
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value from cache (thread-safe)"""
+        async with self._lock:
+            if key in self.cache:
+                val, expires = self.cache[key]
+                if time.time() < expires:
+                    return val
+                del self.cache[key]
+            return None
 
-    def set(self, key: str, value: Any):
-        self.cache[key] = (value, time.time() + self.ttl)
+    async def set(self, key: str, value: Any):
+        """Set value in cache (thread-safe)"""
+        async with self._lock:
+            self.cache[key] = (value, time.time() + self.ttl)
 
-    def cleanup(self):
-        """Remove expired entries"""
-        now = time.time()
-        self.cache = {k: v for k, v in self.cache.items() if v[1] > now}
+    async def cleanup(self):
+        """Remove expired entries (thread-safe)"""
+        async with self._lock:
+            now = time.time()
+            self.cache = {k: v for k, v in self.cache.items() if v[1] > now}
