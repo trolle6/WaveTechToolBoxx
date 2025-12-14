@@ -1604,8 +1604,9 @@ class SecretSantaCog(commands.Cog):
         _validate_assignment_integrity(assignments, participants)
         
         # Save assignments
+        # Convert both keys (givers) and values (receivers) to strings for consistency
         async with self._lock:
-            event["assignments"] = {str(k): v for k, v in assignments.items()}
+            event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
             event["join_closed"] = True
             self._save()
 
