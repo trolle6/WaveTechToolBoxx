@@ -1849,8 +1849,8 @@ class SecretSantaCog(commands.Cog):
         # Find who is the user's Santa
         santa_id = None
         for giver, receiver in event.get("assignments", {}).items():
-            if receiver == int(user_id):
-                santa_id = int(giver)
+            if receiver == user_id:  # Both are strings (receiver from dict, user_id converted to string at line 1843)
+                santa_id = int(giver)  # Convert to int for _send_dm which expects int
                 break
 
         if not santa_id:
