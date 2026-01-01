@@ -10,6 +10,8 @@ ISOLATION:
 - Reusable across commands
 """
 
+from __future__ import annotations
+
 from disnake.ext import commands
 import disnake
 
@@ -53,6 +55,7 @@ def participant_check():
             return False
 
     return commands.check(predicate)
+
 
 
 

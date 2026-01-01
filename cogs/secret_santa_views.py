@@ -11,6 +11,8 @@ ISOLATION:
 - Minimal coupling (uses cog lookup for functionality)
 """
 
+from __future__ import annotations
+
 import datetime as dt
 from typing import Dict
 
@@ -260,6 +262,7 @@ class YearHistoryPaginator(disnake.ui.View):
         """Disable buttons when view times out"""
         for item in self.children:
             item.disabled = True
+
 
 
 

@@ -13,6 +13,9 @@ USAGE:
         pass
 """
 
+from __future__ import annotations
+
+import disnake
 from disnake.ext import commands
 from typing import Callable
 
@@ -32,7 +35,7 @@ def owner_check():
             # Only trolle6 can use this
             pass
     """
-    async def predicate(inter: commands.Interaction):
+    async def predicate(inter: disnake.ApplicationCommandInteraction):
         user_username = inter.author.name.lower()
         is_owner = user_username == OWNER_USERNAME.lower()
         
@@ -48,7 +51,7 @@ def owner_check():
     return commands.check(predicate)
 
 
-def is_owner(inter: commands.Interaction) -> bool:
+def is_owner(inter: disnake.ApplicationCommandInteraction) -> bool:
     """
     Check if the interaction author is the bot owner.
     
