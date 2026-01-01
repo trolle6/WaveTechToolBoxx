@@ -52,6 +52,20 @@ from disnake.ext import commands
 
 from . import utils
 
+# Lazy import for health monitoring
+_health_monitor = None
+
+def _get_health_monitor(logger):
+    """Get health monitor for queue warnings"""
+    global _health_monitor
+    if _health_monitor is None:
+        try:
+            from .health_monitor import HealthMonitor
+            _health_monitor = HealthMonitor(logger)
+        except ImportError:
+            return None
+    return _health_monitor
+
 
 @dataclass
 class GenerationJob:
@@ -507,6 +521,15 @@ class DALLECog(commands.Cog):
             timestamp=time.time()
         )
 
+        # Check queue health before adding (proactive warning)
+        queue_size = self.queue.qsize()
+        max_queue = getattr(self.bot.config, 'MAX_QUEUE_SIZE', 50)
+        monitor = _get_health_monitor(self.logger)
+        if monitor:
+            warning = monitor.check_queue_warning(queue_size, max_queue, warn_threshold=0.8)
+            if warning:
+                self.logger.warning(warning)  # Log warning but continue (queue not full yet)
+        
         # Add to queue
         try:
             self.queue.put_nowait(job)

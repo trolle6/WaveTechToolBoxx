@@ -1471,6 +1471,22 @@ class VoiceProcessingCog(commands.Cog):
             timestamp=time.time()
         )
 
+        # Check queue health before adding (proactive warning)
+        queue_size = state.queue.qsize()
+        max_queue = 20  # Default max_queue_size from GuildVoiceState.__init__
+        # Try to get actual max from queue if available
+        if hasattr(state.queue, 'maxsize') and state.queue.maxsize:
+            max_queue = state.queue.maxsize
+        
+        try:
+            from .health_monitor import HealthMonitor
+            monitor = HealthMonitor(self.logger)
+            warning = monitor.check_queue_warning(queue_size, max_queue, warn_threshold=0.8)
+            if warning:
+                self.logger.warning(f"TTS queue: {warning}")
+        except ImportError:
+            pass  # Health monitor not available, continue anyway
+        
         try:
             state.queue.put_nowait(item)
             self.logger.debug(f"Queued message from {message.author.display_name}: '{text[:50]}...' (queue size: {state.queue.qsize()})")
