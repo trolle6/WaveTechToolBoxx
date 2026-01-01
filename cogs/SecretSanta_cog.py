@@ -60,10 +60,8 @@ ALGORITHM:
 
 import asyncio
 import datetime as dt
-import json
 import secrets
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import disnake
@@ -71,848 +69,29 @@ from disnake.ext import commands
 
 from .owner_utils import owner_check, get_owner_mention
 
-# Paths
-# The cog file is at: PROJECT_ROOT/cogs/SecretSanta_cog.py
-# We want archive at: PROJECT_ROOT/cogs/archive/
-ROOT = Path(__file__).parent  # This is the 'cogs' directory
-STATE_FILE = ROOT / "secret_santa_state.json"
-ARCHIVE_DIR = ROOT / "archive"
-BACKUPS_DIR = ARCHIVE_DIR / "backups"
-
-# Ensure archive and backups directories exist
-ARCHIVE_DIR.mkdir(exist_ok=True)
-BACKUPS_DIR.mkdir(exist_ok=True)
+# Import from modular components
+from .secret_santa_storage import (
+    ARCHIVE_DIR, BACKUPS_DIR, STATE_FILE,
+    load_state_with_fallback, save_state, load_all_archives, archive_event
+)
+from .secret_santa_assignments import (
+    load_history_from_archives, validate_assignment_possibility, make_assignments
+)
+from .secret_santa_views import (
+    SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator
+)
+from .secret_santa_checks import mod_check, participant_check
 
 # Log the paths for debugging
 import logging
 _init_logger = logging.getLogger("bot.santa.init")
 _init_logger.info(f"Secret Santa cog file: {__file__}")
-_init_logger.info(f"ROOT (cogs dir): {ROOT}")
 _init_logger.info(f"Archive directory: {ARCHIVE_DIR}")
 _init_logger.info(f"Archive exists: {ARCHIVE_DIR.exists()}")
 if ARCHIVE_DIR.exists():
     files = list(ARCHIVE_DIR.glob("*.json"))
     _init_logger.info(f"Archive files found: {[f.name for f in files]}")
 
-
-def load_json(path: Path, default: Any = None) -> Any:
-    """Load JSON with error handling"""
-    if path.exists():
-        try:
-            text = path.read_text().strip()
-            return json.loads(text) if text else (default or {})
-        except (json.JSONDecodeError, OSError):
-            pass
-    return default or {}
-
-
-def save_json(path: Path, data: Any):
-    """Save JSON atomically with error handling"""
-    temp = path.with_suffix('.tmp')
-    try:
-        temp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        temp.replace(path)
-    except Exception as e:
-        # Clean up temp file if save failed
-        if temp.exists():
-            try:
-                temp.unlink()
-            except Exception:
-                pass
-        raise  # Re-raise so caller knows save failed
-
-
-def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = None, logger=None) -> tuple[Dict[str, List[int]], List[int]]:
-    """
-    Load Secret Santa history from archive files.
-    
-    WHAT IT DOES:
-    - Scans archive directory for year files (2021.json, 2022.json, etc.)
-    - Extracts who gave to who from each year
-    - Builds a complete history map for assignment algorithm
-    
-    HISTORY MAP STRUCTURE:
-    {
-        "huntoon_id": [trolle_id, trolle_id],  # Huntoon had trolle twice
-        "trolle_id": [squibble_id, jkm_id],    # trolle had squibble and jkm
-        "m3_id": [trolle_id]                   # m³ had trolle once
-    }
-    
-    This map is used by the assignment algorithm to PREVENT repeats.
-    
-    Args:
-        archive_dir: Path to archive directory
-        exclude_years: List of years to exclude from history (for fallback)
-        logger: Optional logger for debugging
-    
-    Returns:
-        Tuple of (history dict, list of available years sorted oldest to newest)
-    """
-    exclude_years = exclude_years or []
-    history = {}
-    available_years = []
-
-    # ARCHIVE SCANNING: Load all YYYY.json files from archive directory
-    # CRITICAL: Ignore backups folder (indestructible backup system)
-    for archive_file in archive_dir.glob("[0-9]*.json"):
-        # Skip files in backups subdirectory
-        if "backups" in archive_file.parts:
-            continue
-            
-        try:
-            year_str = archive_file.stem
-            if not year_str.isdigit() or len(year_str) != 4:
-                continue
-
-            year = int(year_str)
-            available_years.append(year)
-            
-            # Skip excluded years
-            if year in exclude_years:
-                if logger:
-                    logger.info(f"Excluding year {year} from history (fallback mode)")
-                continue
-
-            archive_data = load_json(archive_file)
-
-            # Check for unified format (event key)
-            if archive_data.get("event"):
-                event_data = archive_data["event"]
-                event_assignments = event_data.get("assignments", {})
-
-                if isinstance(event_assignments, dict):
-                    for giver, receiver in event_assignments.items():
-                        try:
-                            receiver_int = int(receiver)
-                            history.setdefault(str(giver), []).append(receiver_int)
-                        except (ValueError, TypeError):
-                            continue
-            
-            # Handle legacy old format (direct assignments list)
-            elif "assignments" in archive_data and isinstance(archive_data["assignments"], list):
-                for assignment in archive_data["assignments"]:
-                    giver_id = assignment.get("giver_id")
-                    receiver_id = assignment.get("receiver_id")
-
-                    if giver_id and receiver_id:
-                        try:
-                            receiver_int = int(receiver_id)
-                            history.setdefault(str(giver_id), []).append(receiver_int)
-                        except (ValueError, TypeError):
-                            continue
-
-        except Exception as e:
-            if logger:
-                logger.warning(f"Error loading archive {archive_file}: {e}")
-            continue
-
-    # Sort available years (oldest first)
-    available_years.sort()
-    
-    return history, available_years
-
-
-def validate_assignment_possibility(participants: List[int], history: Dict[str, List[int]]) -> Optional[str]:
-    """
-    Check if assignments are possible before attempting them.
-    
-    VALIDATION LEVELS:
-    1. CRITICAL: Anyone with ZERO options → Impossible, fail immediately
-    2. WARNING: Many people with limited options → Might be difficult, but try anyway
-    
-    The algorithm itself is smart enough to handle difficult cases with retries.
-    Only fail validation if truly impossible (someone has zero receivers).
-    """
-    if len(participants) < 2:
-        return "Need at least 2 participants for Secret Santa"
-    
-    # Check each participant's available options
-    problematic_users = []
-    limited_users = []
-    
-    for giver in participants:
-        unacceptable = history.get(str(giver), [])
-        available = [p for p in participants if p not in unacceptable and p != giver]
-        
-        if len(available) == 0:
-            # CRITICAL: Zero options - truly impossible
-            problematic_users.append(str(giver))
-        elif len(available) == 1:
-            # Limited but possible - track for warning
-            limited_users.append(giver)
-    
-    # Only fail if someone has ZERO options (truly impossible)
-    if problematic_users:
-        return f"Assignment impossible - users {', '.join(problematic_users)} have no valid receivers. Use fallback or clear history."
-    
-    # If many limited users, log warning but DON'T fail
-    # (The algorithm can handle this with retries!)
-    if len(limited_users) > len(participants) // 2:
-        # Just log it, don't fail validation
-        # The algorithm will try 10 times with different orderings
-        pass
-    
-    return None  # ✅ Let algorithm try (it's smart enough!)
-
-
-def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> Dict[int, int]:
-    """
-    Create Secret Santa assignments avoiding repeats from history.
-    
-    ALGORITHM MECHANICS:
-    1. Use cryptographically secure randomness (secrets.SystemRandom)
-    2. Special case for 2 people (simple exchange, allows cycles)
-    3. For 3+: Shuffle and assign, preventing cycles
-    4. Retry up to 10 times if assignment fails
-    
-    HISTORY ENFORCEMENT:
-    - Each giver has a list of people they've had before (from archives)
-    - Algorithm EXCLUDES those people from available receivers
-    - Example: huntoon had [trolle_2023, trolle_2024] → can't get trolle again
-    - This prevents repeats and ensures variety across years
-    
-    SPECIAL CASES:
-    - 2 people: Simple A→B, B→A exchange (cycle allowed)
-    - 3+ people: Full algorithm with anti-cycle protection
-    
-    SAFETY:
-    - Works with copy of history (doesn't modify unless successful)
-    - Only updates real history if ALL assignments succeed
-    - Prevents cycles for 3+ participants (but allows for 2)
-    
-    RANDOMNESS:
-    Uses secrets.SystemRandom() which is cryptographically secure and doesn't
-    require manual seeding. It uses the OS's entropy pool directly (os.urandom).
-    This is the recommended approach for security-sensitive randomness in Python.
-    
-    Args:
-        participants: List of user IDs participating
-        history: Dict mapping giver ID (str) to list of previous receiver IDs
-    
-    Returns:
-        Dict mapping giver ID (int) to receiver ID (int)
-    
-    Raises:
-        ValueError: If assignment is impossible with current history
-    """
-    if len(participants) < 2:
-        raise ValueError("Need at least 2 participants")
-
-    # Use cryptographically secure random number generator
-    # This provides true randomness from OS entropy pool
-    secure_random = secrets.SystemRandom()
-    
-    # SPECIAL CASE: 2 participants (simple exchange)
-    if len(participants) == 2:
-        # With only 2 people, we need a cycle: A→B, B→A
-        # Check if this pairing has happened before
-        p1, p2 = participants[0], participants[1]
-        
-        # Check if either has given to the other before
-        p1_history = history.get(str(p1), [])
-        p2_history = history.get(str(p2), [])
-        
-        if p2 in p1_history or p1 in p2_history:
-            # They've paired before - cannot make assignment
-            raise ValueError(f"2-person assignment failed: these participants have already been paired")
-        
-        # Valid pairing - create simple exchange
-        result = {p1: p2, p2: p1}
-        
-        # Update history
-        history.setdefault(str(p1), []).append(p2)
-        history.setdefault(str(p2), []).append(p1)
-        
-        return result
-    
-    # NORMAL CASE: 3+ participants
-    # ADAPTIVE RETRY LOGIC: Scale attempts with participant count
-    # Small events (< 10 people): 10 attempts (safety floor)
-    # Large events (≥ 10 people): Attempts = participant count (scales with complexity)
-    # Example: 5 people → 10 attempts, 20 people → 20 attempts
-    max_attempts = max(10, len(participants))
-    
-    for attempt in range(max_attempts):
-        try:
-            result: Dict[int, int] = {}
-            temp_history = {k: v.copy() for k, v in history.items()}  # Work with copy
-            
-            # Shuffle participants for different assignment order each attempt
-            shuffled_participants = participants.copy()
-            secure_random.shuffle(shuffled_participants)
-            
-            for giver in shuffled_participants:
-                # HISTORY CHECK: Get list of people this giver has had before
-                # Example: huntoon's unacceptable = [trolle_2023, trolle_2024]
-                unacceptable: List[int] = temp_history.get(str(giver), [])
-                
-                # CYCLE PREVENTION: Add current assignments where someone else is giving to this giver
-                # This prevents cycles like: A→B, B→C, C→A (which would fail)
-                # For 3+ people, we want a clean chain, not a loop
-                for g, r in result.items():
-                    if r == giver:
-                        unacceptable.append(g)
-                
-                # DUPLICATE PREVENTION: Add people who are already assigned as receivers
-                # This prevents multiple people from giving to the same receiver
-                for g, r in result.items():
-                    unacceptable.append(r)
-                
-                # AVAILABLE POOL: Find who this person CAN receive
-                # Excludes: history + cycles + duplicates + self
-                available = [p for p in participants if p not in unacceptable and p != giver]
-                
-                if not available:
-                    raise ValueError(f"Cannot assign giver {giver} - no valid receivers available")
-                
-                # RANDOM ASSIGNMENT: Pick from available pool
-                receiver = secure_random.choice(available)
-                result[giver] = receiver
-                temp_history.setdefault(str(giver), []).append(receiver)
-            
-            # CRITICAL VALIDATION: Ensure assignment integrity before accepting
-            # This prevents the duplicate receiver bug from EVER happening again
-            _validate_assignment_integrity(result, participants)
-            
-            # Success! Update the real history
-            for giver, receiver in result.items():
-                history.setdefault(str(giver), []).append(receiver)
-            
-            return result
-            
-        except ValueError:
-            if attempt == max_attempts - 1:
-                # Last attempt failed - provide detailed error for fallback
-                raise ValueError("Assignment failed with current history constraints")
-            continue  # Try again with different random order
-    
-    raise ValueError("Assignment failed - this should not be reached")
-
-
-def _validate_assignment_integrity(assignments: Dict[int, int], participants: List[int]) -> None:
-    """
-    CRITICAL VALIDATION: Ensure assignment integrity to prevent duplicate receiver bug.
-    
-    This function performs comprehensive validation to ensure:
-    1. Every participant is a giver exactly once
-    2. Every participant is a receiver exactly once  
-    3. No one gives to themselves
-    4. No duplicate receivers (multiple people giving to same person)
-    5. No missing assignments
-    
-    This is the final safety net that prevents the duplicate receiver bug from EVER happening.
-    
-    Args:
-        assignments: Dict mapping giver ID to receiver ID
-        participants: List of all participant IDs
-        
-    Raises:
-        ValueError: If any integrity check fails
-    """
-    if not assignments:
-        raise ValueError("No assignments provided")
-    
-    if len(assignments) != len(participants):
-        raise ValueError(f"Assignment count mismatch: {len(assignments)} assignments for {len(participants)} participants")
-    
-    # Check 1: Every participant is a giver exactly once
-    givers = set(assignments.keys())
-    expected_givers = set(participants)
-    if givers != expected_givers:
-        missing_givers = expected_givers - givers
-        extra_givers = givers - expected_givers
-        raise ValueError(f"Giver mismatch: missing {missing_givers}, extra {extra_givers}")
-    
-    # Check 2: Every participant is a receiver exactly once
-    receivers = list(assignments.values())
-    expected_receivers = set(participants)
-    actual_receivers = set(receivers)
-    
-    if actual_receivers != expected_receivers:
-        missing_receivers = expected_receivers - actual_receivers
-        extra_receivers = actual_receivers - expected_receivers
-        raise ValueError(f"Receiver mismatch: missing {missing_receivers}, extra {extra_receivers}")
-    
-    # Check 3: No duplicate receivers (critical bug prevention)
-    if len(receivers) != len(set(receivers)):
-        # Find duplicates
-        receiver_counts = {}
-        for receiver in receivers:
-            receiver_counts[receiver] = receiver_counts.get(receiver, 0) + 1
-        
-        duplicates = {r: count for r, count in receiver_counts.items() if count > 1}
-        raise ValueError(f"DUPLICATE RECEIVERS DETECTED: {duplicates} - This is the bug we're preventing!")
-    
-    # Check 4: No self-assignments
-    for giver, receiver in assignments.items():
-        if giver == receiver:
-            raise ValueError(f"Self-assignment detected: {giver} → {receiver}")
-    
-    # Check 5: All assignments are valid participant IDs
-    for giver, receiver in assignments.items():
-        if giver not in participants:
-            raise ValueError(f"Invalid giver: {giver} not in participants")
-        if receiver not in participants:
-            raise ValueError(f"Invalid receiver: {receiver} not in participants")
-
-
-def _test_assignment_algorithm() -> None:
-    """
-    CRITICAL TEST: Verify the assignment algorithm works correctly.
-    
-    This function tests the algorithm with various scenarios to ensure
-    the duplicate receiver bug can NEVER happen again.
-    
-    This is called during development/testing to verify algorithm integrity.
-    """
-    import secrets
-    
-    # Test 1: Basic 3-person assignment
-    participants = [1, 2, 3]
-    history = {}
-    
-    for _ in range(100):  # Test 100 times to catch edge cases
-        result = make_assignments(participants, history.copy())
-        _validate_assignment_integrity(result, participants)
-    
-    # Test 2: Assignment with history constraints
-    history = {"1": [2], "2": [3], "3": [1]}  # Everyone has given to everyone
-    for _ in range(50):
-        result = make_assignments(participants, history.copy())
-        _validate_assignment_integrity(result, participants)
-    
-    # Test 3: Larger group (8 people like your case)
-    participants = [1, 2, 3, 4, 5, 6, 7, 8]
-    history = {}
-    
-    for _ in range(50):
-        result = make_assignments(participants, history.copy())
-        _validate_assignment_integrity(result, participants)
-    
-    # Test 4: Edge case - 2 people
-    participants = [1, 2]
-    history = {}
-    
-    for _ in range(20):
-        result = make_assignments(participants, history.copy())
-        _validate_assignment_integrity(result, participants)
-    
-    print("✅ All assignment algorithm tests passed - duplicate receiver bug is impossible!")
-
-
-def mod_check():
-    """Check if user is mod or admin"""
-    async def predicate(inter: disnake.ApplicationCommandInteraction):
-        if inter.author.guild_permissions.administrator:
-            return True
-
-        # Check config for mod role
-        try:
-            if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
-                mod_role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
-                if mod_role_id and any(r.id == mod_role_id for r in inter.author.roles):
-                    return True
-        except (AttributeError, TypeError):
-            # Config doesn't exist or is malformed, fall back to admin-only
-            pass
-
-        return False
-
-    return commands.check(predicate)
-
-
-def participant_check():
-    """Check if user is a participant"""
-    async def predicate(inter: disnake.ApplicationCommandInteraction):
-        try:
-            cog = inter.bot.get_cog("SecretSantaCog")
-            if not cog:
-                return False
-
-            event = cog.state.get("current_event")
-            if not event or not event.get("active"):
-                return False
-
-            return str(inter.author.id) in event.get("participants", {})
-        except Exception:
-            # If anything goes wrong, deny access
-            return False
-
-    return commands.check(predicate)
-
-
-def get_default_state() -> dict:
-    """
-    Get default state structure (DRY - used in multiple places).
-    Extracted to avoid repetition in __init__ fallback logic.
-    """
-    return {
-        "current_year": dt.date.today().year,
-        "pair_history": {},
-        "current_event": None
-    }
-
-
-def validate_state_structure(state: dict, logger) -> dict:
-    """
-    Validate and fix state structure.
-    Extracted from __init__ to reduce nesting and improve readability.
-    
-    Returns: Validated state (repaired if needed)
-    """
-    # Ensure it's actually a dict
-    if not isinstance(state, dict):
-        logger.error("State is not a dict, using defaults")
-        return get_default_state()
-    
-    # Ensure required keys exist
-    if "current_year" not in state:
-        state["current_year"] = dt.date.today().year
-    if "pair_history" not in state:
-        state["pair_history"] = {}
-    if "current_event" not in state:
-        state["current_event"] = None
-    
-    # Validate current event if it exists
-    current_event = state.get("current_event")
-    if current_event:
-        if not isinstance(current_event, dict):
-            logger.error("Invalid event state - not a dict, resetting")
-            state["current_event"] = None
-        elif not isinstance(current_event.get("participants"), dict):
-            logger.error("Invalid event state - participants not a dict, resetting")
-            state["current_event"] = None
-        else:
-            # Check for required fields
-            required_fields = ["active", "participants", "assignments", "guild_id"]
-            if not all(field in current_event for field in required_fields):
-                logger.warning("Event missing required fields, may be incomplete")
-    
-    return state
-
-
-def load_all_archives(logger=None) -> Dict[int, dict]:
-    """
-    Load all archive files from archive directory.
-    Extracted to avoid duplication in ss_history and ss_user_history.
-    
-    Handles both:
-    - Current unified format (event key with full data)
-    - Legacy format (assignments list)
-    
-    Returns: Dict mapping year → archive data
-    """
-    archives = {}
-    
-    for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
-        # Skip files in backups subdirectory (indestructible backup system)
-        if "backups" in archive_file.parts:
-            continue
-            
-        year_str = archive_file.stem
-        
-        # Skip non-4-digit year files (e.g., backup files)
-        if not year_str.isdigit() or len(year_str) != 4:
-            continue
-        
-        try:
-            year_int = int(year_str)
-            data = load_json(archive_file)
-            
-            # Check for unified format (event key)
-            if data and "event" in data:
-                archives[year_int] = data
-            
-            # Handle legacy format (assignments list)
-            elif data and "assignments" in data and isinstance(data["assignments"], list):
-                # Convert to unified format
-                participants = {}
-                gifts = {}
-                assignments_map = {}
-                
-                for assignment in data["assignments"]:
-                    giver_id = assignment.get("giver_id", "")
-                    giver_name = assignment.get("giver_name", "Unknown")
-                    receiver_id = assignment.get("receiver_id", "")
-                    receiver_name = assignment.get("receiver_name", "Unknown")
-                    gift = assignment.get("gift", "No description")
-                    
-                    participants[giver_id] = giver_name
-                    if receiver_id:
-                        participants[receiver_id] = receiver_name
-                    
-                    # Only add gifts if there's actual data
-                    if gift and gift != "No description":
-                        gifts[giver_id] = {
-                            "gift": gift,
-                            "receiver_name": receiver_name,
-                            "receiver_id": receiver_id
-                        }
-                    
-                    if giver_id and receiver_id:
-                        assignments_map[giver_id] = receiver_id
-                
-                # Convert to unified structure
-                archives[year_int] = {
-                    "year": year_int,
-                    "event": {
-                        "participants": participants,
-                        "gift_submissions": gifts,
-                        "assignments": assignments_map
-                    }
-                }
-        
-        except Exception as e:
-            if logger:
-                logger.warning(f"Error loading archive {archive_file}: {e}")
-            continue
-    
-    return archives
-
-
-class SecretSantaReplyView(disnake.ui.View):
-    """View with reply button for Secret Santa messages - persists across bot restarts"""
-    def __init__(self):
-        super().__init__(timeout=None)  # Never expires - button stays active forever
-    
-    @disnake.ui.button(
-        label="💬 Reply to Santa", 
-        style=disnake.ButtonStyle.primary, 
-        emoji="🎅",
-        custom_id="ss_reply:persist"  # Persistent ID so Discord remembers it after restart
-    )
-    async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Handle reply button click - works even after bot restart"""
-        try:
-            # Get the cog instance
-            cog = inter.bot.get_cog("SecretSantaCog")
-            if not cog:
-                await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
-                return
-            
-            # Check if there's an active event
-            event = cog._get_current_event()
-            if not event:
-                await inter.response.send_message(content="❌ No active Secret Santa event", ephemeral=True)
-                return
-            
-            # Find who is the user's Santa (dynamic lookup from event data)
-            user_id = str(inter.author.id)  # Convert to string to match dict keys
-            santa_id = None
-            for giver, receiver in event.get("assignments", {}).items():
-                if receiver == user_id:
-                    santa_id = int(giver)
-                    break
-            
-            if not santa_id:
-                await inter.response.send_message(content="❌ You don't have a Secret Santa assigned yet", ephemeral=True)
-                return
-            
-            # Create a modal for the reply (modal needs int IDs for DM sending)
-            modal = SecretSantaReplyModal(santa_id, int(user_id))
-            await inter.response.send_modal(modal)
-            
-        except Exception as e:
-            # Log the error for debugging
-            if hasattr(inter.bot, 'logger'):
-                inter.bot.logger.error(f"Reply button error: {e}")
-            await inter.response.send_message(content="❌ An error occurred while opening the reply form", ephemeral=True)
-
-
-class SecretSantaReplyModal(disnake.ui.Modal):
-    """Modal for Secret Santa replies"""
-    def __init__(self, santa_id: int, giftee_id: int):
-        # Create the text input component
-        text_input = disnake.ui.TextInput(
-            label="Your Reply",
-            custom_id="reply_text",
-            placeholder="Type your reply here...",
-            style=disnake.TextInputStyle.paragraph,
-            max_length=2000,
-            required=True
-        )
-        
-        # Initialize modal with components
-        super().__init__(
-            title="💬 Reply to Your Secret Santa",
-            components=[text_input]
-        )
-        self.santa_id = santa_id
-        self.giftee_id = giftee_id
-    
-    async def callback(self, inter: disnake.ModalInteraction):
-        """Handle modal submission"""
-        await inter.response.defer(ephemeral=True)
-        
-        reply = inter.text_values["reply_text"]
-        
-        # Get the cog instance
-        cog = inter.bot.get_cog("SecretSantaCog")
-        if not cog:
-            await inter.followup.send(content="❌ Secret Santa system not available", ephemeral=True)
-            return
-        
-        # Process the reply using the existing logic
-        await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
-
-
-class YearHistoryPaginator(disnake.ui.View):
-    """
-    Paginated view for year history with assignments.
-    Allows users to flip through pages if there are many assignments.
-    """
-    def __init__(self, year: int, archive: dict, participants: dict, emoji_mapping: dict, timeout: float = 300):
-        super().__init__(timeout=timeout)
-        self.year = year
-        self.archive = archive
-        self.participants = participants
-        self.emoji_mapping = emoji_mapping
-        self.current_page = 0
-        
-        # Build all assignment lines
-        event_data = archive.get("event", {})
-        assignments = event_data.get("assignments", {})
-        gifts = event_data.get("gift_submissions", {})
-        
-        self.all_lines = []
-        for giver_id, receiver_id in assignments.items():
-            giver_name = participants.get(str(giver_id), f"User {giver_id}")
-            receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
-            
-            giver_mention = f"<@{giver_id}>" if str(giver_id).isdigit() else giver_name
-            receiver_mention = f"<@{receiver_id}>" if str(receiver_id).isdigit() else receiver_name
-            
-            giver_emoji = emoji_mapping.get(str(giver_id), "🎁")
-            receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
-            
-            # Check for gift
-            submission = gifts.get(str(giver_id))
-            if submission and isinstance(submission, dict):
-                gift_desc = submission.get("gift", "No description provided")
-                if isinstance(gift_desc, str) and len(gift_desc) > 60:
-                    gift_desc = gift_desc[:57] + "..."
-                elif not isinstance(gift_desc, str):
-                    gift_desc = "Invalid gift description"
-                
-                self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
-                self.all_lines.append(f"    ⤷ *{gift_desc}*")
-            else:
-                self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *(no gift recorded)*")
-        
-        # Calculate pages (10 assignments per page = ~20 lines with gifts)
-        self.items_per_page = 10
-        self.total_assignments = len(assignments)
-        self.total_pages = (self.total_assignments + self.items_per_page - 1) // self.items_per_page
-        
-        # Update button states
-        self._update_buttons()
-    
-    def _update_buttons(self):
-        """Update button enabled/disabled state"""
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
-    def get_embed(self) -> disnake.Embed:
-        """Generate embed for current page"""
-        event_data = self.archive.get("event", {})
-        assignments = event_data.get("assignments", {})
-        gifts = event_data.get("gift_submissions", {})
-        
-        has_assignments = bool(assignments)
-        has_gifts = bool(gifts)
-        
-        if has_gifts:
-            description = f"**{len(self.participants)}** participants, **{len(gifts)}** gifts exchanged"
-        elif has_assignments:
-            description = f"**{len(self.participants)}** participants, assignments made but no gifts recorded"
-        else:
-            description = f"**{len(self.participants)}** participants signed up, event incomplete"
-        
-        embed = disnake.Embed(
-            title=f"🎄 Secret Santa {self.year}",
-            description=description,
-            color=disnake.Color.gold(),
-            timestamp=dt.datetime.now()
-        )
-        
-        if has_assignments:
-            # Calculate line range for this page
-            # Each assignment can be 1-2 lines (with or without gift)
-            # We need to count actual assignments, not lines
-            start_idx = self.current_page * self.items_per_page
-            end_idx = min(start_idx + self.items_per_page, self.total_assignments)
-            
-            # Build lines for this page's assignments
-            page_lines = []
-            assignment_idx = 0
-            line_idx = 0
-            
-            while line_idx < len(self.all_lines) and assignment_idx < end_idx:
-                if assignment_idx >= start_idx:
-                    page_lines.append(self.all_lines[line_idx])
-                    # Check if next line is a gift description (starts with spaces)
-                    if line_idx + 1 < len(self.all_lines) and self.all_lines[line_idx + 1].startswith("    "):
-                        page_lines.append(self.all_lines[line_idx + 1])
-                        line_idx += 2
-                    else:
-                        line_idx += 1
-                else:
-                    # Skip this assignment
-                    if line_idx + 1 < len(self.all_lines) and self.all_lines[line_idx + 1].startswith("    "):
-                        line_idx += 2
-                    else:
-                        line_idx += 1
-                
-                assignment_idx += 1
-            
-            gifts_count = len([g for g in gifts.keys() if g in [str(a) for a in assignments.keys()]])
-            field_name = f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)"
-            
-            if self.total_pages > 1:
-                field_name += f" - Page {self.current_page + 1}/{self.total_pages}"
-            
-            embed.add_field(
-                name=field_name,
-                value="\n".join(page_lines) if page_lines else "No assignments on this page",
-                inline=False
-            )
-        else:
-            status_text = f"⏸️ Signup completed ({len(self.participants)} joined)\n❌ No assignments made\n❌ No gifts recorded"
-            embed.add_field(name="📝 Event Status", value=status_text, inline=False)
-        
-        # Statistics
-        completion_rate = (len(gifts) / len(self.participants) * 100) if self.participants else 0
-        embed.add_field(
-            name="📊 Statistics",
-            value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {len(gifts)}",
-            inline=True
-        )
-        
-        if self.total_pages > 1:
-            embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages} • Use buttons to navigate")
-        
-        return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
 
 
 class SecretSantaCog(commands.Cog):
@@ -924,7 +103,7 @@ class SecretSantaCog(commands.Cog):
 
         # Load state with multi-layer fallback and validation
         # 1. Try main state file → 2. Try backup → 3. Use defaults
-        self.state = self._load_state_with_fallback()
+        self.state = load_state_with_fallback(logger=self.logger)
 
         self._lock = asyncio.Lock()
         self._backup_task: Optional[asyncio.Task] = None
@@ -956,62 +135,112 @@ class SecretSantaCog(commands.Cog):
         return embed
     
     def _get_current_event(self) -> Optional[dict]:
-        """
-        Get active event with validation.
-        Extracted to reduce duplication across commands.
-        
-        Returns: Event dict if active, None otherwise
-        """
+        """Get active event with validation. Returns event dict if active, None otherwise"""
         event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        return event if event and event.get("active") else None
+    
+    async def _validate_participant(self, inter: disnake.ApplicationCommandInteraction) -> Optional[tuple]:
+        """
+        Validate user is participant in active event.
+        Returns (event, user_id) if valid, None otherwise (sends error response).
+        """
+        event = self._get_current_event()
+        if not event:
+            await inter.edit_original_response(content="❌ No active Secret Santa event")
+            return None
+        
+        user_id = str(inter.author.id)
+        if user_id not in event.get("participants", {}):
+            await inter.edit_original_response(content="❌ You're not a participant in this event")
+            return None
+        
+        return (event, user_id)
+    
+    def _error_embed(self, title: str, description: str, footer: Optional[str] = None) -> disnake.Embed:
+        """Create a standard error embed"""
+        embed = disnake.Embed(title=title, description=description, color=disnake.Color.red())
+        if footer:
+            embed.set_footer(text=footer)
+        return embed
+    
+    def _success_embed(self, title: str, description: str, footer: Optional[str] = None) -> disnake.Embed:
+        """Create a standard success embed"""
+        embed = disnake.Embed(title=title, description=description, color=disnake.Color.green())
+        if footer:
+            embed.set_footer(text=footer)
+        return embed
+    
+    def _truncate_text(self, text: str, max_length: int = 100) -> str:
+        """Truncate text with ellipsis if needed"""
+        if len(text) <= max_length:
+            return text
+        return f"{text[:max_length]}..."
+    
+    async def _require_event(self, inter: disnake.ApplicationCommandInteraction, custom_message: Optional[str] = None) -> Optional[dict]:
+        """Require active event. Returns event if active, None otherwise (sends error response)"""
+        event = self._get_current_event()
+        if not event:
+            msg = custom_message or "❌ No active event"
+            await inter.edit_original_response(content=msg)
             return None
         return event
     
-    def _load_state_with_fallback(self) -> dict:
-        """
-        Load state with multi-layer fallback system.
-        Untangled from __init__ for clarity.
-        
-        Fallback chain:
-        1. Load main state file
-        2. Validate structure
-        3. If corrupted → Try backup file
-        4. If backup fails → Use clean defaults
-        
-        Returns: Valid state dict (guaranteed)
-        """
-        # Try main state file
-        try:
-            state = load_json(STATE_FILE, get_default_state())
-            
-            # Validate and repair structure
-            state = validate_state_structure(state, self.logger)
-            
-            # Log success
-            current_event = state.get("current_event")
-            active = bool(current_event and current_event.get("active")) if isinstance(current_event, dict) else False
-            self.logger.info(f"State loaded successfully. Active event: {active}")
-            
-            return state
-            
-        except Exception as e:
-            self.logger.error(f"Failed to load state: {e}, trying backup", exc_info=True)
-        
-        # Try backup file
-        backup_path = STATE_FILE.with_suffix('.backup')
-        if backup_path.exists():
-            try:
-                self.logger.info("Attempting to load from backup...")
-                state = load_json(backup_path, get_default_state())
-                state = validate_state_structure(state, self.logger)
-                self.logger.info("Backup state loaded successfully")
-                return state
-            except Exception as backup_error:
-                self.logger.error(f"Backup load also failed: {backup_error}")
-        
-        # All else failed - use clean defaults
-        self.logger.warning("Using clean default state")
-        return get_default_state()
+    async def _check_assignment(self, inter: disnake.ApplicationCommandInteraction, event: dict, user_id: str) -> Optional[str]:
+        """Check if user has assignment. Returns receiver_id if valid, None otherwise (sends error response)"""
+        if user_id not in event.get("assignments", {}):
+            embed = self._error_embed(
+                title="❌ No Assignment",
+                description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`."
+            )
+            await inter.edit_original_response(embed=embed)
+            return None
+        return event["assignments"][user_id]
+    
+    def _find_santa_for_giftee(self, event: dict, giftee_id: str) -> Optional[int]:
+        """Find the Santa (giver) for a given giftee (receiver). Returns santa_id as int, or None"""
+        for giver, receiver in event.get("assignments", {}).items():
+            if receiver == giftee_id:
+                return int(giver)
+        return None
+    
+    async def _save_communication(self, event: dict, santa_id: str, giftee_id: str, msg_type: str, 
+                                  message: str, rewritten: str):
+        """Save communication thread entry"""
+        async with self._lock:
+            comms = event.setdefault("communications", {})
+            thread = comms.setdefault(santa_id, {"giftee_id": giftee_id, "thread": []})
+            thread["thread"].append({
+                "type": msg_type,
+                "message": message,
+                "rewritten": rewritten,
+                "timestamp": time.time()
+            })
+            self._save()
+    
+    def _format_dm_question(self, rewritten_question: str) -> str:
+        """Format a question for DM"""
+        msg = "**SECRET SANTA MESSAGE**\n\n"
+        msg += "**Anonymous question from your Secret Santa:**\n\n"
+        msg += f"*\"{rewritten_question}\"*\n\n"
+        msg += "─────────────────────\n"
+        msg += "**Quick Reply:**\n"
+        msg += "Click the button below to reply instantly!\n"
+        msg += "*If the button doesn't work, use `/ss reply_santa [your reply]`*\n\n"
+        msg += "*Your Secret Santa is excited to learn more about you!*"
+        return msg
+    
+    def _format_dm_reply(self, rewritten_reply: str) -> str:
+        """Format a reply for DM"""
+        msg = "**SECRET SANTA REPLY**\n\n"
+        msg += "**Anonymous reply from your giftee:**\n\n"
+        msg += f"*\"{rewritten_reply}\"*\n\n"
+        msg += "─────────────────────\n"
+        msg += "**Keep the conversation going:**\n"
+        msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
+        msg += "*Your giftee is happy to help you find the perfect gift!*"
+        return msg
+    
+    # State loading now uses load_state_with_fallback from secret_santa_storage module
 
     async def cog_load(self):
         """Initialize cog"""
@@ -1062,19 +291,7 @@ class SecretSantaCog(commands.Cog):
 
     def _save(self):
         """Save state to disk with error handling and backup"""
-        try:
-            save_json(STATE_FILE, self.state)
-            return True
-        except Exception as e:
-            self.logger.error(f"CRITICAL: Failed to save state: {e}", exc_info=True)
-            # Try to save a backup
-            try:
-                backup_path = STATE_FILE.with_suffix('.backup')
-                save_json(backup_path, self.state)
-                self.logger.warning(f"Saved to backup file: {backup_path}")
-            except Exception as backup_error:
-                self.logger.error(f"Backup save also failed: {backup_error}")
-            return False
+        return save_state(self.state, logger=self.logger)
 
     async def _backup_loop(self):
         """Periodic backup"""
@@ -1099,52 +316,28 @@ class SecretSantaCog(commands.Cog):
     async def _process_reply(self, inter: disnake.ModalInteraction, reply: str, santa_id: int, giftee_id: int):
         """Process a reply from giftee to santa"""
         try:
-            # Create beautiful reply message
-            reply_msg = f"**SECRET SANTA REPLY**\n\n"
-            reply_msg += f"**Anonymous reply from your giftee:**\n\n"
-            reply_msg += f"*\"{reply}\"*\n\n"
-            reply_msg += "─────────────────────\n"
-            reply_msg += "**Keep the conversation going:**\n"
-            reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
-            reply_msg += "*Your giftee is happy to help you find the perfect gift!*"
-
             # Send reply to santa
+            reply_msg = self._format_dm_reply(reply)
             success = await self._send_dm(santa_id, reply_msg)
 
             if success:
                 # Save communication
                 event = self._get_current_event()
                 if event:
-                    async with self._lock:
-                        comms = event.setdefault("communications", {})
-                        thread = comms.setdefault(str(santa_id), {"giftee_id": str(giftee_id), "thread": []})
-                        thread["thread"].append({
-                            "type": "reply",
-                            "message": reply,
-                            "rewritten": reply,  # No AI rewriting for giftee replies
-                            "timestamp": time.time()
-                        })
-                        self._save()
+                    await self._save_communication(event, str(santa_id), str(giftee_id), "reply", reply, reply)
 
                 # Success embed for giftee
-                embed = disnake.Embed(
+                embed = self._success_embed(
                     title="✅ Reply Sent!",
                     description="Your reply has been delivered to your Secret Santa!",
-                    color=disnake.Color.green()
+                    footer="🎄 Your Secret Santa will be so happy to hear from you!"
                 )
-                embed.add_field(
-                    name="📝 Your Reply", 
-                    value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
-                    inline=False
-                )
-                embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
-                
+                embed.add_field(name="📝 Your Reply", value=f"*{self._truncate_text(reply)}*", inline=False)
                 await inter.followup.send(embed=embed, ephemeral=True)
             else:
-                embed = disnake.Embed(
+                embed = self._error_embed(
                     title="❌ Delivery Failed",
-                    description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
-                    color=disnake.Color.red()
+                    description="Couldn't send your reply. Your Secret Santa may have DMs disabled."
                 )
                 await inter.followup.send(embed=embed, ephemeral=True)
                 
@@ -1174,27 +367,17 @@ class SecretSantaCog(commands.Cog):
     async def _anonymize_text(self, text: str, message_type: str = "question") -> str:
         """Use OpenAI to rewrite text for anonymity"""
         if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
-            return text  # Return original if no API key
+            return text
         
         try:
-            prompts = {
-                "question": (
-                    "Rewrite this Secret Santa message with MINIMAL changes - just enough to obscure writing style. "
-                    "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
-                    "Preserve the exact same meaning, tone, personality, slang, and emotion. "
-                    "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
-                    f"Original: {text}\n\nRewritten:"
-                ),
-                "reply": (
-                    "Rewrite this Secret Santa reply with MINIMAL changes - just enough to obscure writing style. "
-                    "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
-                    "Preserve the exact same meaning, tone, personality, slang, and emotion. "
-                    "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
-                    f"Original: {text}\n\nRewritten:"
-                )
-            }
+            # Single prompt template (question/reply use same logic)
+            base_prompt = "Rewrite this Secret Santa {type} with MINIMAL changes - just enough to obscure writing style. "
+            base_prompt += "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
+            base_prompt += "Preserve the exact same meaning, tone, personality, slang, and emotion. "
+            base_prompt += "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
+            base_prompt += f"Original: {text}\n\nRewritten:"
             
-            prompt = prompts.get(message_type, prompts["question"])
+            prompt = base_prompt.format(type=message_type)
             
             headers = {
                 "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
@@ -1230,67 +413,19 @@ class SecretSantaCog(commands.Cog):
             return text
 
     def _archive_event(self, event: Dict[str, Any], year: int) -> str:
-        """
-        Archive event data in unified format with CRITICAL overwrite protection.
+        """Archive event using the storage module"""
+        filename = archive_event(event, year, logger=self.logger)
         
-        ARCHIVE PROTECTION MECHANICS:
-        - Checks if YYYY.json already exists (e.g., 2025.json)
-        - If exists: Saves to timestamped backup instead (2025_backup_20251216_153045.json)
-        - If new: Saves normally to YYYY.json
-        - NEVER overwrites existing archives (prevents data loss!)
-        
-        WHY THIS MATTERS:
-        - Prevents accidental data loss from test events
-        - Protects historical records if you run multiple events per year
-        - Sends Discord warnings so you know it happened
-        - Original archive always preserved
-        
-        SAFETY FEATURES:
-        - Never overwrites existing archives (data loss prevention!)
-        - Creates timestamped backup if year already archived
-        - Sends Discord warnings if duplicate year detected
-        - Useful for test events or accidental re-runs
-        
-        Example: 2025.json exists → saves to 2025_backup_20251216_153045.json
-        
-        Returns:
-            Filename of the saved archive (e.g., "2025.json" or "2025_backup_20251216_153045.json")
-        """
-        archive_data = {
-            "year": year,
-            "event": event.copy(),
-            "archived_at": time.time(),
-            "timestamp": dt.datetime.now().isoformat()
-        }
-        
-        archive_path = ARCHIVE_DIR / f"{year}.json"
-        
-        # CRITICAL SAFETY CHECK: Prevent data loss from accidental overwrites
-        # This catches: test runs, accidental re-runs, multiple events per year
-        if archive_path.exists():
-            # Archive already exists! Save to backup file instead (NEVER overwrite!)
-            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = ARCHIVE_DIR / f"{year}_backup_{timestamp}.json"
-            save_json(backup_path, archive_data)
-            
-            self.logger.warning(f"⚠️ Archive {year}.json already exists! Saved to {backup_path.name} instead")
-            self.logger.warning(f"This suggests you ran multiple events in {year}. Please review archives manually!")
-            
-            # Also notify via Discord if possible
-            if hasattr(self.bot, 'send_to_discord_log'):
-                asyncio.create_task(
-                    self.bot.send_to_discord_log(
-                        f"⚠️ Archive protection: {year}.json already exists! Saved to {backup_path.name} to prevent data loss. Review manually!",
-                        "WARNING"
-                    )
+        # Also notify via Discord if backup was created
+        if "backup" in filename and hasattr(self.bot, 'send_to_discord_log'):
+            asyncio.create_task(
+                self.bot.send_to_discord_log(
+                    f"⚠️ Archive protection: {year}.json already exists! Saved to {filename} to prevent data loss. Review manually!",
+                    "WARNING"
                 )
-            
-            return backup_path.name
-        else:
-            # Safe to save normally
-            save_json(archive_path, archive_data)
-            self.logger.info(f"Archived Secret Santa {year} → {archive_path.name}")
-            return archive_path.name
+            )
+        
+        return filename
 
     @commands.slash_command(name="ss")
     async def ss_root(self, inter: disnake.ApplicationCommandInteraction):
@@ -1444,9 +579,8 @@ class SecretSantaCog(commands.Cog):
         """Make assignments with progressive year-based fallback"""
         await inter.response.defer(ephemeral=True)
 
-        event = self._get_current_event()
+        event = await self._require_event(inter, "❌ No active event - use `/ss start` to create one first")
         if not event:
-            await inter.edit_original_response(content="❌ No active event - use `/ss start` to create one first")
             return
 
         # Convert participant IDs to integers
@@ -1599,11 +733,8 @@ class SecretSantaCog(commands.Cog):
 
         await asyncio.gather(*dm_tasks)
 
-        # FINAL VALIDATION: Double-check assignments before saving
-        # This is the last line of defense against the duplicate receiver bug
-        _validate_assignment_integrity(assignments, participants)
-        
         # Save assignments
+        # Note: make_assignments already performs validation internally
         # Convert both keys (givers) and values (receivers) to strings for consistency
         async with self._lock:
             event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
@@ -1702,13 +833,11 @@ class SecretSantaCog(commands.Cog):
         """Show participants"""
         await inter.response.defer(ephemeral=True)
 
-        event = self._get_current_event()
+        event = await self._require_event(inter)
         if not event:
-            await inter.edit_original_response(content="❌ No active event")
             return
 
         participants = event.get("participants", {})
-
         if not participants:
             await inter.edit_original_response(content="❌ No participants yet")
             return
@@ -1738,29 +867,16 @@ class SecretSantaCog(commands.Cog):
         """Ask giftee anonymously with AI rewriting"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         # Check if user has assignment
-        if user_id not in event.get("assignments", {}):
-            embed = self._create_embed(
-                title="❌ No Assignment",
-                description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
-                color=disnake.Color.red()
-            )
-            await inter.edit_original_response(embed=embed)
+        receiver_id = await self._check_assignment(inter, event, user_id)
+        if not receiver_id:
             return
-
-        receiver_id = event["assignments"][user_id]
 
         # Rewrite question for anonymity (only if requested)
         if use_ai_rewrite:
@@ -1769,60 +885,29 @@ class SecretSantaCog(commands.Cog):
         else:
             rewritten_question = question
 
-        # Create beautiful question message with reply button
-        question_msg = f"**SECRET SANTA MESSAGE**\n\n"
-        question_msg += f"**Anonymous question from your Secret Santa:**\n\n"
-        question_msg += f"*\"{rewritten_question}\"*\n\n"
-        question_msg += "─────────────────────\n"
-        question_msg += "**Quick Reply:**\n"
-        question_msg += "Click the button below to reply instantly!\n"
-        question_msg += "*If the button doesn't work, use `/ss reply_santa [your reply]`*\n\n"
-        question_msg += "*Your Secret Santa is excited to learn more about you!*"
-
-        # Create reply view - it will dynamically look up the santa/giftee relationship
-        reply_view = SecretSantaReplyView()
-        
         # Send question with reply button
-        success = await self._send_dm(receiver_id, question_msg, reply_view)
+        question_msg = self._format_dm_question(rewritten_question)
+        reply_view = SecretSantaReplyView()
+        success = await self._send_dm(int(receiver_id), question_msg, reply_view)
 
         if success:
             # Save communication
-            async with self._lock:
-                comms = event.setdefault("communications", {})
-                thread = comms.setdefault(user_id, {"giftee_id": receiver_id, "thread": []})
-                thread["thread"].append({
-                    "type": "question",
-                    "message": question,
-                    "rewritten": rewritten_question,
-                    "timestamp": time.time()
-                })
-                self._save()
+            await self._save_communication(event, user_id, receiver_id, "question", question, rewritten_question)
 
             # Success embed
-            embed = disnake.Embed(
+            embed = self._success_embed(
                 title="✅ Question Sent!",
-                description=f"Your question has been delivered anonymously!",
-                color=disnake.Color.green()
+                description="Your question has been delivered anonymously!",
+                footer="💡 Tip: Keep asking questions to find the perfect gift!"
             )
-            embed.add_field(
-                name="📝 Original", 
-                value=f"*{question[:100]}{'...' if len(question) > 100 else ''}*", 
-                inline=False
-            )
+            embed.add_field(name="📝 Original", value=f"*{self._truncate_text(question)}*", inline=False)
             if use_ai_rewrite and rewritten_question != question:
-                embed.add_field(
-                    name="🤖 Rewritten", 
-                    value=f"*{rewritten_question[:100]}{'...' if len(rewritten_question) > 100 else ''}*", 
-                    inline=False
-                )
-            embed.set_footer(text="💡 Tip: Keep asking questions to find the perfect gift!")
-            
+                embed.add_field(name="🤖 Rewritten", value=f"*{self._truncate_text(rewritten_question)}*", inline=False)
             await inter.edit_original_response(embed=embed)
         else:
-            embed = disnake.Embed(
+            embed = self._error_embed(
                 title="❌ Delivery Failed",
-                description="Couldn't send your question. Your giftee may have DMs disabled.",
-                color=disnake.Color.red()
+                description="Couldn't send your question. Your giftee may have DMs disabled."
             )
             await inter.edit_original_response(embed=embed)
 
@@ -1835,84 +920,43 @@ class SecretSantaCog(commands.Cog):
         """Reply to Santa anonymously"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         # Find who is the user's Santa
-        santa_id = None
-        for giver, receiver in event.get("assignments", {}).items():
-            if receiver == user_id:  # Both are strings (receiver from dict, user_id converted to string at line 1843)
-                santa_id = int(giver)  # Convert to int for _send_dm which expects int
-                break
-
+        santa_id = self._find_santa_for_giftee(event, user_id)
         if not santa_id:
-            embed = self._create_embed(
+            embed = self._error_embed(
                 title="❌ No Secret Santa Found",
                 description="No one has asked you a question yet, or you haven't been assigned a Secret Santa!",
-                color=disnake.Color.red()
+                footer="💡 Wait for your Secret Santa to ask you something first!"
             )
-            embed.set_footer(text="💡 Wait for your Secret Santa to ask you something first!")
             await inter.edit_original_response(embed=embed)
             return
 
-        # No AI rewriting needed - giftee doesn't know who their Santa is
-        # The anonymity is already protected by the assignment system
-        rewritten_reply = reply
-
-        # Create beautiful reply message
-        reply_msg = f"**SECRET SANTA REPLY**\n\n"
-        reply_msg += f"**Anonymous reply from your giftee:**\n\n"
-        reply_msg += f"*\"{rewritten_reply}\"*\n\n"
-        reply_msg += "─────────────────────\n"
-        reply_msg += "**Keep the conversation going:**\n"
-        reply_msg += "Use `/ss ask_giftee` to ask more questions!\n\n"
-        reply_msg += "*Your giftee is happy to help you find the perfect gift!*"
-
-        # Send reply
+        # Send reply (no AI rewriting needed - anonymity already protected)
+        reply_msg = self._format_dm_reply(reply)
         success = await self._send_dm(santa_id, reply_msg)
 
         if success:
             # Save communication
-            async with self._lock:
-                comms = event.setdefault("communications", {})
-                thread = comms.setdefault(str(santa_id), {"giftee_id": user_id, "thread": []})
-                thread["thread"].append({
-                    "type": "reply",
-                    "message": reply,
-                    "rewritten": rewritten_reply,
-                    "timestamp": time.time()
-                })
-                self._save()
+            await self._save_communication(event, str(santa_id), user_id, "reply", reply, reply)
 
             # Success embed
-            embed = disnake.Embed(
+            embed = self._success_embed(
                 title="✅ Reply Sent!",
                 description="Your reply has been delivered to your Secret Santa!",
-                color=disnake.Color.green()
+                footer="🎄 Your Secret Santa will be so happy to hear from you!"
             )
-            embed.add_field(
-                name="📝 Original", 
-                value=f"*{reply[:100]}{'...' if len(reply) > 100 else ''}*", 
-                inline=False
-            )
-            # No AI rewriting for giftee replies - anonymity already protected
-            embed.set_footer(text="🎄 Your Secret Santa will be so happy to hear from you!")
-            
+            embed.add_field(name="📝 Original", value=f"*{self._truncate_text(reply)}*", inline=False)
             await inter.edit_original_response(embed=embed)
         else:
-            embed = disnake.Embed(
+            embed = self._error_embed(
                 title="❌ Delivery Failed",
-                description="Couldn't send your reply. Your Secret Santa may have DMs disabled.",
-                color=disnake.Color.red()
+                description="Couldn't send your reply. Your Secret Santa may have DMs disabled."
             )
             await inter.edit_original_response(embed=embed)
 
@@ -1926,29 +970,16 @@ class SecretSantaCog(commands.Cog):
         """Submit gift description"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         # Check if user has assignment
-        if user_id not in event.get("assignments", {}):
-            embed = self._create_embed(
-                title="❌ No Assignment",
-                description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
-                color=disnake.Color.red()
-            )
-            await inter.edit_original_response(embed=embed)
+        receiver_id = await self._check_assignment(inter, event, user_id)
+        if not receiver_id:
             return
-
-        receiver_id = event["assignments"][user_id]
         receiver_name = event["participants"].get(str(receiver_id), f"User {receiver_id}")
 
         # Check if this is updating an existing submission
@@ -2014,17 +1045,11 @@ class SecretSantaCog(commands.Cog):
         """Add item to wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         # Get or create user's wishlist
         async with self._lock:
@@ -2045,18 +1070,16 @@ class SecretSantaCog(commands.Cog):
             user_wishlist.append(item)
             self._save()
 
-        embed = disnake.Embed(
+        embed = self._success_embed(
             title="✅ Item Added to Wishlist!",
             description=f"Added: **{item}**",
-            color=disnake.Color.green()
+            footer=f"Items: {len(user_wishlist)}/10"
         )
         embed.add_field(
             name="📋 Your Wishlist",
             value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
             inline=False
         )
-        embed.set_footer(text=f"Items: {len(user_wishlist)}/10")
-        
         await inter.edit_original_response(embed=embed)
 
     @ss_wishlist.sub_command(name="remove", description="Remove item from your wishlist")
@@ -2068,17 +1091,11 @@ class SecretSantaCog(commands.Cog):
         """Remove item from wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         wishlists = event.get("wishlists", {})
         user_wishlist = wishlists.get(user_id, [])
@@ -2097,21 +1114,18 @@ class SecretSantaCog(commands.Cog):
         async with self._lock:
             self._save()
 
-        embed = disnake.Embed(
+        embed = self._success_embed(
             title="✅ Item Removed!",
             description=f"Removed: **{removed_item}**",
-            color=disnake.Color.orange()
+            footer=f"Items remaining: {len(user_wishlist)}/10" if user_wishlist else "Your wishlist is now empty"
         )
+        embed.color = disnake.Color.orange()
         if user_wishlist:
             embed.add_field(
                 name="📋 Your Wishlist",
                 value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
                 inline=False
             )
-            embed.set_footer(text=f"Items remaining: {len(user_wishlist)}/10")
-        else:
-            embed.set_footer(text="Your wishlist is now empty")
-        
         await inter.edit_original_response(embed=embed)
 
     @ss_wishlist.sub_command(name="view", description="View your wishlist")
@@ -2119,17 +1133,11 @@ class SecretSantaCog(commands.Cog):
         """View your wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         wishlists = event.get("wishlists", {})
         user_wishlist = wishlists.get(user_id, [])
@@ -2158,17 +1166,11 @@ class SecretSantaCog(commands.Cog):
         """Clear wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         wishlists = event.get("wishlists", {})
         
@@ -2188,29 +1190,17 @@ class SecretSantaCog(commands.Cog):
         """View giftee's wishlist"""
         await inter.response.defer(ephemeral=True)
 
-        # Manual participant check (after defer to prevent timeout)
-        event = self._get_current_event()
-        if not event or not event.get("active"):
-            await inter.edit_original_response(content="❌ No active Secret Santa event")
+        # Validate participant
+        result = await self._validate_participant(inter)
+        if not result:
             return
-        
-        user_id = str(inter.author.id)
-        
-        if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="❌ You're not a participant in this event")
-            return
+        event, user_id = result
 
         # Check if user has assignment
-        if user_id not in event.get("assignments", {}):
-            embed = self._create_embed(
-                title="❌ No Assignment",
-                description="You don't have an assignment yet! Wait for the event organizer to run `/ss shuffle`.",
-                color=disnake.Color.red()
-            )
-            await inter.edit_original_response(embed=embed)
+        receiver_id = await self._check_assignment(inter, event, user_id)
+        if not receiver_id:
             return
-
-        receiver_id = str(event["assignments"][user_id])
+        receiver_id = str(receiver_id)
         receiver_name = event["participants"].get(receiver_id, f"User {receiver_id}")
 
         wishlists = event.get("wishlists", {})
@@ -2241,13 +1231,11 @@ class SecretSantaCog(commands.Cog):
         """Show gift submissions"""
         await inter.response.defer(ephemeral=True)
 
-        event = self._get_current_event()
+        event = await self._require_event(inter)
         if not event:
-            await inter.edit_original_response(content="❌ No active event")
             return
 
         submissions = event.get("gift_submissions", {})
-
         if not submissions:
             await inter.edit_original_response(content="❌ No gifts submitted yet")
             return
@@ -2292,13 +1280,11 @@ class SecretSantaCog(commands.Cog):
         """Show communication threads"""
         await inter.response.defer(ephemeral=True)
 
-        event = self._get_current_event()
+        event = await self._require_event(inter)
         if not event:
-            await inter.edit_original_response(content="❌ No active event")
             return
 
         comms = event.get("communications", {})
-
         if not comms:
             await inter.edit_original_response(content="❌ No communications yet")
             return

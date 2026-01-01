@@ -532,7 +532,8 @@ def load_cogs() -> int:
         "cogs.DALLE_cog",
         "cogs.SecretSanta_cog",
         "cogs.CustomEvents_cog",  # New modular event system!
-        "cogs.DistributeZip_cog"  # Zip file distribution (e.g., Minecraft texture packs)
+        "cogs.DistributeZip_cog",  # Zip file distribution (e.g., Minecraft texture packs)
+        "cogs.LongText_cog"  # Long text handler (files and multi-part messages)
     ]
     loaded = 0
     for cog in cogs:
