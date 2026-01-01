@@ -1358,7 +1358,10 @@ class VoiceProcessingCog(commands.Cog):
         Returns: True if message should be processed, False otherwise
         """
         # Skip if disabled or bot message
-        if not self.enabled or message.author.bot:
+        if not self.enabled:
+            self.logger.debug("TTS is disabled, skipping message")
+            return False
+        if message.author.bot:
             return False
 
         # Skip if not in guild
@@ -1374,17 +1377,19 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel whitelist
         if self.allowed_channel and message.channel.id != self.allowed_channel:
+            self.logger.debug(f"Message from channel {message.channel.id} doesn't match allowed channel {self.allowed_channel}, skipping")
             return False
 
         # Check if user is in voice
         if not message.author.voice or not message.author.voice.channel:
+            self.logger.debug(f"User {message.author.display_name} ({message.author.id}) is not in a voice channel, skipping TTS")
             return False
 
         # Check if TTS role is required
         if self.tts_role_id:
             has_role = any(role.id == self.tts_role_id for role in message.author.roles)
             if not has_role:
-                self.logger.debug(f"User {message.author.id} doesn't have TTS role, skipping")
+                self.logger.debug(f"User {message.author.display_name} ({message.author.id}) doesn't have TTS role {self.tts_role_id}, skipping")
                 return False
 
         return True
