@@ -35,7 +35,7 @@ def owner_check():
             # Only trolle6 can use this
             pass
     """
-    async def predicate(inter: disnake.ApplicationCommandInteraction):
+    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         user_username = inter.author.name.lower()
         is_owner = user_username == OWNER_USERNAME.lower()
         
@@ -51,7 +51,7 @@ def owner_check():
     return commands.check(predicate)
 
 
-def is_owner(inter: disnake.ApplicationCommandInteraction) -> bool:
+def is_owner(inter: "disnake.ApplicationCommandInteraction") -> bool:
     """
     Check if the interaction author is the bot owner.
     

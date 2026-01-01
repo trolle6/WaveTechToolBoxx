@@ -18,7 +18,7 @@ import disnake
 
 def mod_check():
     """Check if user is mod or admin"""
-    async def predicate(inter: disnake.ApplicationCommandInteraction):
+    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         if inter.author.guild_permissions.administrator:
             return True
 
@@ -39,7 +39,7 @@ def mod_check():
 
 def participant_check():
     """Check if user is a participant"""
-    async def predicate(inter: disnake.ApplicationCommandInteraction):
+    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         try:
             cog = inter.bot.get_cog("SecretSantaCog")
             if not cog:

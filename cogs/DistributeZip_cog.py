@@ -78,7 +78,7 @@ def save_metadata(data: Dict):
 
 def mod_check():
     """Check if user is a moderator"""
-    async def predicate(inter: disnake.ApplicationCommandInteraction):
+    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         try:
             # Check if user has moderator role
             if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
