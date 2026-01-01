@@ -5,7 +5,7 @@
       "giver_id": "PLACEHOLDER_redstonelamp08",
       "giver_name": "redstonelamp08",
       "receiver_id": "584694654780309524",
-      "receiver_name": "paradoxx_42",
+      "receiver_name": "logical conclusion",
       "gift": null
     },
     {
@@ -30,8 +30,8 @@
       "gift": null
     },
     {
-      "giver_id": "PLACEHOLDER_SeñorSantaSundays",
-      "giver_name": "SeñorSantaSundays",
+      "giver_id": "PLACEHOLDER_MrMrMr",
+      "giver_name": "MrMrMr",
       "receiver_id": "PLACEHOLDER_La1m1e",
       "receiver_name": "La1m1e",
       "gift": null
@@ -46,8 +46,8 @@
     {
       "giver_id": "320526362219905038",
       "giver_name": "Velizar",
-      "receiver_id": "PLACEHOLDER_SeñorSantaSundays",
-      "receiver_name": "SeñorSantaSundays",
+      "receiver_id": "PLACEHOLDER_MrMrMr",
+      "receiver_name": "MrMrMr",
       "gift": null
     },
     {
@@ -136,7 +136,7 @@
     },
     {
       "giver_id": "584694654780309524",
-      "giver_name": "paradoxx_42",
+      "giver_name": "logical conclusion",
       "receiver_id": "PLACEHOLDER_Tropicalswine",
       "receiver_name": "Tropicalswine",
       "gift": "Decorated houses"
