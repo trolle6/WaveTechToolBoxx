@@ -1,0 +1,22 @@
+{
+  "year": 2025,
+  "event": {
+    "active": false,
+    "participants": {
+      "123": "User1",
+      "456": "User2"
+    },
+    "assignments": {
+      "123": "456",
+      "456": "123"
+    },
+    "gift_submissions": {
+      "123": {
+        "gift": "Test gift"
+      }
+    },
+    "guild_id": 789
+  },
+  "archived_at": 1767111479.4373882,
+  "timestamp": "2025-12-30T17:17:59.437388"
+}

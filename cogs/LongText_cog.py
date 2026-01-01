@@ -18,7 +18,7 @@ COMMANDS:
 """
 
 import asyncio
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from io import BytesIO
 
 import disnake
@@ -34,7 +34,7 @@ class LongTextCog(commands.Cog):
         self.bot = bot
         self.logger = bot.logger.getChild("longtext")
         # Store user message buffers: {user_id: {"text": str, "started_at": float}}
-        self._buffers: Dict[int, Dict[str, any]] = {}
+        self._buffers: Dict[int, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self.logger.info("LongText cog initialized")
     
@@ -430,4 +430,5 @@ class LongTextCog(commands.Cog):
 def setup(bot):
     """Setup the cog"""
     bot.add_cog(LongTextCog(bot))
+
 

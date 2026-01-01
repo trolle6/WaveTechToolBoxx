@@ -26,3 +26,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Local notes and reminders (not for version control)
+things todo and remember in the future.txt

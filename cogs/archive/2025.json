@@ -1,0 +1,180 @@
+{
+  "year": 2025,
+  "assignments": [
+    {
+      "giver_id": "PLACEHOLDER_redstonelamp08",
+      "giver_name": "redstonelamp08",
+      "receiver_id": "584694654780309524",
+      "receiver_name": "paradoxx_42",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_La1m1e",
+      "giver_name": "La1m1e",
+      "receiver_id": "170242025742925836",
+      "receiver_name": "Squze",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_Earthquake",
+      "giver_name": "Earthquake",
+      "receiver_id": "294639971955113986",
+      "receiver_name": "Random789",
+      "gift": null
+    },
+    {
+      "giver_id": "132642056165261312",
+      "giver_name": "mjc4wilton",
+      "receiver_id": "PLACEHOLDER_MsJollyfulSupport",
+      "receiver_name": "Ms. Jollyful Support",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_SeñorSantaSundays",
+      "giver_name": "SeñorSantaSundays",
+      "receiver_id": "PLACEHOLDER_La1m1e",
+      "receiver_name": "La1m1e",
+      "gift": null
+    },
+    {
+      "giver_id": "170242025742925836",
+      "giver_name": "Squze",
+      "receiver_id": "PLACEHOLDER_Emdy",
+      "receiver_name": "Emdy",
+      "gift": null
+    },
+    {
+      "giver_id": "320526362219905038",
+      "giver_name": "Velizar",
+      "receiver_id": "PLACEHOLDER_SeñorSantaSundays",
+      "receiver_name": "SeñorSantaSundays",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_Emdy",
+      "giver_name": "Emdy",
+      "receiver_id": "PLACEHOLDER_redstonelamp08",
+      "receiver_name": "redstonelamp08",
+      "gift": "Turtle bowl farm in a Simpsons Springfield Reactor"
+    },
+    {
+      "giver_id": "239932156678242304",
+      "giver_name": "Yun",
+      "receiver_id": "PLACEHOLDER_crubleigh",
+      "receiver_name": "crubleigh",
+      "gift": "a carpet statue"
+    },
+    {
+      "giver_id": "PLACEHOLDER_MsJollyfulSupport",
+      "giver_name": "Ms. Jollyful Support",
+      "receiver_id": "251835504654286852",
+      "receiver_name": "Trolle",
+      "gift": null
+    },
+    {
+      "giver_id": "251835504654286852",
+      "giver_name": "Trolle",
+      "receiver_id": "PLACEHOLDER_Earthquake",
+      "receiver_name": "Earthquake",
+      "gift": "two maparts, Earth's face and saul and netherite"
+    },
+    {
+      "giver_id": "571818326146416640",
+      "giver_name": "Squibble",
+      "receiver_id": "PLACEHOLDER_Hatred",
+      "receiver_name": "Hatred",
+      "gift": null
+    },
+    {
+      "giver_id": "188187888289054720",
+      "giver_name": "m³",
+      "receiver_id": "239932156678242304",
+      "receiver_name": "Yun",
+      "gift": null
+    },
+    {
+      "giver_id": "294480895065194507",
+      "giver_name": "Erikbacke",
+      "receiver_id": "185834053558075392",
+      "receiver_name": "JKM",
+      "gift": null
+    },
+    {
+      "giver_id": "282364743996538881",
+      "giver_name": "xoid3",
+      "receiver_id": "PLACEHOLDER_Dino",
+      "receiver_name": "Dino",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_Tropicalswine",
+      "giver_name": "Tropicalswine",
+      "receiver_id": "282364743996538881",
+      "receiver_name": "xoid3",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_Dino",
+      "giver_name": "Dino",
+      "receiver_id": "PLACEHOLDER_Younety",
+      "receiver_name": "Younety",
+      "gift": "500 cigarettes"
+    },
+    {
+      "giver_id": "294639971955113986",
+      "giver_name": "Random789",
+      "receiver_id": "288183610064764928",
+      "receiver_name": "carbsna",
+      "gift": null
+    },
+    {
+      "giver_id": "288183610064764928",
+      "giver_name": "carbsna",
+      "receiver_id": "571818326146416640",
+      "receiver_name": "Squibble",
+      "gift": null
+    },
+    {
+      "giver_id": "584694654780309524",
+      "giver_name": "paradoxx_42",
+      "receiver_id": "PLACEHOLDER_Tropicalswine",
+      "receiver_name": "Tropicalswine",
+      "gift": "Decorated houses"
+    },
+    {
+      "giver_id": "185834053558075392",
+      "giver_name": "JKM",
+      "receiver_id": "320526362219905038",
+      "receiver_name": "Velizar",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_Hatred",
+      "giver_name": "Hatred",
+      "receiver_id": "294480895065194507",
+      "receiver_name": "Erikbacke",
+      "gift": "dragon for erik"
+    },
+    {
+      "giver_id": "PLACEHOLDER_Younety",
+      "giver_name": "Younety",
+      "receiver_id": "188187888289054720",
+      "receiver_name": "m³",
+      "gift": null
+    },
+    {
+      "giver_id": "PLACEHOLDER_crubleigh",
+      "giver_name": "crubleigh",
+      "receiver_id": "132642056165261312",
+      "receiver_name": "mjc4wilton",
+      "gift": null
+    }
+  ],
+  "statistics": {
+    "total_participants": 24,
+    "gifts_exchanged": 6,
+    "completion_percentage": 25
+  },
+  "archived_at": 1735689600,
+  "notes": "Secret Santa 2025 - 24 participants, 6 gifts submitted. Some user IDs marked as PLACEHOLDER need to be replaced with actual Discord user IDs. Participants with known IDs from previous years (2021-2024) have been mapped automatically."
+}

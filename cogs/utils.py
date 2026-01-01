@@ -258,15 +258,20 @@ class JsonFile:
         async with self.lock:
             if self.path.exists():
                 try:
-                    return json.loads(self.path.read_text())
-                except (json.JSONDecodeError, OSError) as e:
+                    # Explicit UTF-8 encoding for cross-platform compatibility
+                    return json.loads(self.path.read_text(encoding='utf-8'))
+                except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
                     logger.error(f"JSON load error: {e}")
             return default or {}
 
     async def save(self, data: Any):
         async with self.lock:
             try:
-                self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+                # Explicit UTF-8 encoding for cross-platform compatibility
+                self.path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding='utf-8'
+                )
             except OSError as e:
                 logger.error(f"JSON save error: {e}")
 

@@ -857,12 +857,12 @@ class CustomEventsCog(commands.Cog):
         # Load any saved events
         for event_file in EVENTS_DIR.glob("event_*.json"):
             try:
-                with open(event_file, 'r') as f:
-                    data = json.load(f)
-                    event = Event.from_dict(data)
-                    self.events[event.event_id] = event
-                    if event.event_id >= self._next_event_id:
-                        self._next_event_id = event.event_id + 1
+                # Use pathlib for cross-platform compatibility with UTF-8 encoding
+                data = json.loads(event_file.read_text(encoding='utf-8'))
+                event = Event.from_dict(data)
+                self.events[event.event_id] = event
+                if event.event_id >= self._next_event_id:
+                    self._next_event_id = event.event_id + 1
             except Exception as e:
                 self.logger.error(f"Failed to load event {event_file}: {e}")
         
@@ -882,8 +882,11 @@ class CustomEventsCog(commands.Cog):
         """Save event to disk"""
         try:
             event_file = EVENTS_DIR / f"event_{event.event_id}.json"
-            with open(event_file, 'w') as f:
-                json.dump(event.to_dict(), f, indent=2)
+            # Use pathlib for cross-platform compatibility with UTF-8 encoding
+            event_file.write_text(
+                json.dumps(event.to_dict(), indent=2, ensure_ascii=False),
+                encoding='utf-8'
+            )
         except Exception as e:
             self.logger.error(f"Failed to save event {event.event_id}: {e}")
     

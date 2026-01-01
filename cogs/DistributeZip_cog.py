@@ -39,6 +39,7 @@ import disnake
 from disnake.ext import commands
 
 from .owner_utils import owner_check, get_owner_mention, is_owner
+from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 
 # Paths
@@ -74,29 +75,6 @@ def save_metadata(data: Dict):
         )
     except OSError as e:
         logging.getLogger("bot").error(f"Failed to save file metadata: {e}")
-
-
-def mod_check():
-    """Check if user is a moderator"""
-    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        try:
-            # Check if user has moderator role
-            if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
-                role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
-                if role_id:
-                    member = inter.author
-                    if isinstance(member, disnake.Member):
-                        roles = [role.id for role in member.roles]
-                        if role_id in roles:
-                            return True
-            
-            # Fall back to administrator check
-            if isinstance(inter.author, disnake.Member):
-                return inter.author.guild_permissions.administrator
-        except (AttributeError, TypeError):
-            pass
-        return False
-    return commands.check(predicate)
 
 
 class DistributeZipCog(commands.Cog):
