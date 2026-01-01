@@ -74,7 +74,8 @@ from .owner_utils import owner_check, get_owner_mention
 # Import from modular components
 from .secret_santa_storage import (
     ARCHIVE_DIR, BACKUPS_DIR, STATE_FILE,
-    load_state_with_fallback, save_state, load_all_archives, archive_event
+    load_state_with_fallback, save_state, load_all_archives, archive_event,
+    load_json, save_json
 )
 from .secret_santa_assignments import (
     load_history_from_archives, validate_assignment_possibility, make_assignments
@@ -1032,6 +1033,139 @@ class SecretSantaCog(commands.Cog):
         embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/852616843715395605.png")  # Gift emoji
 
         await inter.edit_original_response(embed=embed)
+
+    @ss_root.sub_command(name="edit_gift", description="Edit your gift submission from a past year")
+    async def ss_edit_gift(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        year: int = commands.Param(description="Year of the Secret Santa event (e.g., 2025)"),
+        gift_description: str = commands.Param(description="Updated gift description", max_length=2000)
+    ):
+        """Edit your own gift submission from an archived year"""
+        await inter.response.defer(ephemeral=True)
+        
+        user_id = str(inter.author.id)
+        
+        # Load archive file for the year
+        archive_path = ARCHIVE_DIR / f"{year}.json"
+        if not archive_path.exists():
+            await inter.edit_original_response(
+                content=f"❌ No archive found for year {year}. Make sure the year is correct!"
+            )
+            return
+        
+        try:
+            # Load archive
+            archive_data = load_json(archive_path)
+            if not archive_data:
+                await inter.edit_original_response(content=f"❌ Failed to load archive for {year}")
+                return
+            
+            # Handle both formats: list format (legacy) and unified format
+            assignments = None
+            if "assignments" in archive_data and isinstance(archive_data["assignments"], list):
+                # Legacy list format
+                assignments = archive_data["assignments"]
+            elif "event" in archive_data and "assignments" in archive_data["event"]:
+                # Unified format - convert to list for editing
+                event = archive_data["event"]
+                participants = event.get("participants", {})
+                assignments_map = event.get("assignments", {})
+                gift_submissions = event.get("gift_submissions", {})
+                
+                assignments = []
+                for giver_id, receiver_id in assignments_map.items():
+                    gift_data = gift_submissions.get(giver_id, {})
+                    gift = gift_data.get("gift") if gift_data else None
+                    assignments.append({
+                        "giver_id": giver_id,
+                        "giver_name": participants.get(giver_id, f"User {giver_id}"),
+                        "receiver_id": receiver_id,
+                        "receiver_name": participants.get(receiver_id, f"User {receiver_id}"),
+                        "gift": gift
+                    })
+            
+            if not assignments:
+                await inter.edit_original_response(content=f"❌ No assignments found in archive for {year}")
+                return
+            
+            # Find user's assignment
+            user_assignment = None
+            for assignment in assignments:
+                # Check if this assignment belongs to the user
+                giver_id = assignment.get("giver_id", "")
+                # Match exact ID or check if it's a PLACEHOLDER that we can't match (skip those)
+                if giver_id == user_id:
+                    user_assignment = assignment
+                    break
+            
+            if not user_assignment:
+                await inter.edit_original_response(
+                    content=f"❌ You didn't participate in Secret Santa {year}, or your user ID isn't in the archive."
+                )
+                return
+            
+            # Update the gift
+            old_gift = user_assignment.get("gift")
+            user_assignment["gift"] = gift_description
+            
+            # Recalculate statistics
+            total_participants = len(assignments)
+            gifts_exchanged = sum(1 for a in assignments if a.get("gift") and a.get("gift") != "No description")
+            completion_percentage = int((gifts_exchanged / total_participants) * 100) if total_participants > 0 else 0
+            
+            # Update statistics in archive
+            if "statistics" in archive_data:
+                archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
+                archive_data["statistics"]["completion_percentage"] = completion_percentage
+            
+            # Save updated archive
+            async with self._lock:
+                save_json(archive_path, archive_data)
+            
+            # Create success embed
+            receiver_name = user_assignment.get("receiver_name", "Unknown")
+            embed = self._success_embed(
+                title="✅ Gift Updated!",
+                description=f"Your gift submission for **Secret Santa {year}** has been updated!",
+                footer="🎄 You can edit your gift anytime, even years later!"
+            )
+            embed.add_field(
+                name="🎯 Recipient",
+                value=f"**{receiver_name}**",
+                inline=True
+            )
+            embed.add_field(
+                name="📅 Year",
+                value=f"**{year}**",
+                inline=True
+            )
+            embed.add_field(
+                name="📊 Completion",
+                value=f"**{completion_percentage}%** ({gifts_exchanged}/{total_participants} gifts)",
+                inline=True
+            )
+            if old_gift:
+                embed.add_field(
+                    name="📝 Old Gift",
+                    value=f"*{self._truncate_text(old_gift, 200)}*",
+                    inline=False
+                )
+            embed.add_field(
+                name="🎁 New Gift",
+                value=f"*{gift_description}*",
+                inline=False
+            )
+            
+            await inter.edit_original_response(embed=embed)
+            
+            self.logger.info(f"User {inter.author.display_name} ({user_id}) updated their gift for {year}")
+            
+        except Exception as e:
+            self.logger.error(f"Error editing gift for {year}: {e}", exc_info=True)
+            await inter.edit_original_response(
+                content=f"❌ An error occurred while updating your gift: {e}"
+            )
 
     @ss_root.sub_command_group(name="wishlist", description="Manage your Secret Santa wishlist")
     async def ss_wishlist(self, inter: disnake.ApplicationCommandInteraction):
