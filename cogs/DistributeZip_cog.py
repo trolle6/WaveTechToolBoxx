@@ -26,6 +26,8 @@ DATA STORAGE:
 - distributed_files_metadata.json - Metadata about uploaded files
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

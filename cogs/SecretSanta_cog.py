@@ -58,6 +58,8 @@ ALGORITHM:
 7. Archive on event stop
 """
 
+from __future__ import annotations
+
 import asyncio
 import datetime as dt
 import secrets
