@@ -349,7 +349,9 @@ class VoiceProcessingCog(commands.Cog):
         if max_length is not None and text and text[-1] not in '.!?,;:':
             text += '.'
 
-        return text.strip()
+        final_text = text.strip()
+        self.logger.debug(f"_clean_text result: length={len(final_text)}, preview={final_text[:100]}...")
+        return final_text
     
     def _ensure_text_length(self, text: str, max_length: int = 4096) -> str:
         """Ensure text doesn't exceed max_length, truncating if needed"""
@@ -457,6 +459,9 @@ class VoiceProcessingCog(commands.Cog):
             "response_format": "mp3",
             "speed": 1.0
         }
+        
+        # Log what we're sending to API (first 200 chars for debugging)
+        self.logger.debug(f"Sending to TTS API: length={len(text)}, preview={text[:200]}...")
 
         try:
             tts_timeout = getattr(self.bot.config, 'TTS_TIMEOUT', 15)
@@ -555,9 +560,15 @@ class VoiceProcessingCog(commands.Cog):
 
             # Wait for playback to complete
             try:
-                await asyncio.wait_for(play_done.wait(), timeout=60)
+                # Increase timeout for long messages (estimate 1 second per 100 chars)
+                estimated_duration = max(60, len(audio_data) / 1000)  # Rough estimate
+                timeout = min(300, estimated_duration + 30)  # Max 5 minutes, but add buffer
+                self.logger.debug(f"Waiting for playback completion, timeout={timeout}s")
+                await asyncio.wait_for(play_done.wait(), timeout=timeout)
+                self.logger.debug("Playback completed successfully")
                 return True
             except asyncio.TimeoutError:
+                self.logger.warning(f"Playback timeout after {timeout}s, stopping")
                 vc.stop()
                 return False
 
