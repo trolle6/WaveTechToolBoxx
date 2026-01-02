@@ -580,16 +580,17 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to complete
             try:
                 # Increase timeout for long messages
-                # Estimate: MP3 at 128kbps ≈ 1MB per minute, so bytes/17500 ≈ seconds
-                # But use a more conservative estimate: 60s base + 1s per 100KB
-                estimated_duration = 60 + (len(audio_data) / 100000)
-                timeout = min(300, estimated_duration)  # Max 5 minutes
-                self.logger.debug(f"Waiting for playback completion, timeout={timeout:.1f}s (audio_size={len(audio_data)} bytes)")
+                # Estimate: MP3 at 128kbps ≈ 1MB per minute (60 seconds)
+                # So: bytes / (1024*1024) * 60 = seconds
+                # Add generous buffer (2x estimate + 30s minimum)
+                estimated_duration = (len(audio_data) / (1024 * 1024)) * 60
+                timeout = max(120, min(600, estimated_duration * 2 + 30))  # Min 2 min, max 10 min
+                self.logger.debug(f"Waiting for playback completion, timeout={timeout:.1f}s (audio_size={len(audio_data)} bytes, estimated_duration={estimated_duration:.1f}s)")
                 await asyncio.wait_for(play_done.wait(), timeout=timeout)
                 self.logger.debug("Playback completed successfully")
                 return True
             except asyncio.TimeoutError:
-                self.logger.warning(f"Playback timeout after {timeout:.1f}s, stopping")
+                self.logger.warning(f"Playback timeout after {timeout:.1f}s (estimated {estimated_duration:.1f}s), stopping")
                 vc.stop()
                 return False
 
