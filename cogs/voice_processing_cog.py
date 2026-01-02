@@ -166,8 +166,18 @@ class VoiceProcessingCog(commands.Cog):
         
         # Pre-compile regex patterns
         self._compiled_corrections = self._compile_correction_patterns()
+        # Discord cleanup pattern: removes actual Discord formatting (mentions, URLs, rendered emojis)
+        # BUT preserves custom emoji text like :saul-1: (without angle brackets - these are just text)
+        # Pattern matches:
+        # - <:name:id> or <a:name:id> - Rendered custom emojis (name can contain hyphens, underscores, numbers)
+        # - <@user_id> or <@!user_id> - User mentions (remove)
+        # - <@&role_id> - Role mentions (remove)
+        # - <#channel_id> - Channel mentions (remove)
+        # - http://... or https://... - URLs (remove)
+        # Note: Text like :saul-1: is NOT matched (no brackets/ID) and will be preserved
+        # Using [\w-]+ instead of \w+ to match emoji names with hyphens (e.g., saul-1)
         self._discord_cleanup_pattern = re.compile(
-            r'<a?:\w+:\d+>|<@!?\d+>|<@&\d+>|<#\d+>|https?://\S+'
+            r'<a?:[\w-]+:\d+>|<@!?\d+>|<@&\d+>|<#\d+>|https?://\S+'
         )
 
         # Initialize components
@@ -432,7 +442,11 @@ class VoiceProcessingCog(commands.Cog):
             return truncated.rstrip() + "..."
 
     async def _clean_text(self, text: str, max_length: Optional[int] = None) -> str:
-        """Clean and process text for TTS
+        """
+        Clean and process text for TTS.
+        
+        Removes Discord formatting (mentions, rendered emojis, URLs) but preserves
+        plain text custom emoji names like :saul-1: (these are just text, not actual emoji formatting).
         
         Args:
             text: Text to clean
@@ -444,13 +458,26 @@ class VoiceProcessingCog(commands.Cog):
         # Normalize excessive formatting: multiple newlines, dashes, etc.
         text = re.sub(r'-{3,}', ' ', text)  # Replace 3+ dashes with space
         text = re.sub(r'\n{3,}', '\n\n', text)  # Replace 3+ newlines with 2
-        text = re.sub(r'\s+', ' ', text.strip())  # Normalize all whitespace to single spaces
-        after_whitespace = len(text)
+        
+        # Store original text before Discord cleanup to check if it was emoji-only
+        text_before_discord = text
+        
+        # Normalize whitespace AFTER Discord cleanup to handle cases where cleanup
+        # removes content and leaves extra spaces
         text = self._discord_cleanup_pattern.sub('', text)
         after_discord_cleanup = len(text)
+        
+        # Normalize whitespace after Discord cleanup
+        text = re.sub(r'\s+', ' ', text.strip())  # Normalize all whitespace to single spaces
+        after_whitespace = len(text)
+        
         text = self._apply_corrections(text)
         after_corrections = len(text)
-        self.logger.debug(f"Text cleaning: {original_length} → {after_whitespace} (whitespace) → {after_discord_cleanup} (discord) → {after_corrections} (corrections)")
+        
+        self.logger.debug(
+            f"Text cleaning: {original_length} → {after_discord_cleanup} (discord) → "
+            f"{after_whitespace} (whitespace) → {after_corrections} (corrections)"
+        )
 
         if self._detect_needs_pronunciation_help(text):
             # Skip pronunciation improvement for very long texts (will be split anyway)
@@ -959,16 +986,20 @@ class VoiceProcessingCog(commands.Cog):
             prefix = f"{pronounceable_name} says: "
             prefix_len = len(prefix)
             cleaned_text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
-            if not cleaned_text or len(cleaned_text) < 2:
-                self.logger.debug("Cleaned text too short, skipping")
+            # Allow even very short messages (single character, emoji names like :saul-1:, etc.)
+            # Only skip if completely empty after cleaning
+            if not cleaned_text or len(cleaned_text.strip()) == 0:
+                self.logger.debug("Cleaned text is empty, skipping")
                 return
             # Add prefix
             text = prefix + cleaned_text
             self.logger.debug(f"First message: added prefix '{prefix}' (len={prefix_len}), total length={len(text)}")
         else:
             text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
-            if not text or len(text) < 2:
-                self.logger.debug("Cleaned text too short, skipping")
+            # Allow even very short messages (single character, emoji names like :saul-1:, etc.)
+            # Only skip if completely empty after cleaning
+            if not text or len(text.strip()) == 0:
+                self.logger.debug("Cleaned text is empty, skipping")
                 return
             self.logger.debug(f"Cleaned text length={len(text)}")
 
