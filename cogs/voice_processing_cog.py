@@ -636,17 +636,23 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel - ensure both are int for proper comparison
         if self.allowed_channel is not None:
-            msg_channel_id = int(message.channel.id)  # Ensure it's an int
-            allowed_channel_id = int(self.allowed_channel)  # Ensure it's an int
+            # Convert both to int explicitly
+            try:
+                msg_channel_id = int(message.channel.id)
+                allowed_channel_id = int(self.allowed_channel)
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Failed to convert channel IDs to int: {e}")
+                return False
             
-            # Use string comparison as fallback to catch any weird type issues
-            if str(msg_channel_id) != str(allowed_channel_id):
+            # Compare as both int and string to catch any weird edge cases
+            int_match = msg_channel_id == allowed_channel_id
+            str_match = str(msg_channel_id) == str(allowed_channel_id)
+            
+            if not (int_match and str_match):
                 self.logger.warning(
-                    f"CHANNEL MISMATCH: msg_channel_id={msg_channel_id} (type: {type(msg_channel_id).__name__}, "
-                    f"repr: {repr(msg_channel_id)}) != allowed_channel={allowed_channel_id} "
-                    f"(type: {type(allowed_channel_id).__name__}, repr: {repr(allowed_channel_id)}), "
-                    f"int comparison: {msg_channel_id != allowed_channel_id}, "
-                    f"str comparison: {str(msg_channel_id) != str(allowed_channel_id)}"
+                    f"CHANNEL MISMATCH: msg={msg_channel_id} (type: {type(msg_channel_id).__name__}) "
+                    f"!= allowed={allowed_channel_id} (type: {type(allowed_channel_id).__name__}), "
+                    f"int_match={int_match}, str_match={str_match}"
                 )
                 return False
             # Channel matches - continue processing
