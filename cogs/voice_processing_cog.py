@@ -132,7 +132,9 @@ class VoiceProcessingCog(commands.Cog):
         self._voice_lock = asyncio.Lock()
         
         # TTS role requirement (optional)
-        self.tts_role_id = getattr(bot.config, 'TTS_ROLE_ID', None)
+        tts_role_id = getattr(bot.config, 'TTS_ROLE_ID', None)
+        # Convert to int to match role.id type
+        self.tts_role_id = int(tts_role_id) if tts_role_id else None
         if self.tts_role_id:
             self.logger.info(f"TTS role requirement enabled: {self.tts_role_id}")
 
@@ -146,7 +148,8 @@ class VoiceProcessingCog(commands.Cog):
         self._shutdown = asyncio.Event()
         self._unloaded = False
 
-        self.allowed_channel = bot.config.DISCORD_CHANNEL_ID
+        # Convert to int to match message.channel.id type
+        self.allowed_channel = int(bot.config.DISCORD_CHANNEL_ID) if bot.config.DISCORD_CHANNEL_ID else None
 
     # ============ PRONOUN DETECTION ============
     async def _detect_pronouns(self, member: disnake.Member) -> Optional[str]:
