@@ -432,9 +432,19 @@ class SecretSantaCog(commands.Cog):
         
         return emoji_mapping
 
+    def _get_openai_headers(self) -> Dict[str, str]:
+        """Get common OpenAI API headers"""
+        if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
+            return {}
+        return {
+            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
     async def _anonymize_text(self, text: str, message_type: str = "question") -> str:
         """Use OpenAI to rewrite text for anonymity"""
-        if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
+        headers = self._get_openai_headers()
+        if not headers:
             return text
         
         try:
@@ -446,11 +456,6 @@ class SecretSantaCog(commands.Cog):
             base_prompt += f"Original: {text}\n\nRewritten:"
             
             prompt = base_prompt.format(type=message_type)
-            
-            headers = {
-                "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
             
             payload = {
                 "model": "gpt-3.5-turbo",

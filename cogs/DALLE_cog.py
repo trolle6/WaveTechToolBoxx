@@ -30,7 +30,20 @@ from . import utils
 
 @dataclass
 class GenerationJob:
-    """Image generation job"""
+    """
+    Represents a single image generation request in the processing queue.
+    
+    Attributes:
+        user_id: Discord user ID who requested the generation
+        prompt: Text description of the image to generate
+        size: Image size (1024x1024, 1792x1024, or 1024x1792)
+        quality: Image quality (standard or hd)
+        interaction: Discord interaction object for responding to the user
+        timestamp: Unix timestamp when job was created (for expiry tracking)
+    
+    Design: Separates job creation from processing to enable queue management and prevent
+    API rate limiting by processing requests sequentially.
+    """
     user_id: int
     prompt: str
     size: str
@@ -38,12 +51,33 @@ class GenerationJob:
     interaction: disnake.ApplicationCommandInteraction
     timestamp: float
 
-    def is_expired(self, max_age: int = 300) -> bool:
+    # Job expiry configuration
+    DEFAULT_EXPIRY_SECONDS = 300  # 5 minutes - jobs expire after this time
+
+    def is_expired(self, max_age: int = DEFAULT_EXPIRY_SECONDS) -> bool:
+        """
+        Check if this generation job has expired.
+        
+        Args:
+            max_age: Maximum age in seconds before job expires
+            
+        Returns:
+            True if job is older than max_age seconds
+        """
         return (time.time() - self.timestamp) > max_age
 
 
 class DALLECog(commands.Cog):
-    """DALL-E 3 image generation"""
+    """
+    DALL-E 3 image generation cog with queue management and caching.
+    
+    DESIGN DECISIONS:
+    - FIFO queue: Ensures fair processing order, prevents API rate limiting
+    - Sequential processing: One image at a time for reliability and cost control
+    - LRU cache: Avoids duplicate generations for same prompt/size/quality
+    - Health monitoring: Auto-restarts processor if it crashes or hangs
+    - Exponential backoff: Retries failed requests with increasing delays
+    """
 
     def __init__(self, bot):
         self.bot = bot
@@ -90,10 +124,105 @@ class DALLECog(commands.Cog):
 
         self.logger.info("DALL-E cog initialized")
 
+    # ============ EMBED HELPERS ============
+    # These methods standardize embed creation for consistent user experience
+    # and easier maintenance (change style in one place)
+    
+    def _create_error_embed(self, error_msg: str, elapsed: float = 0.0) -> disnake.Embed:
+        """
+        Create standardized error embed for failed generations.
+        
+        Args:
+            error_msg: Error message to display to user
+            elapsed: Optional elapsed time to show in footer (0 = don't show)
+            
+        Returns:
+            Configured error embed with red color
+        """
+        embed = disnake.Embed(
+            title="❌ Generation Failed",
+            description=error_msg,
+            color=disnake.Color.red()
+        )
+        if elapsed > 0:
+            embed.set_footer(text=f"Time: {elapsed:.1f}s")
+        return embed
+
+    def _create_success_embed(self, image_url: str, prompt: str, quality: str, elapsed: float) -> disnake.Embed:
+        """
+        Create standardized success embed for completed generations.
+        
+        Args:
+            image_url: URL of generated image
+            prompt: Original prompt (truncated for display)
+            quality: Image quality (standard/hd)
+            elapsed: Generation time in seconds
+            
+        Returns:
+            Configured success embed with image, stats, and helpful tip
+        """
+        prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
+        embed = disnake.Embed(
+            title="🎨 Image Generated!",
+            description=f"**Prompt:** {prompt_preview}",
+            color=disnake.Color.green()
+        )
+        embed.set_image(url=image_url)
+        embed.add_field(name="Time", value=f"{elapsed:.1f}s", inline=True)
+        embed.add_field(name="Model", value="DALL-E 3", inline=True)
+        embed.add_field(name="Quality", value=quality.upper(), inline=True)
+        embed.set_footer(text="💡 Tip: Use specific details for better results!")
+        return embed
+
+    def _create_loading_embed(self, prompt: str, size: str, quality: str) -> disnake.Embed:
+        """Create loading embed"""
+        embed = disnake.Embed(
+            title="🎨 Generating Image",
+            description="Creating your masterpiece with DALL-E 3...",
+            color=disnake.Color.blue()
+        )
+        prompt_preview = prompt[:100] + "..." if len(prompt) > 100 else prompt
+        embed.add_field(name="Prompt", value=f"```{prompt_preview}```", inline=False)
+        embed.add_field(name="Quality", value=quality.upper(), inline=True)
+        embed.add_field(name="Size", value=size, inline=True)
+        embed.set_footer(text="This may take 15-30 seconds")
+        return embed
+
+    def _create_cache_embed(self, image_url: str) -> disnake.Embed:
+        """Create cache hit embed"""
+        embed = disnake.Embed(
+            title="🎨 Image Generated!",
+            description="Retrieved from cache",
+            color=disnake.Color.blue()
+        )
+        embed.set_image(url=image_url)
+        embed.set_footer(text="⚡ Retrieved from cache")
+        return embed
+
+    def _create_queue_embed(self, queue_size: int) -> disnake.Embed:
+        """Create queue position embed"""
+        embed = disnake.Embed(
+            title="⏳ Image Generation Queued",
+            description="Your request has been added to the queue",
+            color=disnake.Color.blue()
+        )
+        embed.add_field(name="Position", value=f"#{queue_size}", inline=True)
+        embed.add_field(name="Est. Wait", value=f"~{queue_size * 30}s", inline=True)
+        embed.set_footer(text="You'll be notified when it's ready")
+        return embed
+
     # ============ CACHE ============
     def _cache_key(self, prompt: str, size: str, quality: str) -> str:
         """Generate cache key"""
         return str(hash(f"{prompt}:{size}:{quality}"))
+
+    # ============ API HELPERS ============
+    def _get_openai_headers(self) -> Dict[str, str]:
+        """Get common OpenAI API headers"""
+        return {
+            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
     # ============ API GENERATION ============
     async def _generate_image(
@@ -103,10 +232,7 @@ class DALLECog(commands.Cog):
         quality: str = "hd"
     ) -> Dict:
         """Call DALL-E API with retry logic"""
-        headers = {
-            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        headers = self._get_openai_headers()
 
         payload = {
             "model": "dall-e-3",
@@ -202,16 +328,7 @@ class DALLECog(commands.Cog):
 
                     # Update status
                     try:
-                        embed = disnake.Embed(
-                            title="🎨 Generating Image",
-                            description="Creating your masterpiece with DALL-E 3...",
-                            color=disnake.Color.blue()
-                        )
-                        prompt_preview = job.prompt[:100] + "..." if len(job.prompt) > 100 else job.prompt
-                        embed.add_field(name="Prompt", value=f"```{prompt_preview}```", inline=False)
-                        embed.add_field(name="Quality", value=job.quality.upper(), inline=True)
-                        embed.add_field(name="Size", value=job.size, inline=True)
-                        embed.set_footer(text="This may take 15-30 seconds")
+                        embed = self._create_loading_embed(job.prompt, job.size, job.quality)
                         await job.interaction.edit_original_response(embed=embed)
                     except Exception:
                         pass
@@ -251,29 +368,12 @@ class DALLECog(commands.Cog):
         """Send generation result"""
         try:
             if not result.get("success"):
-                embed = disnake.Embed(
-                    title="❌ Generation Failed",
-                    description=result.get("error", "Unknown error"),
-                    color=disnake.Color.red()
-                )
-                embed.set_footer(text=f"Time: {elapsed:.1f}s")
+                embed = self._create_error_embed(result.get("error", "Unknown error"), elapsed)
                 await job.interaction.edit_original_response(embed=embed)
                 return
 
             image_url = result["data"]["data"][0]["url"]
-            prompt_preview = job.prompt[:200] + "..." if len(job.prompt) > 200 else job.prompt
-
-            embed = disnake.Embed(
-                title="🎨 Image Generated!",
-                description=f"**Prompt:** {prompt_preview}",
-                color=disnake.Color.green()
-            )
-            embed.set_image(url=image_url)
-            embed.add_field(name="Time", value=f"{elapsed:.1f}s", inline=True)
-            embed.add_field(name="Model", value="DALL-E 3", inline=True)
-            embed.add_field(name="Quality", value=job.quality.upper(), inline=True)
-            embed.set_footer(text="💡 Tip: Use specific details for better results!")
-
+            embed = self._create_success_embed(image_url, job.prompt, job.quality, elapsed)
             await job.interaction.edit_original_response(embed=embed)
 
         except Exception as e:
@@ -367,14 +467,7 @@ class DALLECog(commands.Cog):
             async with self._stats_lock:
                 self.stats["cache_hits"] += 1
 
-            prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
-            embed = disnake.Embed(
-                title="🎨 Image (Cached)",
-                description=f"**Prompt:** {prompt_preview}",
-                color=disnake.Color.blue()
-            )
-            embed.set_image(url=cached)
-            embed.set_footer(text="⚡ Retrieved from cache")
+            embed = self._create_cache_embed(cached)
             await inter.edit_original_response(embed=embed)
             return
 
@@ -393,14 +486,7 @@ class DALLECog(commands.Cog):
             self.queue.put_nowait(job)
             queue_size = self.queue.qsize()
 
-            embed = disnake.Embed(
-                title="⏳ Queued",
-                description="Your image is in the queue",
-                color=disnake.Color.blue()
-            )
-            embed.add_field(name="Position", value=f"#{queue_size}", inline=True)
-            embed.add_field(name="Est. Wait", value=f"~{queue_size * 30}s", inline=True)
-            embed.set_footer(text="You'll be notified when generation starts")
+            embed = self._create_queue_embed(queue_size)
             await inter.edit_original_response(embed=embed)
 
         except asyncio.QueueFull:

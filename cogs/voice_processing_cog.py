@@ -16,6 +16,13 @@ COMMANDS:
 - /tts disconnect - Force disconnect (admin)
 - /tts clear - Clear TTS queue (admin)
 - /tts status - Check voice channel status
+
+DESIGN DECISIONS:
+- Unlimited message length: Messages are split at sentence boundaries to handle any length
+- Opus format: Used instead of MP3 for better compression and Discord-native support
+- Dynamic timeouts: API and playback timeouts scale with text/audio length
+- Sequential processing: Chunks are processed one at a time for reliability (not parallel)
+- User ID-based voice assignment: Ensures consistent voice per user using deterministic hashing
 """
 
 import asyncio
@@ -33,6 +40,47 @@ from disnake.ext import commands
 from . import utils
 
 
+# ============ CONSTANTS ============
+# These constants define API limits and configuration values to make the code self-documenting
+
+# OpenAI TTS API Limits
+OPENAI_TTS_MAX_CHARS_PER_REQUEST = 4096  # Maximum characters per TTS API request
+TTS_CHUNK_SIZE = 4000  # Characters per chunk when splitting (leaves buffer for API limit)
+
+# Timeout Configuration (in seconds)
+TTS_API_TIMEOUT_BASE = 60  # Base timeout for TTS API requests
+TTS_API_TIMEOUT_PER_100_CHARS = 0.15  # Additional seconds per 100 characters
+TTS_API_TIMEOUT_MAX = 180  # Maximum timeout (3 minutes)
+
+# Audio Playback Configuration
+OPUS_BYTES_PER_SECOND = 8000  # Opus at 64kbps ≈ 8000 bytes/second
+AUDIO_PLAYBACK_TIMEOUT_BASE = 120  # Base timeout (2 minutes)
+AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER = 2.0  # Multiplier for estimated duration
+AUDIO_PLAYBACK_TIMEOUT_BUFFER = 30  # Additional buffer seconds
+AUDIO_PLAYBACK_TIMEOUT_MAX = 600  # Maximum timeout (10 minutes)
+
+# Text Processing Configuration
+PRONUNCIATION_IMPROVEMENT_MAX_CHARS = 3500  # Skip pronunciation improvement for longer texts (will be split anyway)
+SENTENCE_BOUNDARY_MIN_PERCENT = 0.8  # Minimum 80% of text must be kept when truncating at sentence boundary
+
+# Cache Configuration (in seconds)
+CACHE_TTL_AUDIO = 3600  # 1 hour - audio cache TTL
+CACHE_TTL_PRONUNCIATION = 7200  # 2 hours - pronunciation improvement cache TTL
+
+# Queue and State Configuration
+QUEUE_PROCESSOR_TIMEOUT = 300  # 5 minutes - timeout for queue processor wait
+GUILD_IDLE_TIMEOUT = 600  # 10 minutes - guild considered idle after this time
+MESSAGE_EXPIRY_TIME = 60  # 1 minute - TTS items expire after this time
+
+# Circuit Breaker Configuration
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5  # Open circuit after this many failures
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # Try recovery after this many seconds
+CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
+
+# Audio Processing
+AUDIO_VOLUME_MULTIPLIER = 0.6  # Reduce volume to 60% for voice channel playback
+
+
 @dataclass
 class TTSQueueItem:
     """TTS queue item"""
@@ -48,7 +96,21 @@ class TTSQueueItem:
 
 
 class GuildVoiceState:
-    """Voice state manager for a guild"""
+    """
+    Manages voice processing state for a single Discord guild.
+    
+    Each guild has its own queue and processor to allow parallel processing
+    across multiple servers without blocking.
+    
+    Attributes:
+        guild_id: Discord guild ID this state belongs to
+        logger: Logger instance for this guild's operations
+        queue: Async queue for TTS items (FIFO processing)
+        processor_task: Background task that processes the queue
+        is_processing: Flag indicating if queue is currently being processed
+        last_activity: Timestamp of last queue activity (for cleanup)
+        stats: Statistics dictionary tracking processed/dropped/error counts
+    """
     
     def __init__(self, guild_id: int, logger, max_queue_size: int = 20):
         self.guild_id = guild_id
@@ -60,9 +122,19 @@ class GuildVoiceState:
         self.stats = {"processed": 0, "dropped": 0, "errors": 0}
 
     def mark_active(self):
+        """Update last activity timestamp to prevent idle cleanup."""
         self.last_activity = time.time()
 
-    def is_idle(self, timeout: int = 600) -> bool:
+    def is_idle(self, timeout: int = GUILD_IDLE_TIMEOUT) -> bool:
+        """
+        Check if this guild state has been idle for too long.
+        
+        Args:
+            timeout: Seconds of inactivity before considered idle
+            
+        Returns:
+            True if last activity was more than timeout seconds ago
+        """
         return (time.time() - self.last_activity) > timeout
 
     async def stop(self):
@@ -105,10 +177,12 @@ class VoiceProcessingCog(commands.Cog):
         
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
         self.circuit_breaker = utils.CircuitBreaker(
-            failure_threshold=5, recovery_timeout=60, success_threshold=2
+            failure_threshold=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            recovery_timeout=CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
+            success_threshold=CIRCUIT_BREAKER_SUCCESS_THRESHOLD
         )
-        self.cache = utils.LRUCache[bytes](max_size=max_cache, ttl=3600)
-        self.pronunciation_cache = utils.LRUCache[str](max_size=200, ttl=7200)
+        self.cache = utils.LRUCache[bytes](max_size=max_cache, ttl=CACHE_TTL_AUDIO)
+        self.pronunciation_cache = utils.LRUCache[str](max_size=200, ttl=CACHE_TTL_PRONUNCIATION)
 
         # Guild states
         self.guild_states: Dict[int, GuildVoiceState] = {}
@@ -134,10 +208,13 @@ class VoiceProcessingCog(commands.Cog):
         
         # TTS role requirement (optional)
         tts_role_id = getattr(bot.config, 'TTS_ROLE_ID', None)
-        # Convert to int to match role.id type
-        self.tts_role_id = int(tts_role_id) if tts_role_id else None
-        if self.tts_role_id:
-            self.logger.info(f"TTS role requirement enabled: {self.tts_role_id}")
+        self.tts_role_id = None
+        if tts_role_id:
+            try:
+                self.tts_role_id = int(str(tts_role_id).strip())
+                self.logger.info(f"TTS role requirement enabled: {self.tts_role_id}")
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Failed to convert TTS_ROLE_ID to int: {tts_role_id} - {e}")
 
         # Statistics
         self.total_requests = 0
@@ -199,12 +276,12 @@ class VoiceProcessingCog(commands.Cog):
         
         return None
 
-    def _get_voice_for_pronouns(self, pronouns: Optional[str]) -> str:
-        """Map pronouns to voice"""
+    def _get_voice_for_pronouns(self, pronouns: Optional[str], user_id: int) -> str:
+        """Map pronouns to voice (consistent based on user ID)"""
         if pronouns == 'he':
-            return 'echo' if hash(time.time()) % 2 == 0 else 'onyx'
+            return 'echo' if user_id % 2 == 0 else 'onyx'
         elif pronouns == 'she':
-            return 'nova' if hash(time.time()) % 2 == 0 else 'shimmer'
+            return 'nova' if user_id % 2 == 0 else 'shimmer'
         elif pronouns == 'they':
             return 'alloy'
         return 'alloy'  # Default
@@ -212,27 +289,25 @@ class VoiceProcessingCog(commands.Cog):
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
         """Get or assign voice for user"""
         user_key = str(member.id)
+        user_id = member.id
         
         # Check role requirement
         if self.tts_role_id:
             if not any(role.id == self.tts_role_id for role in member.roles):
                 return self.default_voice
         
-        # Return existing assignment
+        # Return existing assignment or detect and assign new voice
         async with self._voice_lock:
             if user_key in self._voice_assignments:
                 voice = self._voice_assignments[user_key]
                 if voice in self.available_voices:
                     return voice
-        
-        # Detect and assign new voice
-        pronouns = await self._detect_pronouns(member)
-        new_voice = self._get_voice_for_pronouns(pronouns)
-        
-        async with self._voice_lock:
+            
+            # Detect and assign new voice
+            pronouns = await self._detect_pronouns(member)
+            new_voice = self._get_voice_for_pronouns(pronouns, user_id)
             self._voice_assignments[user_key] = new_voice
-        
-        return new_voice
+            return new_voice
 
     # ============ TEXT PROCESSING ============
     def _compile_correction_patterns(self) -> list[tuple[re.Pattern, str]]:
@@ -252,17 +327,16 @@ class VoiceProcessingCog(commands.Cog):
 
     def _detect_needs_pronunciation_help(self, text: str) -> bool:
         """Check if text needs AI pronunciation help"""
-        return bool(
-            re.findall(r'\b[A-Z]{2,4}\b', text) or  # Acronyms
-            re.findall(r'\b[a-z]+[A-Z]+[a-z]*\b|\b[A-Z]+[a-z]+[A-Z]+\b', text) or  # Mixed case
-            re.findall(r'\b[A-Za-z]+\d+\b|\b\d+[A-Za-z]+\b', text)  # Alphanumeric
+        # Combined pattern for efficiency: acronyms, mixed case, alphanumeric
+        pattern = re.compile(
+            r'\b[A-Z]{2,4}\b|'  # Acronyms (2-4 uppercase letters)
+            r'\b[a-z]+[A-Z]+[a-z]*\b|\b[A-Z]+[a-z]+[A-Z]+\b|'  # Mixed case
+            r'\b[A-Za-z]+\d+\b|\b\d+[A-Za-z]+\b'  # Alphanumeric
         )
+        return bool(pattern.search(text))
 
     async def _improve_pronunciation(self, text: str) -> str:
         """Use AI to improve pronunciation"""
-        if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
-            return text
-        
         # Check cache
         cached = await self.pronunciation_cache.get(text)
         if cached:
@@ -278,10 +352,7 @@ class VoiceProcessingCog(commands.Cog):
                 f"Text: {text}\n\nImproved:"
             )
             
-            headers = {
-                "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
+            headers = self._get_openai_headers()
             
             # Calculate max_tokens: estimate ~4 chars per token, add 50% buffer
             # Cap at reasonable limit (2000 tokens ≈ 8000 chars output)
@@ -321,6 +392,32 @@ class VoiceProcessingCog(commands.Cog):
             text = pattern.sub(replacement, text)
         return re.sub(r'\s+', ' ', text)
 
+    def _truncate_at_sentence_boundary(self, text: str, max_length: int) -> str:
+        """
+        Truncate text at sentence boundary if possible.
+        
+        This provides natural breaks in speech when text must be truncated,
+        avoiding mid-sentence cuts that sound unnatural in TTS.
+        
+        Args:
+            text: Text to truncate
+            max_length: Maximum allowed length
+            
+        Returns:
+            Truncated text ending at sentence boundary if possible, otherwise truncated with "..."
+        """
+        truncated = text[:max_length]
+        last_period = truncated.rfind('.')
+        last_exclamation = truncated.rfind('!')
+        last_question = truncated.rfind('?')
+        last_break = max(last_period, last_exclamation, last_question)
+        
+        # Only use sentence break if it keeps at least 80% of text (avoids tiny fragments)
+        if last_break >= 0 and last_break > max_length * SENTENCE_BOUNDARY_MIN_PERCENT:
+            return truncated[:last_break + 1]
+        else:
+            return truncated.rstrip() + "..."
+
     async def _clean_text(self, text: str, max_length: Optional[int] = None) -> str:
         """Clean and process text for TTS
         
@@ -354,19 +451,7 @@ class VoiceProcessingCog(commands.Cog):
 
         # Truncate if max_length specified and exceeds limit
         if max_length and len(text) > max_length:
-            # Try to truncate at sentence boundary for natural breaks
-            truncated = text[:max_length]
-            last_period = truncated.rfind('.')
-            last_exclamation = truncated.rfind('!')
-            last_question = truncated.rfind('?')
-            last_break = max(last_period, last_exclamation, last_question)
-            
-            # Only use sentence break if found and keeps at least 80% of text
-            if last_break >= 0 and last_break > max_length * 0.8:
-                text = truncated[:last_break + 1]
-            else:
-                # No good sentence break found, truncate cleanly
-                text = truncated.rstrip() + "..."
+            text = self._truncate_at_sentence_boundary(text, max_length)
 
         # Only add period if we're not splitting (max_length=None means we'll split)
         if max_length is not None and text and text[-1] not in '.!?,;:':
@@ -380,28 +465,24 @@ class VoiceProcessingCog(commands.Cog):
         """Ensure text doesn't exceed max_length, truncating if needed"""
         if len(text) <= max_length:
             return text
-        
-        # Try to truncate at sentence boundary
-        truncated = text[:max_length]
-        last_period = truncated.rfind('.')
-        last_exclamation = truncated.rfind('!')
-        last_question = truncated.rfind('?')
-        last_break = max(last_period, last_exclamation, last_question)
-        
-        if last_break >= 0 and last_break > max_length * 0.8:
-            return truncated[:last_break + 1]
-        else:
-            return truncated.rstrip() + "..."
+        return self._truncate_at_sentence_boundary(text, max_length)
     
-    def _split_text_into_chunks(self, text: str, max_chunk_size: int = 4000) -> list[str]:
-        """Split long text into chunks at sentence boundaries
+    def _split_text_into_chunks(self, text: str, max_chunk_size: int = TTS_CHUNK_SIZE) -> list[str]:
+        """
+        Split long text into chunks at sentence boundaries for sequential TTS processing.
+        
+        This enables unlimited message length by splitting at natural breaks (sentences, newlines).
+        Chunks are processed sequentially (not in parallel) for reliability and proper ordering.
+        
+        Design decision: Sequential processing ensures chunks play in order and handles errors gracefully.
+        Parallel processing would require complex queue management and error handling.
         
         Args:
-            text: Text to split
-            max_chunk_size: Maximum size per chunk (default 4000 to leave buffer for API)
+            text: Text to split (can be any length)
+            max_chunk_size: Maximum characters per chunk (default: TTS_CHUNK_SIZE)
         
         Returns:
-            List of text chunks, each <= max_chunk_size
+            List of text chunks, each <= max_chunk_size, split at sentence boundaries when possible
         """
         original_length = len(text)
         self.logger.debug(f"Splitting text: original length={original_length}, max_chunk_size={max_chunk_size}")
@@ -470,10 +551,7 @@ class VoiceProcessingCog(commands.Cog):
         # Make API request
         self.total_requests += 1
 
-        headers = {
-            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        headers = self._get_openai_headers()
 
         payload = {
             "model": "tts-1",
@@ -487,13 +565,11 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.debug(f"Sending to TTS API: length={len(text)}, preview={text[:200]}...")
 
         try:
-            # Increase timeout for longer texts
-            # OpenAI TTS API can take longer for complex/long texts
-            # Use very generous timeout: 60s base + 0.15s per 100 chars
-            base_timeout = getattr(self.bot.config, 'TTS_TIMEOUT', 15)
-            text_timeout = len(text) / 100 * 0.15 + 60  # 60s base + 0.15s per 100 chars
-            tts_timeout = max(60, min(180, text_timeout))  # Minimum 60s, cap at 180s (3 minutes)
-            self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, base={base_timeout}, calculated={text_timeout:.1f})")
+            # Dynamic timeout calculation: scales with text length to handle long messages
+            # Base timeout + proportional time per 100 chars, clamped to reasonable bounds
+            text_timeout = (len(text) / 100 * TTS_API_TIMEOUT_PER_100_CHARS) + TTS_API_TIMEOUT_BASE
+            tts_timeout = max(TTS_API_TIMEOUT_BASE, min(TTS_API_TIMEOUT_MAX, text_timeout))
+            self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, calculated={text_timeout:.1f})")
             session = await self.bot.http_mgr.get_session()
             
             # Use request-level timeout to override session timeout
@@ -529,7 +605,23 @@ class VoiceProcessingCog(commands.Cog):
 
     # ============ AUDIO PLAYBACK ============
     async def _play_audio(self, vc: disnake.VoiceClient, audio_data: bytes) -> bool:
-        """Play audio through voice client"""
+        """
+        Play audio through Discord voice client with proper cleanup and timeout handling.
+        
+        DESIGN DECISIONS:
+        - Temp file: FFmpegOpusAudio requires file path (can't use bytes directly)
+        - Callback cleanup: Automatically deletes temp file after playback completes
+        - Dynamic timeout: Scales with audio length to handle long messages
+        - Volume reduction: 60% volume prevents audio clipping in voice channels
+        - Wait for completion: Uses asyncio.Event to properly wait for playback finish
+        
+        Args:
+            vc: Discord voice client to play audio through
+            audio_data: Audio bytes in Opus format to play
+            
+        Returns:
+            True if playback completed successfully, False if failed or timed out
+        """
         temp_file = None
 
         try:
@@ -551,9 +643,8 @@ class VoiceProcessingCog(commands.Cog):
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Prepare audio source
-            # Opus is more efficient than MP3, smaller files, Discord's native format
-            audio = disnake.FFmpegPCMAudio(
+            # Prepare audio source (Opus format - Discord-native, efficient)
+            audio = disnake.FFmpegOpusAudio(
                 temp_file,
                 before_options='-nostdin',
                 options='-vn -af volume=0.6'
@@ -592,12 +683,17 @@ class VoiceProcessingCog(commands.Cog):
 
             # Wait for playback to complete
             try:
-                # Increase timeout for long messages
-                # Opus at 64kbps = 8000 bytes/sec = 480KB/min
-                # Duration = bytes / 8000 seconds
-                # Add generous buffer (2x estimate + 30s minimum)
-                estimated_duration = len(audio_data) / 8000
-                timeout = max(120, min(600, estimated_duration * 2 + 30))  # Min 2 min, max 10 min
+                # Calculate dynamic timeout based on audio length
+                # Opus format: estimate duration from file size (8000 bytes/sec at 64kbps)
+                # Use 2x multiplier + buffer to handle network/system delays
+                estimated_duration = len(audio_data) / OPUS_BYTES_PER_SECOND
+                timeout = max(
+                    AUDIO_PLAYBACK_TIMEOUT_BASE,
+                    min(
+                        AUDIO_PLAYBACK_TIMEOUT_MAX,
+                        estimated_duration * AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER + AUDIO_PLAYBACK_TIMEOUT_BUFFER
+                    )
+                )
                 self.logger.debug(f"Waiting for playback completion, timeout={timeout:.1f}s (audio_size={len(audio_data)} bytes, estimated_duration={estimated_duration:.1f}s)")
                 await asyncio.wait_for(play_done.wait(), timeout=timeout)
                 self.logger.debug("Playback completed successfully")
@@ -869,11 +965,11 @@ class VoiceProcessingCog(commands.Cog):
         # Split into chunks if needed (4000 chars per chunk to leave buffer)
         text_chunks = self._split_text_into_chunks(text, max_chunk_size=4000)
         
-        # Ensure each chunk doesn't exceed 4096 (safety check)
+        # Safety check: Ensure each chunk doesn't exceed API limit
         for i, chunk in enumerate(text_chunks):
-            if len(chunk) > 4096:
+            if len(chunk) > OPENAI_TTS_MAX_CHARS_PER_REQUEST:
                 old_len = len(chunk)
-                text_chunks[i] = self._ensure_text_length(chunk, max_length=4096)
+                text_chunks[i] = self._ensure_text_length(chunk, max_length=OPENAI_TTS_MAX_CHARS_PER_REQUEST)
                 self.logger.warning(f"Chunk {i+1} exceeded 4096 chars ({old_len}), truncated to {len(text_chunks[i])}")
 
         # Queue all chunks sequentially
