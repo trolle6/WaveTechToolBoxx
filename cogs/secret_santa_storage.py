@@ -20,21 +20,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Lazy import to avoid circular dependencies
-_health_monitor = None
-
-
-def _get_health_monitor(logger=None):
-    """Get or create health monitor instance (lazy initialization)"""
-    global _health_monitor
-    if _health_monitor is None:
-        try:
-            from .health_monitor import HealthMonitor
-            _health_monitor = HealthMonitor(logger)
-        except ImportError:
-            # If health monitor not available, return None (graceful degradation)
-            return None
-    return _health_monitor
 
 
 # Paths - relative to cogs directory
