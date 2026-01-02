@@ -475,7 +475,7 @@ class VoiceProcessingCog(commands.Cog):
             "model": "tts-1",
             "input": text,
             "voice": voice,
-            "response_format": "mp3",
+            "response_format": "opus",  # Opus: better compression, smaller files, Discord-native
             "speed": 1.0
         }
         
@@ -535,11 +535,12 @@ class VoiceProcessingCog(commands.Cog):
                     await asyncio.sleep(0.2)
 
             # Create temp file
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix='.opus', delete=False) as f:
                 f.write(audio_data)
                 temp_file = f.name
 
             # Prepare audio source
+            # Opus is more efficient than MP3, smaller files, Discord's native format
             audio = disnake.FFmpegPCMAudio(
                 temp_file,
                 before_options='-nostdin',
@@ -580,10 +581,10 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to complete
             try:
                 # Increase timeout for long messages
-                # Estimate: MP3 at 128kbps ≈ 1MB per minute (60 seconds)
-                # So: bytes / (1024*1024) * 60 = seconds
+                # Opus at 64kbps ≈ 480KB per minute (more efficient than MP3)
+                # So: bytes / (1024*512) * 60 = seconds (rough estimate)
                 # Add generous buffer (2x estimate + 30s minimum)
-                estimated_duration = (len(audio_data) / (1024 * 1024)) * 60
+                estimated_duration = (len(audio_data) / (1024 * 512)) * 60
                 timeout = max(120, min(600, estimated_duration * 2 + 30))  # Min 2 min, max 10 min
                 self.logger.debug(f"Waiting for playback completion, timeout={timeout:.1f}s (audio_size={len(audio_data)} bytes, estimated_duration={estimated_duration:.1f}s)")
                 await asyncio.wait_for(play_done.wait(), timeout=timeout)
