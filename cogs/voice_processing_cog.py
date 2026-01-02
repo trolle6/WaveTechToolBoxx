@@ -282,12 +282,19 @@ class VoiceProcessingCog(commands.Cog):
                 "Content-Type": "application/json"
             }
             
+            # Calculate max_tokens: estimate ~4 chars per token, add 50% buffer
+            # Cap at reasonable limit (2000 tokens ≈ 8000 chars output)
+            estimated_tokens = int(len(text) / 4 * 1.5)
+            max_tokens = min(2000, max(200, estimated_tokens))
+            
             payload = {
                 "model": "gpt-3.5-turbo",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 150,
+                "max_tokens": max_tokens,
                 "temperature": 0.1
             }
+            
+            self.logger.debug(f"Pronunciation improvement API: input_length={len(text)}, max_tokens={max_tokens}")
             
             session = await self.bot.http_mgr.get_session(timeout=10)
             async with session.post(
@@ -332,7 +339,14 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.debug(f"Text cleaning: {original_length} → {after_whitespace} (whitespace) → {after_discord_cleanup} (discord) → {after_corrections} (corrections)")
 
         if self._detect_needs_pronunciation_help(text):
-            text = await self._improve_pronunciation(text)
+            # Skip pronunciation improvement for very long texts (will be split anyway)
+            # Only improve pronunciation for texts that won't be split (< 3500 chars to leave buffer)
+            if len(text) < 3500:
+                before_pronunciation = len(text)
+                text = await self._improve_pronunciation(text)
+                after_pronunciation = len(text)
+                if before_pronunciation != after_pronunciation:
+                    self.logger.debug(f"Pronunciation improvement: {before_pronunciation} → {after_pronunciation} chars")
 
         # Truncate if max_length specified and exceeds limit
         if max_length and len(text) > max_length:
