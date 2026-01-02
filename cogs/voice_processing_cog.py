@@ -149,7 +149,17 @@ class VoiceProcessingCog(commands.Cog):
         self._unloaded = False
 
         # Convert to int to match message.channel.id type
-        self.allowed_channel = int(bot.config.DISCORD_CHANNEL_ID) if bot.config.DISCORD_CHANNEL_ID else None
+        channel_id = bot.config.DISCORD_CHANNEL_ID
+        if channel_id:
+            try:
+                # Strip whitespace and convert to int
+                self.allowed_channel = int(str(channel_id).strip())
+                self.logger.info(f"Allowed channel set to: {self.allowed_channel} (type: {type(self.allowed_channel).__name__})")
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Failed to convert DISCORD_CHANNEL_ID to int: {channel_id} - {e}")
+                self.allowed_channel = None
+        else:
+            self.allowed_channel = None
 
     # ============ PRONOUN DETECTION ============
     async def _detect_pronouns(self, member: disnake.Member) -> Optional[str]:
