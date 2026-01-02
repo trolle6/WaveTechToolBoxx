@@ -488,10 +488,10 @@ class VoiceProcessingCog(commands.Cog):
         try:
             # Increase timeout for longer texts
             # OpenAI TTS API can take longer for complex/long texts
-            # Use more generous timeout: 30s base + 0.1s per 100 chars
+            # Use very generous timeout: 60s base + 0.15s per 100 chars
             base_timeout = getattr(self.bot.config, 'TTS_TIMEOUT', 15)
-            text_timeout = len(text) / 100 * 0.1 + 30  # 30s base + 0.1s per 100 chars
-            tts_timeout = max(base_timeout, min(120, text_timeout))  # Use larger of base or calculated, cap at 120s
+            text_timeout = len(text) / 100 * 0.15 + 60  # 60s base + 0.15s per 100 chars
+            tts_timeout = max(60, min(180, text_timeout))  # Minimum 60s, cap at 180s (3 minutes)
             self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, base={base_timeout}, calculated={text_timeout:.1f})")
             session = await self.bot.http_mgr.get_session(timeout=tts_timeout)
 
