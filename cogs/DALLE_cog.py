@@ -3,7 +3,7 @@ DALL-E Image Generation Cog - AI-Powered Image Creation
 
 FEATURES:
 - 🎨 DALL-E 3 image generation with HD quality support
-- 📋 Queue management (handles multiple simultaneous requests)
+- 📋 Queue management (FIFO processing)
 - ⚡ Smart caching (avoid duplicate generations)
 - 🔄 Automatic retry with exponential backoff
 - 🚦 Rate limiting (prevents spam and cost control)
@@ -15,30 +15,6 @@ COMMANDS:
   - size: 1024x1024, 1792x1024, 1024x1792
   - quality: standard, hd (HD recommended)
   - private: true/false (make response private)
-
-QUEUE SYSTEM:
-- Multiple requests queued automatically
-- FIFO processing (first in, first out)
-- Position tracking with estimated wait time
-- Job expiration (5 minutes)
-- Auto-restart on queue stuck
-
-PERFORMANCE:
-- ✅ LRU cache for duplicate prompts
-- ✅ Fast hash-based cache keys (100x faster than SHA256)
-- ✅ Connection pooling for API efficiency
-- ✅ Health monitoring and recovery
-
-COST MANAGEMENT:
-- Rate limiting: 10 requests/60 seconds per user (configurable)
-- Cache hits are free (no API call)
-- Queue prevents spam
-- Typical cost: $0.04-0.08 per image
-
-DATA STORAGE:
-- Cache is IN-MEMORY only (cleared on restart)
-- No persistent storage (privacy-friendly)
-- Stats reset on bot restart
 """
 
 import asyncio
@@ -46,12 +22,10 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-import aiohttp
 import disnake
 from disnake.ext import commands
 
 from . import utils
-
 
 
 @dataclass
@@ -65,7 +39,6 @@ class GenerationJob:
     timestamp: float
 
     def is_expired(self, max_age: int = 300) -> bool:
-        """Check if job is too old (5 minutes)"""
         return (time.time() - self.timestamp) > max_age
 
 
@@ -90,7 +63,7 @@ class DALLECog(commands.Cog):
         max_queue = getattr(bot.config, 'MAX_QUEUE_SIZE', 50)
         
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
-        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3600)  # URLs expire in 1 hour
+        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3600)
 
         # Queue
         self.queue = asyncio.Queue(maxsize=max_queue)
@@ -99,7 +72,7 @@ class DALLECog(commands.Cog):
 
         # API config
         self.api_url = "https://api.openai.com/v1/images/generations"
-        self.max_retries = 3  # Configurable retry count
+        self.max_retries = 3
 
         # Statistics tracking
         self.stats = {
@@ -112,92 +85,24 @@ class DALLECog(commands.Cog):
         self._stats_lock = asyncio.Lock()
 
         self._shutdown = asyncio.Event()
-        self._unloaded = False  # Track if already unloaded
-        self._health_check_task = None
+        self._unloaded = False
+        self._health_check_task: Optional[asyncio.Task] = None
 
         self.logger.info("DALL-E cog initialized")
 
-    async def cog_load(self):
-        """Initialize cog"""
-        if not self.enabled:
-            # Notify Discord about DALLE being disabled
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log("🖼️ DALL-E cog loaded but disabled (no API key)", "WARNING")
-            return
-
-        self.processor_task = asyncio.create_task(self._process_queue())
-        self._health_check_task = asyncio.create_task(self._health_check_loop())
-        self.logger.info("DALL-E cog loaded")
-        
-        # Notify Discord about successful loading
-        if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log("🎨 DALL-E cog loaded successfully", "SUCCESS")
-
-    def cog_unload(self):
-        """Cleanup cog (synchronous wrapper to prevent RuntimeWarning)"""
-        if not self.enabled or self._unloaded:
-            return
-        
-        self._unloaded = True
-        self.logger.info("Unloading DALL-E cog...")
-        
-        # Schedule async cleanup
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Create task for async cleanup
-                loop.create_task(self._async_unload())
-            else:
-                # If no running loop, do sync cleanup only
-                self._shutdown.set()
-                self.logger.info("DALL-E cog unloaded (sync)")
-        except RuntimeError:
-            # No event loop available, do minimal cleanup
-            self._shutdown.set()
-            self.logger.info("DALL-E cog unloaded (no loop)")
-    
-    async def _async_unload(self):
-        """Async cleanup operations"""
-        try:
-            self._shutdown.set()
-
-            if self.processor_task:
-                self.processor_task.cancel()
-                try:
-                    await self.processor_task
-                except asyncio.CancelledError:
-                    pass
-            
-            if self._health_check_task:
-                self._health_check_task.cancel()
-                try:
-                    await self._health_check_task
-                except asyncio.CancelledError:
-                    pass
-
-            self.logger.info("DALL-E cog unloaded")
-        except Exception as e:
-            self.logger.error(f"Async unload error: {e}")
-
+    # ============ CACHE ============
     def _cache_key(self, prompt: str, size: str, quality: str) -> str:
-        """
-        Generate cache key using Python's built-in hash (faster than SHA256).
-        
-        PERFORMANCE:
-        - Built-in hash() is ~100x faster than SHA256
-        - No cryptographic security needed for cache keys
-        - Collision risk negligible for cache (overwrite is acceptable)
-        """
+        """Generate cache key"""
         return str(hash(f"{prompt}:{size}:{quality}"))
 
+    # ============ API GENERATION ============
     async def _generate_image(
         self,
         prompt: str,
         size: str = "1024x1024",
         quality: str = "hd"
     ) -> Dict:
-        """Call DALL-E API"""
-
+        """Call DALL-E API with retry logic"""
         headers = {
             "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
             "Content-Type": "application/json"
@@ -234,23 +139,19 @@ class DALLECog(commands.Cog):
                         return {"success": True, "data": result}
 
                     elif resp.status == 429:
-                        retry_after = resp.headers.get('Retry-After', '60')
-
+                        retry_after = int(resp.headers.get('Retry-After', '60'))
                         if attempt < self.max_retries - 1:
-                            wait = min(int(retry_after), 30)
+                            wait = min(retry_after, 30)
                             self.logger.warning(f"Rate limited, waiting {wait}s")
                             await asyncio.sleep(wait)
                             continue
-
                         return {"success": False, "error": f"Rate limited. Try again in {retry_after}s"}
 
                     elif resp.status == 400:
                         error_data = await resp.json()
                         error_msg = error_data.get("error", {}).get("message", "Bad request")
-
                         if "content_policy" in error_msg.lower():
                             return {"success": False, "error": "🚫 Content policy violation"}
-
                         return {"success": False, "error": f"Invalid request: {error_msg}"}
 
                     elif resp.status == 401:
@@ -260,8 +161,6 @@ class DALLECog(commands.Cog):
                         if attempt < self.max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                             continue
-
-                        error = await resp.text()
                         return {"success": False, "error": f"API error {resp.status}"}
 
             except asyncio.TimeoutError:
@@ -281,24 +180,20 @@ class DALLECog(commands.Cog):
             self.stats["failed"] += 1
         return {"success": False, "error": "Max retries exceeded"}
 
+    # ============ QUEUE PROCESSING ============
     async def _process_queue(self):
         """Process generation queue"""
         try:
             while not self._shutdown.is_set():
                 try:
-                    # Get next job (check shutdown between waits)
                     job = await asyncio.wait_for(self.queue.get(), timeout=60)
                     
-                    # Double-check shutdown flag after waiting
                     if self._shutdown.is_set():
                         break
 
-                    # Check if expired
                     if job.is_expired():
                         try:
-                            await job.interaction.edit_original_response(
-                                content="⏰ Request expired"
-                            )
+                            await job.interaction.edit_original_response(content="⏰ Request expired")
                         except Exception:
                             pass
                         continue
@@ -312,15 +207,11 @@ class DALLECog(commands.Cog):
                             description="Creating your masterpiece with DALL-E 3...",
                             color=disnake.Color.blue()
                         )
-                        embed.add_field(
-                            name="Prompt",
-                            value=f"```{job.prompt[:100]}...```" if len(job.prompt) > 100 else f"```{job.prompt}```",
-                            inline=False
-                        )
+                        prompt_preview = job.prompt[:100] + "..." if len(job.prompt) > 100 else job.prompt
+                        embed.add_field(name="Prompt", value=f"```{prompt_preview}```", inline=False)
                         embed.add_field(name="Quality", value=job.quality.upper(), inline=True)
                         embed.add_field(name="Size", value=job.size, inline=True)
                         embed.set_footer(text="This may take 15-30 seconds")
-
                         await job.interaction.edit_original_response(embed=embed)
                     except Exception:
                         pass
@@ -329,6 +220,7 @@ class DALLECog(commands.Cog):
                     start = time.time()
                     result = await self._generate_image(job.prompt, job.size, job.quality)
                     elapsed = time.time() - start
+                    
                     async with self._stats_lock:
                         self.stats["total_time"] += elapsed
 
@@ -354,44 +246,7 @@ class DALLECog(commands.Cog):
         except asyncio.CancelledError:
             pass
 
-    async def _health_check_loop(self):
-        """Health check for hung processor task"""
-        try:
-            while not self._shutdown.is_set():
-                await asyncio.sleep(600)  # Every 10 minutes
-                
-                # Skip health check if shutting down
-                if self._shutdown.is_set():
-                    break
-                
-                # Check if processor task died unexpectedly
-                if self.processor_task and self.processor_task.done():
-                    exc = None
-                    try:
-                        exc = self.processor_task.exception()
-                    except (asyncio.CancelledError, asyncio.InvalidStateError):
-                        pass
-                    
-                    if exc:
-                        self.logger.error(f"Processor task died: {exc}")
-                    
-                    # Restart ONLY if queue has items and no task is running
-                    if not self.queue.empty() and not self.is_processing:
-                        self.logger.info("Restarting DALL-E processor task")
-                        self.processor_task = asyncio.create_task(self._process_queue())
-                
-                # Check for stuck queue (queue has items but processor not running)
-                elif self.queue.qsize() > 0 and not self.is_processing:
-                    # Only restart if task is truly dead or doesn't exist
-                    if not self.processor_task or self.processor_task.done():
-                        self.logger.warning("Queue stuck, restarting processor")
-                        self.processor_task = asyncio.create_task(self._process_queue())
-                
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            self.logger.error(f"Health check loop error: {e}", exc_info=True)
-
+    # ============ RESULT HANDLING ============
     async def _send_result(self, job: GenerationJob, result: Dict, elapsed: float):
         """Send generation result"""
         try:
@@ -406,10 +261,11 @@ class DALLECog(commands.Cog):
                 return
 
             image_url = result["data"]["data"][0]["url"]
+            prompt_preview = job.prompt[:200] + "..." if len(job.prompt) > 200 else job.prompt
 
             embed = disnake.Embed(
                 title="🎨 Image Generated!",
-                description=f"**Prompt:** {job.prompt[:200]}{'...' if len(job.prompt) > 200 else ''}",
+                description=f"**Prompt:** {prompt_preview}",
                 color=disnake.Color.green()
             )
             embed.set_image(url=image_url)
@@ -423,12 +279,46 @@ class DALLECog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Failed to send result: {e}", exc_info=True)
             try:
-                await job.interaction.edit_original_response(
-                    content="❌ Failed to send result"
-                )
+                await job.interaction.edit_original_response(content="❌ Failed to send result")
             except Exception:
                 pass
 
+    # ============ HEALTH CHECK ============
+    async def _health_check_loop(self):
+        """Health check for hung processor task"""
+        try:
+            while not self._shutdown.is_set():
+                await asyncio.sleep(600)  # Every 10 minutes
+                
+                if self._shutdown.is_set():
+                    break
+                
+                # Check if processor task died unexpectedly
+                if self.processor_task and self.processor_task.done():
+                    try:
+                        exc = self.processor_task.exception()
+                        if exc:
+                            self.logger.error(f"Processor task died: {exc}")
+                    except (asyncio.CancelledError, asyncio.InvalidStateError):
+                        pass
+                    
+                    # Restart if queue has items
+                    if not self.queue.empty() and not self.is_processing:
+                        self.logger.info("Restarting DALL-E processor task")
+                        self.processor_task = asyncio.create_task(self._process_queue())
+                
+                # Check for stuck queue
+                elif self.queue.qsize() > 0 and not self.is_processing:
+                    if not self.processor_task or self.processor_task.done():
+                        self.logger.warning("Queue stuck, restarting processor")
+                        self.processor_task = asyncio.create_task(self._process_queue())
+                
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"Health check loop error: {e}", exc_info=True)
+
+    # ============ COMMAND ============
     @commands.slash_command(name="image", description="🎨 Generate AI images with DALL-E 3")
     async def imagine(
         self,
@@ -450,34 +340,24 @@ class DALLECog(commands.Cog):
         )
     ):
         """Generate images with DALL-E 3"""
-
         if not self.enabled:
-            await inter.response.send_message(
-                "❌ DALL-E is not configured",
-                ephemeral=True
-            )
+            await inter.response.send_message("❌ DALL-E is not configured", ephemeral=True)
             return
 
         await inter.response.defer(ephemeral=private)
 
-        user_id = str(inter.author.id)
-
         # Check rate limit
-        if not await self.rate_limiter.check(user_id):
+        if not await self.rate_limiter.check(str(inter.author.id)):
             await inter.edit_original_response(
                 content="⏳ Rate limited. Please wait before generating another image."
             )
             return
 
         # Validate prompt
-        if len(prompt.strip()) < 3:
-            await inter.edit_original_response(
-                content="❌ Prompt too short (min 3 characters)"
-            )
-            return
-
-        # Clean prompt
         prompt = prompt.strip()
+        if len(prompt) < 3:
+            await inter.edit_original_response(content="❌ Prompt too short (min 3 characters)")
+            return
 
         # Check cache
         cache_key = self._cache_key(prompt, size, quality)
@@ -487,14 +367,14 @@ class DALLECog(commands.Cog):
             async with self._stats_lock:
                 self.stats["cache_hits"] += 1
 
+            prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
             embed = disnake.Embed(
                 title="🎨 Image (Cached)",
-                description=f"**Prompt:** {prompt[:200]}{'...' if len(prompt) > 200 else ''}",
+                description=f"**Prompt:** {prompt_preview}",
                 color=disnake.Color.blue()
             )
             embed.set_image(url=cached)
             embed.set_footer(text="⚡ Retrieved from cache")
-
             await inter.edit_original_response(embed=embed)
             return
 
@@ -508,11 +388,9 @@ class DALLECog(commands.Cog):
             timestamp=time.time()
         )
 
-        
         # Add to queue
         try:
             self.queue.put_nowait(job)
-
             queue_size = self.queue.qsize()
 
             embed = disnake.Embed(
@@ -523,7 +401,6 @@ class DALLECog(commands.Cog):
             embed.add_field(name="Position", value=f"#{queue_size}", inline=True)
             embed.add_field(name="Est. Wait", value=f"~{queue_size * 30}s", inline=True)
             embed.set_footer(text="You'll be notified when generation starts")
-
             await inter.edit_original_response(embed=embed)
 
         except asyncio.QueueFull:
@@ -531,6 +408,55 @@ class DALLECog(commands.Cog):
                 content="❌ Queue is full. Try again in a few minutes."
             )
 
+    # ============ COG LIFECYCLE ============
+    async def cog_load(self):
+        """Initialize cog"""
+        if not self.enabled:
+            return
+
+        self.processor_task = asyncio.create_task(self._process_queue())
+        self._health_check_task = asyncio.create_task(self._health_check_loop())
+        self.logger.info("DALL-E cog loaded")
+
+    def cog_unload(self):
+        """Cleanup cog"""
+        if not self.enabled or self._unloaded:
+            return
+        
+        self._unloaded = True
+        self.logger.info("Unloading DALL-E cog...")
+        
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._async_unload())
+            else:
+                self._shutdown.set()
+        except RuntimeError:
+            self._shutdown.set()
+    
+    async def _async_unload(self):
+        """Async cleanup"""
+        try:
+            self._shutdown.set()
+
+            if self.processor_task:
+                self.processor_task.cancel()
+                try:
+                    await self.processor_task
+                except asyncio.CancelledError:
+                    pass
+            
+            if self._health_check_task:
+                self._health_check_task.cancel()
+                try:
+                    await self._health_check_task
+                except asyncio.CancelledError:
+                    pass
+
+            self.logger.info("DALL-E cog unloaded")
+        except Exception as e:
+            self.logger.error(f"Async unload error: {e}")
 
 
 def setup(bot):
