@@ -644,15 +644,13 @@ class VoiceProcessingCog(commands.Cog):
                 self.logger.error(f"Failed to convert channel IDs to int: {e}")
                 return False
             
-            # Compare as both int and string to catch any weird edge cases
-            int_match = msg_channel_id == allowed_channel_id
-            str_match = str(msg_channel_id) == str(allowed_channel_id)
-            
-            if not (int_match and str_match):
+            # Compare - if they don't match, skip
+            if msg_channel_id != allowed_channel_id:
                 self.logger.warning(
-                    f"CHANNEL MISMATCH: msg={msg_channel_id} (type: {type(msg_channel_id).__name__}) "
-                    f"!= allowed={allowed_channel_id} (type: {type(allowed_channel_id).__name__}), "
-                    f"int_match={int_match}, str_match={str_match}"
+                    f"CHANNEL MISMATCH: msg={msg_channel_id} (type: {type(msg_channel_id).__name__}, "
+                    f"repr: {repr(msg_channel_id)}) != allowed={allowed_channel_id} "
+                    f"(type: {type(allowed_channel_id).__name__}, repr: {repr(allowed_channel_id)}), "
+                    f"comparison: {msg_channel_id != allowed_channel_id}"
                 )
                 return False
             # Channel matches - continue processing
