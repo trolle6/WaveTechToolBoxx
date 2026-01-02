@@ -483,7 +483,11 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.debug(f"Sending to TTS API: length={len(text)}, preview={text[:200]}...")
 
         try:
-            tts_timeout = getattr(self.bot.config, 'TTS_TIMEOUT', 15)
+            # Increase timeout for longer texts (estimate: ~0.1s per 100 chars)
+            base_timeout = getattr(self.bot.config, 'TTS_TIMEOUT', 15)
+            text_timeout = max(base_timeout, len(text) / 100 * 0.1 + 10)  # At least 10s + 0.1s per 100 chars
+            tts_timeout = min(60, text_timeout)  # Cap at 60 seconds
+            self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, base={base_timeout})")
             session = await self.bot.http_mgr.get_session(timeout=tts_timeout)
 
             async with session.post(self.tts_url, json=payload, headers=headers) as resp:
