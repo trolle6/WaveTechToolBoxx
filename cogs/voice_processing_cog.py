@@ -493,9 +493,11 @@ class VoiceProcessingCog(commands.Cog):
             text_timeout = len(text) / 100 * 0.15 + 60  # 60s base + 0.15s per 100 chars
             tts_timeout = max(60, min(180, text_timeout))  # Minimum 60s, cap at 180s (3 minutes)
             self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, base={base_timeout}, calculated={text_timeout:.1f})")
-            session = await self.bot.http_mgr.get_session(timeout=tts_timeout)
-
-            async with session.post(self.tts_url, json=payload, headers=headers) as resp:
+            session = await self.bot.http_mgr.get_session()
+            
+            # Use request-level timeout to override session timeout
+            request_timeout = aiohttp.ClientTimeout(total=tts_timeout)
+            async with session.post(self.tts_url, json=payload, headers=headers, timeout=request_timeout) as resp:
                 if resp.status == 200:
                     audio = await resp.read()
                     await self.cache.set(cache_key, audio)
