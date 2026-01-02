@@ -309,6 +309,19 @@ class VoiceProcessingCog(commands.Cog):
             self._voice_assignments[user_key] = new_voice
             return new_voice
 
+    # ============ API HELPERS ============
+    def _get_openai_headers(self) -> Dict[str, str]:
+        """
+        Get common OpenAI API headers for HTTP requests.
+        
+        Returns:
+            Dictionary with Authorization and Content-Type headers
+        """
+        return {
+            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
     # ============ TEXT PROCESSING ============
     def _compile_correction_patterns(self) -> list[tuple[re.Pattern, str]]:
         """Pre-compile correction patterns"""
