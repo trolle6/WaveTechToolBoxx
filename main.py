@@ -475,8 +475,7 @@ def load_cogs() -> int:
         "cogs.DALLE_cog",
         "cogs.SecretSanta_cog",
         "cogs.CustomEvents_cog",
-        "cogs.DistributeZip_cog",
-        "cogs.LongText_cog"
+        "cogs.DistributeZip_cog"
     ]
     
     loaded = 0
