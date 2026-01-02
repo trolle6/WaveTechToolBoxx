@@ -34,10 +34,7 @@ EVENTS_DIR.mkdir(exist_ok=True)
 # ============ BASE CLASSES ============
 
 class MatcherInterface(ABC):
-    """
-    Base interface for all matching algorithms.
-    Each matcher implements a different strategy for assigning participants.
-    """
+    """Base interface for all matching algorithms"""
     
     @abstractmethod
     def match(
@@ -45,28 +42,17 @@ class MatcherInterface(ABC):
         participants: List[int],
         metadata: Dict[int, Dict[str, Any]]
     ) -> Dict[str, List[int]]:
-        """
-        Create matches/teams from participants.
-        
-        Args:
-            participants: List of user IDs
-            metadata: Dict mapping user_id → their data (timezone, skill, etc.)
-        
-        Returns:
-            Dict of results (structure depends on matcher type)
-            Example for teams: {"Team A": [user1, user2], "Team B": [user3, user4]}
-            Example for pairs: {"pairs": [[user1, user2], [user3, user4]]}
-        """
+        """Create matches/teams from participants"""
         pass
     
     @abstractmethod
     def get_required_metadata(self) -> List[str]:
-        """Return list of required metadata fields (e.g., ["timezone", "skill"])"""
+        """Return list of required metadata fields"""
         pass
     
     @abstractmethod
     def get_config_options(self) -> Dict[str, Any]:
-        """Return available configuration options for this matcher"""
+        """Return available configuration options"""
         pass
 
 
@@ -86,7 +72,7 @@ class Event:
         self.matcher_type = matcher_type
         self.config = config
         self.guild_id = guild_id
-        self.participants: Dict[str, Dict[str, Any]] = {}  # user_id → data
+        self.participants: Dict[str, Dict[str, Any]] = {}
         self.results: Optional[Dict] = None
         self.status = "setup"  # setup, active, completed
         self.created_at = time.time()
@@ -125,22 +111,8 @@ class Event:
 
 # ============ MATCHER IMPLEMENTATIONS ============
 
-"""
-MATCHER LIBRARY - "FROM THE MOON TO THE GROUND"
-
-Below are ALL the matcher types you could implement.
-Currently implemented matchers are coded.
-Future matchers are documented for when you need them!
-"""
-
-
-# ============ IMPLEMENTED MATCHERS ============
-
 class FullyRandomMatcher(MatcherInterface):
-    """
-    Pure random matching - no constraints, no history, just chaos!
-    Fastest and simplest matcher.
-    """
+    """Pure random matching - no constraints, no history, just chaos!"""
     
     def match(
         self,
@@ -148,25 +120,22 @@ class FullyRandomMatcher(MatcherInterface):
         metadata: Dict[int, Dict[str, Any]]
     ) -> Dict[str, List[int]]:
         """Create random teams or pairs"""
-        
         team_size = metadata.get("_config", {}).get("team_size", 2)
         
-        # Shuffle participants
         shuffled = participants.copy()
         rng = secrets.SystemRandom()
         rng.shuffle(shuffled)
         
-        # Create teams
         teams = {}
         for i in range(0, len(shuffled), team_size):
             team_members = shuffled[i:i + team_size]
-            team_name = f"Team {chr(65 + i // team_size)}"  # Team A, Team B, etc.
+            team_name = f"Team {chr(65 + i // team_size)}"
             teams[team_name] = team_members
         
         return {"teams": teams}
     
     def get_required_metadata(self) -> List[str]:
-        return []  # No metadata needed!
+        return []
     
     def get_config_options(self) -> Dict[str, Any]:
         return {
@@ -179,10 +148,7 @@ class FullyRandomMatcher(MatcherInterface):
 
 
 class TimezoneGroupedMatcher(MatcherInterface):
-    """
-    Groups people by similar timezones.
-    Useful for international servers wanting coordinated events.
-    """
+    """Groups people by similar timezones"""
     
     def match(
         self,
@@ -190,9 +156,7 @@ class TimezoneGroupedMatcher(MatcherInterface):
         metadata: Dict[int, Dict[str, Any]]
     ) -> Dict[str, List[int]]:
         """Group by timezone, then create teams within groups"""
-        
         team_size = metadata.get("_config", {}).get("team_size", 2)
-        tolerance = metadata.get("_config", {}).get("timezone_tolerance", 2)  # ±2 hours
         
         # Group by timezone
         tz_groups: Dict[str, List[int]] = {}
@@ -206,11 +170,9 @@ class TimezoneGroupedMatcher(MatcherInterface):
         team_counter = 0
         
         for tz, users in tz_groups.items():
-            # Shuffle users in this timezone
             rng = secrets.SystemRandom()
             rng.shuffle(users)
             
-            # Make teams
             for i in range(0, len(users), team_size):
                 team_members = users[i:i + team_size]
                 team_name = f"Team {chr(65 + team_counter)}"
@@ -237,597 +199,9 @@ class TimezoneGroupedMatcher(MatcherInterface):
         }
 
 
-# ============ FUTURE MATCHERS (To Implement When Needed) ============
-
-"""
-# SkillBalancedMatcher - Balance teams by skill level
-#
-# USE: Building competitions, PvP events, any competitive teams
-# COLLECTS: skill_level (1-10 or beginner/intermediate/expert)
-# LOGIC:
-#   - Calculate average skill per team
-#   - Distribute high/medium/low skill evenly
-#   - Each team gets balanced mix
-#   Example: Team A [skill 9, 5, 7, 3] avg=6, Team B [skill 8, 4, 6, 4] avg=5.5
-#
-# class SkillBalancedMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Sort by skill
-#         # Distribute evenly (snake draft style)
-#         # Team A gets: 1st, 8th, 9th, 16th
-#         # Team B gets: 2nd, 7th, 10th, 15th
-#         # etc.
-"""
-
-"""
-# RoleBalancedMatcher - Each team gets one of each role
-#
-# USE: Team events needing role diversity (Builder, Redstoner, Fighter, Explorer)
-# COLLECTS: preferred_role
-# LOGIC:
-#   - Group participants by role
-#   - Each team gets 1 of each role
-#   - Ensures balanced team composition
-#   Example: Team A [1 Builder, 1 Redstoner, 1 Fighter], Team B [same]
-#
-# class RoleBalancedMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Group by role
-#         # Distribute one of each role per team
-#         # If uneven, some teams get extras
-"""
-
-"""
-# AvoidRecentMatcher - Lightweight history (only last event)
-#
-# USE: Weekly/monthly recurring events
-# COLLECTS: Nothing (reads last event data)
-# LOGIC:
-#   - Load last event results
-#   - Avoid pairing people who were teamed last time
-#   - Much lighter than Secret Santa's multi-year tracking
-#   Example: Last week A-B → This week A gets C, B gets D
-#
-# class AvoidRecentMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load last event from archive
-#         # Extract last pairings
-#         # Shuffle avoiding those pairs
-#         # Like Secret Santa but only 1 event back
-"""
-
-"""
-# RoundRobinMatcher - Everyone meets everyone eventually
-#
-# USE: Speed friending, networking, mentorship rotation
-# COLLECTS: Nothing (tracks internally)
-# LOGIC:
-#   - Tracks who has met who across multiple events
-#   - Each shuffle creates NEW pairs nobody has had
-#   - Eventually everyone pairs with everyone
-#   - Like a tournament schedule but for socializing
-#   Example: Week 1: A-B, C-D | Week 2: A-C, B-D | Week 3: A-D, B-C
-#
-# class RoundRobinMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load pairing history
-#         # Find pairs that haven't met
-#         # Schedule next round
-"""
-
-"""
-# GeographicMatcher - Match by region/country
-#
-# USE: Regional meetups, language groups, local coordination
-# COLLECTS: country, region, or city
-# LOGIC:
-#   - Groups by geographic proximity
-#   - Can create regional teams
-#   - Good for servers with IRL meetup potential
-#   Example: EU Team, NA Team, Asia Team
-#
-# class GeographicMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Group by region
-#         # Create region-based teams
-#         # Balance team sizes if possible
-"""
-
-"""
-# LanguageMatcher - Match by shared languages
-#
-# USE: International servers, language learning, inclusion
-# COLLECTS: languages (list of spoken languages)
-# LOGIC:
-#   - Pairs/groups people who share a language
-#   - Prioritizes less common languages for inclusion
-#   - Helps non-English speakers connect
-#   Example: [English, Swedish] matches with [English, Norwegian]
-#
-# class LanguageMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Extract language preferences
-#         # Find common languages
-#         # Group by shared languages
-"""
-
-"""
-# DiscordRoleMatcher - Match or separate by Discord roles
-#
-# USE: Role-specific events, cross-role mixing, permission-based
-# COLLECTS: Nothing (auto-fetches Discord roles)
-# LOGIC:
-#   - Reads member.roles from Discord
-#   - Mode 1: Group people WITH same role
-#   - Mode 2: Mix people ACROSS roles
-#   Example: "Builder" role only event, or "Mix builders with redstoners"
-#
-# class DiscordRoleMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Fetch roles from Discord
-#         # Group or mix based on config
-#         # Filter by role requirements
-"""
-
-"""
-# ActivityBasedMatcher - Match by online patterns
-#
-# USE: Find people active at same times
-# COLLECTS: Nothing (checks real-time status)
-# LOGIC:
-#   - Checks who's online NOW
-#   - Or tracks activity patterns over time
-#   - Pairs people likely to be online together
-#   Example: Night owls matched together, day people matched together
-#
-# class ActivityBasedMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Check current online status
-#         # Or load activity history
-#         # Group similar activity patterns
-"""
-
-"""
-# PreferenceMatcher - Match by user preferences
-#
-# USE: Interest-based pairing, compatibility matching
-# COLLECTS: preferences (favorite games, interests, etc.)
-# LOGIC:
-#   - Users rank preferences
-#   - Algorithm tries to match compatible preferences
-#   - Can weight preferences (primary vs secondary)
-#   Example: Match people who like same games
-#
-# class PreferenceMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Compare preference lists
-#         # Calculate compatibility scores
-#         # Match highest compatibility
-"""
-
-"""
-# SkillProgressionMatcher - Mentor/mentee pairing
-#
-# USE: Learning events, skill progression, teaching
-# COLLECTS: skill_level + wants_mentor (bool)
-# LOGIC:
-#   - Pairs experienced with beginners
-#   - Or similar skills for fair competition
-#   - Can track improvement over multiple events
-#   Example: Skill 8 paired with Skill 3 for mentoring
-#
-# class SkillProgressionMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Sort by skill
-#         # Pair high with low (mentoring mode)
-#         # Or pair similar (competition mode)
-"""
-
-"""
-# RotationMatcher - Ensure variety over multiple events
-#
-# USE: Recurring events where you want everyone to team with everyone
-# COLLECTS: Nothing (tracks past teams)
-# LOGIC:
-#   - Tracks who's teamed recently (last N events)
-#   - Prioritizes NEW combinations
-#   - Ensures maximum variety over time
-#   Example: In 10 events, you team with 10 different people
-#
-# class RotationMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load last N events
-#         # Track who's teamed with who
-#         # Create teams maximizing NEW pairings
-"""
-
-"""
-# BracketMatcher - Tournament bracket creation
-#
-# USE: Competitions, tournaments, elimination events
-# COLLECTS: skill_level (optional for seeding)
-# LOGIC:
-#   - Creates single/double elimination brackets
-#   - Skill-based seeding (high vs low first)
-#   - Or random seeding
-#   Example: 16 people → 8 matches → 4 matches → 2 matches → winner
-#
-# class BracketMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Create tournament tree
-#         # Seed by skill or random
-#         # Return bracket structure
-"""
-
-"""
-# VoiceChannelMatcher - Match people currently in same VC
-#
-# USE: Organize people already in voice
-# COLLECTS: Nothing (reads real-time voice state)
-# LOGIC:
-#   - Checks who's in which voice channel
-#   - Groups people already in same VC
-#   - Or creates new teams and moves them
-#   Example: Auto-organize 12 people in VC into 3 teams of 4
-#
-# class VoiceChannelMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Query voice state
-#         # Group by current channel
-#         # Or create new distribution
-"""
-
-"""
-# BalancedPairsMatcher - Create pairs, balanced by multiple factors
-#
-# USE: 1-on-1 events with balance needs
-# COLLECTS: Multiple factors (skill, timezone, role, etc.)
-# LOGIC:
-#   - Weighted combination of factors
-#   - Example: 50% skill balance, 30% timezone, 20% role
-#   - Creates fair, compatible pairs
-#   Example: High skill + Low skill pairs, same timezone
-#
-# class BalancedPairsMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Calculate compatibility scores
-#         # Weight multiple factors
-#         # Create optimal pairs
-"""
-
-"""
-# ChainMatcher - Create chains (A→B→C→D→A)
-#
-# USE: Gift chains, message chains, tag events
-# COLLECTS: Optional history for variety
-# LOGIC:
-#   - Creates one long chain through all participants
-#   - Like Secret Santa structure but for other purposes
-#   - Can avoid recent chains for recurring events
-#   Example: Message chain, build relay, tag-you're-it
-#
-# class ChainMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Shuffle participants
-#         # Create chain: [0]→[1]→[2]→...→[0]
-#         # Avoid recent chains if history exists
-"""
-
-"""
-# SnakeDraftMatcher - Teams pick participants in snake order
-#
-# USE: Team building with strategy, captain selection
-# COLLECTS: team_captains (who picks)
-# LOGIC:
-#   - Team A picks, then Team B, then Team C
-#   - Then Team C picks, Team B, Team A (reverse!)
-#   - Like sports draft
-#   Example: 3 captains pick teams of 5
-#
-# class SnakeDraftMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Captains pick in order: A, B, C, C, B, A, A, B, C...
-#         # Or auto-draft by skill ranking
-"""
-
-"""
-# ExperienceSpreadMatcher - Each team gets mix of experience levels
-#
-# USE: Learning events, knowledge sharing
-# COLLECTS: experience_years or experience_level
-# LOGIC:
-#   - Groups: Newbies (0-1yr), Medium (1-3yr), Experts (3+yr)
-#   - Each team gets mix: 1 expert, 2 medium, 1 newbie
-#   - Balances knowledge distribution
-#   Example: Build teams with mentors and learners
-#
-# class ExperienceSpreadMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Categorize by experience
-#         # Distribute evenly across teams
-"""
-
-"""
-# OnlineNowMatcher - Only match people currently online
-#
-# USE: Impromptu events, real-time coordination
-# COLLECTS: Nothing (checks Discord status)
-# LOGIC:
-#   - Filters to only online/active users
-#   - Creates teams from available people
-#   - Ignores offline participants
-#   Example: "Quick game night with whoever's around"
-#
-# class OnlineNowMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Check member.status
-#         # Filter to online only
-#         # Create teams from available
-"""
-
-"""
-# AvoidanceListMatcher - Respect user blacklists
-#
-# USE: Drama prevention, preference respect
-# COLLECTS: avoid_list (users they don't want to team with)
-# LOGIC:
-#   - Each user can mark people to avoid
-#   - Algorithm respects all blacklists
-#   - Creates drama-free teams
-#   Example: "I don't want to team with UserX"
-#   NOTE: Could be used for good or evil 😂
-#
-# class AvoidanceListMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load avoid lists
-#         # Create teams respecting all constraints
-#         # Might be impossible with too many avoidances!
-"""
-
-"""
-# SeasonalRotationMatcher - Rotate through different team structures
-#
-# USE: Long-term events with variety
-# COLLECTS: Nothing (uses event number)
-# LOGIC:
-#   - Event 1: Random teams
-#   - Event 2: Timezone teams
-#   - Event 3: Skill balanced
-#   - Event 4: Back to random
-#   - Automatically rotates algorithm each time!
-#   Example: Monthly events with different matching each time
-#
-# class SeasonalRotationMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Check event count
-#         # Rotate through matcher types
-#         # Keeps events fresh!
-"""
-
-"""
-# FriendGroupMatcher - Keep friend groups together
-#
-# USE: Social events, coordinated teams
-# COLLECTS: friend_group_id (optional)
-# LOGIC:
-#   - Users can mark "I'm with these friends"
-#   - Algorithm keeps friend groups on same team
-#   - Fills remaining spots randomly
-#   Example: Pre-made duos in larger teams
-#
-# class FriendGroupMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Extract friend groups
-#         # Place groups on same team
-#         # Fill remaining with randoms
-"""
-
-"""
-# WeightedRandomMatcher - Random with preference weights
-#
-# USE: Mostly random but respect some preferences
-# COLLECTS: preferences with weights
-# LOGIC:
-#   - 80% random
-#   - 20% tries to honor preferences
-#   - Balance between chaos and choice
-#   Example: "Prefer builders but okay with anyone"
-#
-# class WeightedRandomMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Random base assignment
-#         # Swap some pairs to honor preferences
-#         # Don't overthink it
-"""
-
-"""
-# MinMaxBalancedMatcher - Ensure no team too strong/weak
-#
-# USE: Competitive balance
-# COLLECTS: power_level, skill, rating, etc.
-# LOGIC:
-#   - Calculate team total power
-#   - Minimize difference between strongest and weakest team
-#   - No stomps, all teams competitive
-#   Example: Team totals: 24, 25, 23, 26 (very close!)
-#
-# class MinMaxBalancedMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Calculate power levels
-#         # Balance teams to minimize variance
-#         # Closest total power possible
-"""
-
-"""
-# NewcomerPriorityMatcher - Give newbies good teams
-#
-# USE: Welcoming new members
-# COLLECTS: join_date or is_new flag
-# LOGIC:
-#   - Identifies new members (joined <30 days ago)
-#   - Pairs them with friendly veterans
-#   - Or ensures each team has veteran guide
-#   Example: Each team gets 1 newbie + 3 veterans
-#
-# class NewcomerPriorityMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Check join dates
-#         # Pair newbies with veterans
-#         # Welcoming experience!
-"""
-
-"""
-# ParticipationRewardMatcher - Reward frequent participants
-#
-# USE: Loyalty rewards, engagement
-# COLLECTS: Nothing (reads participation history)
-# LOGIC:
-#   - Tracks how many events each person has joined
-#   - Frequent participants get captain roles
-#   - Or get first pick of teammates
-#   - Encourages participation!
-#   Example: Top 3 participants become team captains
-#
-# class ParticipationRewardMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Count past participations
-#         # Reward high participation
-#         # Give them choice/priority
-"""
-
-"""
-# HybridMultiFactorMatcher - Combine MULTIPLE matchers!
-#
-# USE: Complex events with many requirements
-# COLLECTS: Everything (timezone, skill, role, preferences)
-# LOGIC:
-#   - Primary: Timezone grouping (40% weight)
-#   - Secondary: Skill balancing (30% weight)
-#   - Tertiary: Role distribution (20% weight)
-#   - Fallback: Random (10% weight)
-#   - Optimizes for all factors simultaneously!
-#   Example: Timezone teams that are also skill-balanced
-#
-# class HybridMultiFactorMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Run multiple matchers
-#         # Combine results with weights
-#         # Optimization algorithm
-#         # MOST COMPLEX but MOST FLEXIBLE!
-"""
-
-"""
-# ReverseSecretSantaMatcher - Fun twist on Secret Santa
-#
-# USE: Post-Secret Santa revenge gifting
-# COLLECTS: Nothing (reads Secret Santa archives)
-# LOGIC:
-#   - Load last year's Secret Santa
-#   - Reverse assignments: If A gave to B, now B gives to A!
-#   - Full circle completion
-#   - Fun callback to previous year
-#   Example: 2024 huntoon→trolle, 2025 trolle→huntoon
-#
-# class ReverseSecretSantaMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Read cogs/archive/2024.json
-#         # Reverse all assignments
-#         # Create opposite direction pairs
-"""
-
-"""
-# AvailabilityMatcher - Match by schedule compatibility
-#
-# USE: Coordinated events, scheduled activities
-# COLLECTS: available_days, available_hours
-# LOGIC:
-#   - Finds people with overlapping schedules
-#   - Creates teams that can actually meet
-#   - Good for time-sensitive coordination
-#   Example: Match people free on same weekends
-#
-# class AvailabilityMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Parse availability windows
-#         # Find overlaps
-#         # Group compatible schedules
-"""
-
-"""
-# FairnessTrackingMatcher - Ensure everyone gets good teams over time
-#
-# USE: Long-term fairness, prevent favoritism
-# COLLECTS: Nothing (tracks team quality history)
-# LOGIC:
-#   - Tracks past team quality per person
-#   - If you got weak team last time, get strong team this time
-#   - Balances luck over multiple events
-#   - Nobody feels left out long-term
-#   Example: Person had bad teams 3 times → gets good team next
-#
-# class FairnessTrackingMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load past team assignments
-#         # Calculate "luck score" per person
-#         # Compensate for past bad luck
-"""
-
-"""
-# SeededRandomMatcher - Reproducible random (for testing)
-#
-# USE: Testing, demonstrations
-# COLLECTS: seed (number for reproducibility)
-# LOGIC:
-#   - Same seed = same results every time
-#   - Good for testing algorithm changes
-#   - Can recreate exact same teams
-#   Example: Seed 12345 always produces same teams
-#
-# class SeededRandomMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Use seed for random generator
-#         # Shuffle with seed
-#         # Reproducible results
-"""
-
-"""
-# MinecraftStatsMatcher - Match by in-game statistics
-#
-# USE: Minecraft-specific events
-# COLLECTS: External stats (playtime, achievements, etc.)
-# LOGIC:
-#   - Import stats from game server
-#   - Balance teams by playtime, builds, kills, etc.
-#   - Server-specific matching
-#   Example: Balance PvP teams by kill/death ratio
-#
-# class MinecraftStatsMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load external stats file
-#         # Extract relevant stats
-#         # Balance teams accordingly
-"""
-
-"""
-# AdaptiveMatcher - Learns from past events
-#
-# USE: Machine learning approach (advanced!)
-# COLLECTS: Nothing (analyzes past event success)
-# LOGIC:
-#   - Tracks which team compositions worked well
-#   - Learns what makes good teams
-#   - Adapts algorithm based on feedback
-#   - Gets smarter over time!
-#   Example: "Teams with X+Y combo win more → create more X+Y combos"
-#   NOTE: This is ADVANCED and probably overkill 😂
-#
-# class AdaptiveMatcher(MatcherInterface):
-#     def match(self, participants, metadata):
-#         # Load past event results
-#         # Analyze successful patterns
-#         # Apply learned patterns
-#         # AI-powered matching!
-"""
+# ============ FUTURE MATCHERS (Documentation Only) ============
+# See original file for extensive documentation of future matcher ideas
+# This section intentionally kept minimal to preserve the "from moon to ground" vision
 
 
 # ============ MAIN COG ============
@@ -854,10 +228,8 @@ class CustomEventsCog(commands.Cog):
     
     async def cog_load(self):
         """Load saved events"""
-        # Load any saved events
         for event_file in EVENTS_DIR.glob("event_*.json"):
             try:
-                # Use pathlib for cross-platform compatibility with UTF-8 encoding
                 data = json.loads(event_file.read_text(encoding='utf-8'))
                 event = Event.from_dict(data)
                 self.events[event.event_id] = event
@@ -882,7 +254,6 @@ class CustomEventsCog(commands.Cog):
         """Save event to disk"""
         try:
             event_file = EVENTS_DIR / f"event_{event.event_id}.json"
-            # Use pathlib for cross-platform compatibility with UTF-8 encoding
             event_file.write_text(
                 json.dumps(event.to_dict(), indent=2, ensure_ascii=False),
                 encoding='utf-8'
@@ -917,18 +288,15 @@ class CustomEventsCog(commands.Cog):
         await inter.response.defer(ephemeral=True)
         
         try:
-            # Validate name length
             if len(name) > 100:
                 await inter.edit_original_response(content="❌ Event name too long (max 100 characters)")
                 return
             
-            # Check for duplicate names in this guild
             existing_names = [e.name for e in self.events.values() if e.guild_id == inter.guild.id]
             if name in existing_names:
                 await inter.edit_original_response(content="❌ An event with this name already exists in this server")
                 return
             
-            # Create event
             async with self._lock:
                 event_id = self._next_event_id
                 self._next_event_id += 1
@@ -985,12 +353,10 @@ class CustomEventsCog(commands.Cog):
         
         user_id = str(inter.author.id)
         
-        # Check if already joined
         if user_id in event.participants:
             await inter.edit_original_response(content="❌ You've already joined this event")
             return
         
-        # Add participant
         async with self._lock:
             event.participants[user_id] = {
                 "name": inter.author.display_name,
@@ -1029,7 +395,6 @@ class CustomEventsCog(commands.Cog):
             await inter.edit_original_response(content="❌ Need at least 2 participants")
             return
         
-        # Get matcher
         matcher = self.matchers.get(event.matcher_type)
         if not matcher:
             await inter.edit_original_response(content=f"❌ Unknown matcher: {event.matcher_type}")
@@ -1041,7 +406,6 @@ class CustomEventsCog(commands.Cog):
         metadata["_config"] = event.config
         
         try:
-            # Run matcher!
             results = matcher.match(participant_ids, metadata)
             
             async with self._lock:
@@ -1099,14 +463,12 @@ class CustomEventsCog(commands.Cog):
             await inter.edit_original_response(content="❌ Event hasn't been shuffled yet")
             return
         
-        # Format results
         embed = disnake.Embed(
             title=f"🎯 {event.name}",
             description=f"Event Results (ID: {event_id})",
             color=disnake.Color.blue()
         )
         
-        # Show teams
         if "teams" in event.results:
             for team_name, members in list(event.results["teams"].items())[:10]:
                 member_names = []
@@ -1142,7 +504,6 @@ class CustomEventsCog(commands.Cog):
             await inter.edit_original_response(content="❌ Event not found")
             return
         
-        # Mark as completed
         async with self._lock:
             event.status = "completed"
             self._save_event(event)
@@ -1156,9 +517,7 @@ class CustomEventsCog(commands.Cog):
             except Exception as e:
                 self.logger.error(f"Failed to archive: {e}")
         
-        await inter.edit_original_response(
-            content=f"✅ Event **{event.name}** stopped and archived!"
-        )
+        await inter.edit_original_response(content=f"✅ Event **{event.name}** stopped and archived!")
     
     @event_root.sub_command(name="list", description="List all events")
     async def event_list(self, inter: disnake.ApplicationCommandInteraction):
@@ -1192,219 +551,3 @@ class CustomEventsCog(commands.Cog):
 def setup(bot):
     """Setup the cog"""
     bot.add_cog(CustomEventsCog(bot))
-
-
-# ============ WILD BRAINSTORM IDEAS - "SKY IS THE LIMIT" ============
-
-"""
-EVEN MORE MATCHER IDEAS - GO CRAZY!
-
-These are brainstorm ideas - some practical, some wild, some hilarious!
-Implement whatever sounds fun or useful!
-"""
-
-"""
-# BuildStyleMatcher - Match by Minecraft building style preference
-# COLLECTS: Building style (medieval, modern, steampunk, fantasy, etc.)
-# LOGIC: Group people with similar or complementary styles
-# USE: Themed build competitions, style-specific teams
-"""
-
-"""
-# PlaytimeMatcher - Match by how much they play
-# COLLECTS: Weekly playtime hours
-# LOGIC: Casual players with casuals, hardcore with hardcore
-# USE: Events that need time commitment matching
-"""
-
-"""
-# VeteranNewbieMatcher - Always pair veterans with newbies
-# COLLECTS: Account age or server join date
-# LOGIC: Every team gets 50% veterans, 50% newbies
-# USE: Welcoming events, mentorship
-"""
-
-"""
-# CompleteOppositesMatcher - Match DIFFERENT people
-# COLLECTS: Multiple traits
-# LOGIC: Find people with LEAST similarity
-# USE: Diversity events, stepping out of comfort zones
-# Example: Builder + Redstoner, Day player + Night owl
-"""
-
-"""
-# BestFriendsMatcher - Match people who interact most
-# COLLECTS: Nothing (analyzes Discord message history)
-# LOGIC: Finds people who chat together often, teams them up
-# USE: Keep friend groups together
-# NOTE: Requires message analysis (privacy concerns!)
-"""
-
-"""
-# EnemiesMatcher - Match people who NEVER interact (joke)
-# COLLECTS: Nothing (analyzes Discord interactions)
-# LOGIC: Find people who never talk, force them together 😂
-# USE: Ice breaker events, chaos mode
-# NOTE: Chaotic evil alignment
-"""
-
-"""
-# AgeMatcher - Match by player age (if appropriate)
-# COLLECTS: Age or age range
-# LOGIC: Similar ages together, or mix for diversity
-# USE: Age-appropriate events, generational mixing
-"""
-
-"""
-# ServerLoyaltyMatcher - Reward long-time members
-# COLLECTS: Server join date
-# LOGIC: Long-time members get captain roles or priority
-# USE: Loyalty rewards, veteran appreciation
-"""
-
-"""
-# RandomWithVetoMatcher - Random but users can veto
-# COLLECTS: veto_list (max 2-3 people they don't want)
-# LOGIC: Random assignment but respects limited vetoes
-# USE: Mostly random with some user control
-"""
-
-"""
-# EloRatingMatcher - Match by competitive rating
-# COLLECTS: Elo rating (from past competitions)
-# LOGIC: Balance teams by Elo, or match similar Elos for fair fights
-# USE: Competitive events, ranked play
-"""
-
-"""
-# CreativityMatcher - Match by creative/logical preference
-# COLLECTS: "Creative" vs "Logical" player type
-# LOGIC: Mix or match based on playstyle
-# USE: Varied team compositions
-"""
-
-"""
-# ChaosTierMatcher - Escalating randomness levels
-# COLLECTS: chaos_tolerance (1-10)
-# LOGIC: Higher chaos = more random, lower = more structured
-# USE: Let users choose their chaos level!
-"""
-
-"""
-# MoodBasedMatcher - Match by current mood/energy
-# COLLECTS: Current mood (chill, competitive, social, focused)
-# LOGIC: Match compatible moods
-# USE: Events where vibe matters
-# Example: Chill people play casual, competitive people do PvP
-"""
-
-"""
-# ItemBasedMatcher - Match by in-game items/resources
-# COLLECTS: What items/resources they have
-# LOGIC: Complement what people have (item trading optimization)
-# USE: Trading events, resource sharing
-"""
-
-"""
-# QuestGroupMatcher - Create quest parties
-# COLLECTS: Quest progress, goals
-# LOGIC: Match people on similar quest stages
-# USE: Coordinated quest completion
-"""
-
-"""
-# BuildingProjectMatcher - Match for long-term projects
-# COLLECTS: Project interests, time commitment
-# LOGIC: Match people wanting same type of project
-# USE: Team build projects, collaborations
-"""
-
-"""
-# MemeMatcher - Match by meme preferences (joke but could work?)
-# COLLECTS: Favorite memes, humor style
-# LOGIC: Match compatible humor
-# USE: Fun social events
-"""
-
-"""
-# SurvivalMatcher - Minecraft survival team balancing
-# COLLECTS: Survival skills (mining, farming, building, combat)
-# LOGIC: Each team gets balanced survival skill set
-# USE: Survival events, team survival challenges
-"""
-
-"""
-# RedstoneTeamMatcher - Technical vs building split
-# COLLECTS: Technical level (redstone knowledge)
-# LOGIC: Mix technical with builders, or separate
-# USE: Redstone competitions, mixed build events
-"""
-
-"""
-# NocturnalMatcher - Night owls vs morning people
-# COLLECTS: Preferred play time (morning/afternoon/evening/night)
-# LOGIC: Match by when they play
-# USE: Timezone events, activity timing
-"""
-
-"""
-# LuckyUnluckyMatcher - Track "luck" and compensate
-# COLLECTS: Nothing (tracks past team performance)
-# LOGIC: If you got unlucky teams 3 times, get lucky this time
-# USE: Fairness over time, karma balancing
-"""
-
-"""
-# CollaborationHistoryMatcher - Match people who work well together
-# COLLECTS: Nothing (analyzes past team success)
-# LOGIC: Find pairs/groups that succeeded before, reunite them
-# USE: Project teams, competitive events
-"""
-
-"""
-# AntiRepeatMatcher - Maximize NEW teammate experiences
-# COLLECTS: Nothing (tracks ALL past teams)
-# LOGIC: Ensure you team with someone NEW every single time
-# USE: Long-running events with variety goal
-# Example: 20 events = 20 different teammates
-"""
-
-"""
-# BalancedChaosMode - Random but with guardrails
-# COLLECTS: Optional preferences
-# LOGIC: Mostly random, but prevents disaster scenarios
-# USE: Fun randomness with safety net
-# Example: Random but ensures no team is ALL newbies
-"""
-
-"""
-# TimeZoneBridgeMatcher - Connect different timezone clusters
-# COLLECTS: Timezone + flexibility
-# LOGIC: Creates some cross-timezone teams for integration
-# USE: International bonding, language mixing
-"""
-
-"""
-# WildCardMatcher - One random element per team
-# COLLECTS: Various
-# LOGIC: Structured teams + one wildcard random person
-# USE: Predictable with surprise element
-"""
-
-"""
-# SymmetryMatcher - Create mirrored teams
-# COLLECTS: Skills/roles
-# LOGIC: Teams are exact mirrors (both have same composition)
-# USE: Ultra-fair competitions
-"""
-
-"""
-YOUR CUSTOM MATCHER IDEAS:
-- ??? - Whatever you dream up!
-- ??? - Sky's the limit!
-- ??? - Moon to ground!
-- ??? - If you can imagine it, you can code it!
-
-Remember: Each matcher is just a class with a match() function.
-That's it! Infinite possibilities! 🚀🌙
-"""
