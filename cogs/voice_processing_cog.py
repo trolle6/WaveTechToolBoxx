@@ -166,18 +166,14 @@ class VoiceProcessingCog(commands.Cog):
         
         # Pre-compile regex patterns
         self._compiled_corrections = self._compile_correction_patterns()
-        # Discord cleanup pattern: removes actual Discord formatting (mentions, URLs, rendered emojis)
-        # BUT preserves custom emoji text like :saul-1: (without angle brackets - these are just text)
-        # Pattern matches:
-        # - <:name:id> or <a:name:id> - Rendered custom emojis (name can contain hyphens, underscores, numbers)
-        # - <@user_id> or <@!user_id> - User mentions (remove)
-        # - <@&role_id> - Role mentions (remove)
-        # - <#channel_id> - Channel mentions (remove)
-        # - http://... or https://... - URLs (remove)
-        # Note: Text like :saul-1: is NOT matched (no brackets/ID) and will be preserved
-        # Using [\w-]+ instead of \w+ to match emoji names with hyphens (e.g., saul-1)
+        # Discord cleanup patterns
+        # Emoji pattern: matches rendered custom emojis like <:saul-1:123456> or <a:animated:123456>
+        # We'll extract the emoji name and replace with it (e.g., "saul-1")
+        # Using [\w-]+ to match emoji names with hyphens, underscores, and numbers
+        self._emoji_pattern = re.compile(r'<(a?):([\w-]+):\d+>')
+        # Other Discord formatting: mentions, channels, URLs (remove completely)
         self._discord_cleanup_pattern = re.compile(
-            r'<a?:[\w-]+:\d+>|<@!?\d+>|<@&\d+>|<#\d+>|https?://\S+'
+            r'<@!?\d+>|<@&\d+>|<#\d+>|https?://\S+'
         )
 
         # Initialize components
@@ -441,12 +437,28 @@ class VoiceProcessingCog(commands.Cog):
         else:
             return truncated.rstrip() + "..."
 
+    def _extract_emoji_name(self, match: re.Match) -> str:
+        """
+        Extract emoji name from rendered Discord emoji format.
+        
+        Converts <:saul-1:123456> or <a:animated:123456> to "saul-1" or "animated".
+        The name is what the user typed, and we want TTS to speak it.
+        
+        Args:
+            match: Regex match object from _emoji_pattern
+        
+        Returns:
+            Emoji name (e.g., "saul-1")
+        """
+        emoji_name = match.group(2)  # Group 2 is the emoji name
+        return emoji_name
+
     async def _clean_text(self, text: str, max_length: Optional[int] = None) -> str:
         """
         Clean and process text for TTS.
         
-        Removes Discord formatting (mentions, rendered emojis, URLs) but preserves
-        plain text custom emoji names like :saul-1: (these are just text, not actual emoji formatting).
+        Converts rendered Discord emojis (like <:saul-1:123456>) to their names (like "saul-1")
+        so TTS can speak them. Removes other Discord formatting (mentions, URLs, etc.).
         
         Args:
             text: Text to clean
@@ -459,11 +471,12 @@ class VoiceProcessingCog(commands.Cog):
         text = re.sub(r'-{3,}', ' ', text)  # Replace 3+ dashes with space
         text = re.sub(r'\n{3,}', '\n\n', text)  # Replace 3+ newlines with 2
         
-        # Store original text before Discord cleanup to check if it was emoji-only
-        text_before_discord = text
+        # Convert rendered emojis to their names (e.g., <:saul-1:123456> → "saul-1")
+        # This preserves the emoji name so TTS can speak it
+        text = self._emoji_pattern.sub(self._extract_emoji_name, text)
+        after_emoji_extraction = len(text)
         
-        # Normalize whitespace AFTER Discord cleanup to handle cases where cleanup
-        # removes content and leaves extra spaces
+        # Remove other Discord formatting (mentions, channels, URLs)
         text = self._discord_cleanup_pattern.sub('', text)
         after_discord_cleanup = len(text)
         
@@ -475,8 +488,8 @@ class VoiceProcessingCog(commands.Cog):
         after_corrections = len(text)
         
         self.logger.debug(
-            f"Text cleaning: {original_length} → {after_discord_cleanup} (discord) → "
-            f"{after_whitespace} (whitespace) → {after_corrections} (corrections)"
+            f"Text cleaning: {original_length} → {after_emoji_extraction} (emoji extraction) → "
+            f"{after_discord_cleanup} (discord) → {after_whitespace} (whitespace) → {after_corrections} (corrections)"
         )
 
         if self._detect_needs_pronunciation_help(text):
