@@ -634,13 +634,15 @@ class VoiceProcessingCog(commands.Cog):
                 return False
             self._processed_messages.add(message_key)
 
-        # Check channel
-        if self.allowed_channel and message.channel.id != self.allowed_channel:
-            self.logger.debug(
-                f"Message from channel {message.channel.id} (type: {type(message.channel.id).__name__}) "
-                f"doesn't match allowed channel {self.allowed_channel} (type: {type(self.allowed_channel).__name__}), skipping"
-            )
-            return False
+        # Check channel - ensure both are int for proper comparison
+        if self.allowed_channel is not None:
+            msg_channel_id = int(message.channel.id)  # Ensure it's an int
+            if msg_channel_id != self.allowed_channel:
+                self.logger.debug(
+                    f"Message from channel {msg_channel_id} (type: {type(msg_channel_id).__name__}) "
+                    f"doesn't match allowed channel {self.allowed_channel} (type: {type(self.allowed_channel).__name__}), skipping"
+                )
+                return False
 
         # Check voice
         if not message.author.voice or not message.author.voice.channel:
