@@ -378,12 +378,17 @@ class VoiceProcessingCog(commands.Cog):
         Returns:
             List of text chunks, each <= max_chunk_size
         """
+        original_length = len(text)
+        self.logger.debug(f"Splitting text: original length={original_length}, max_chunk_size={max_chunk_size}")
+        
         if len(text) <= max_chunk_size:
+            self.logger.debug(f"Text fits in single chunk, no splitting needed")
             return [text]
         
         chunks = []
         remaining = text
         min_chunk_size = max_chunk_size * 0.5  # Don't create tiny chunks
+        chunk_num = 1
         
         while len(remaining) > max_chunk_size:
             # Try to find a good sentence break
@@ -397,17 +402,25 @@ class VoiceProcessingCog(commands.Cog):
             # Use sentence break if found and keeps reasonable chunk size
             if last_break >= min_chunk_size:
                 split_point = last_break + 1
-                chunks.append(remaining[:split_point].strip())
+                chunk_text = remaining[:split_point].strip()
+                chunks.append(chunk_text)
+                self.logger.debug(f"Chunk {chunk_num}: length={len(chunk_text)}, split at sentence boundary (pos {split_point})")
                 remaining = remaining[split_point:].strip()
             else:
                 # No good break found, split at max_chunk_size
-                chunks.append(chunk.rstrip())
+                chunk_text = chunk.rstrip()
+                chunks.append(chunk_text)
+                self.logger.debug(f"Chunk {chunk_num}: length={len(chunk_text)}, hard split (no good boundary)")
                 remaining = remaining[max_chunk_size:].strip()
+            
+            chunk_num += 1
         
         # Add remaining text
         if remaining:
             chunks.append(remaining)
+            self.logger.debug(f"Final chunk {chunk_num}: length={len(remaining)}")
         
+        self.logger.info(f"Split {original_length} chars into {len(chunks)} chunks: {[len(c) for c in chunks]}")
         return chunks
 
     # ============ TTS GENERATION ============
@@ -651,36 +664,46 @@ class VoiceProcessingCog(commands.Cog):
                         break
                     
                     state.mark_active()
+                    self.logger.debug(f"Processing TTS item: text_length={len(item.text)} chars, voice={item.voice}")
 
                     if item.is_expired():
                         state.stats["dropped"] += 1
+                        self.logger.debug("TTS item expired, dropping")
                         continue
 
                     member = guild.get_member(item.user_id)
                     if not member or not member.voice or not member.voice.channel:
                         state.stats["dropped"] += 1
+                        self.logger.debug("Member not in voice, dropping")
                         continue
 
                     channel = member.voice.channel
 
                     # Generate TTS if not already generated
                     if not item.audio_data:
+                        self.logger.debug(f"Generating TTS for {len(item.text)} chars")
                         item.audio_data = await self._generate_tts(item.text, item.voice)
                         if not item.audio_data:
                             state.stats["errors"] += 1
+                            self.logger.warning("TTS generation failed")
                             continue
+                        self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
 
                     # Connect to voice
                     vc = await self._connect_to_voice(channel)
                     if not vc:
                         state.stats["errors"] += 1
+                        self.logger.warning("Failed to connect to voice")
                         continue
 
                     # Play audio
+                    self.logger.debug(f"Playing audio: {len(item.audio_data)} bytes")
                     if await self._play_audio(vc, item.audio_data):
                         state.stats["processed"] += 1
+                        self.logger.debug("Audio playback completed successfully")
                     else:
                         state.stats["errors"] += 1
+                        self.logger.warning("Audio playback failed")
 
                 except asyncio.TimeoutError:
                     break
@@ -766,6 +789,10 @@ class VoiceProcessingCog(commands.Cog):
             if is_first_message:
                 self._announced_users[guild_id].add(user_id)
 
+        # Log original message length
+        original_content_length = len(message.content)
+        self.logger.debug(f"Processing message from {message.author.display_name}: original length={original_content_length} chars")
+        
         # Clean text - reserve space for name prefix if first message
         if is_first_message:
             display_name = message.author.display_name
@@ -778,15 +805,19 @@ class VoiceProcessingCog(commands.Cog):
             prefix_len = len(prefix)
             # Reserve space for prefix (max 4096 total)
             max_text_length = max(100, 4096 - prefix_len)  # Ensure at least 100 chars for text
-            text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
-            if not text or len(text) < 2:
+            cleaned_text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
+            if not cleaned_text or len(cleaned_text) < 2:
+                self.logger.debug("Cleaned text too short, skipping")
                 return
             # Add prefix
-            text = prefix + text
+            text = prefix + cleaned_text
+            self.logger.debug(f"First message: added prefix '{prefix}' (len={prefix_len}), total length={len(text)}")
         else:
             text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
             if not text or len(text) < 2:
+                self.logger.debug("Cleaned text too short, skipping")
                 return
+            self.logger.debug(f"Cleaned text length={len(text)}")
 
         # Get voice
         user_voice = await self._get_voice_for_user(message.author)
@@ -797,13 +828,16 @@ class VoiceProcessingCog(commands.Cog):
         # Ensure each chunk doesn't exceed 4096 (safety check)
         for i, chunk in enumerate(text_chunks):
             if len(chunk) > 4096:
+                old_len = len(chunk)
                 text_chunks[i] = self._ensure_text_length(chunk, max_length=4096)
+                self.logger.warning(f"Chunk {i+1} exceeded 4096 chars ({old_len}), truncated to {len(text_chunks[i])}")
 
         # Queue all chunks sequentially
         state = await self._get_or_create_state(guild_id)
         chunks_queued = 0
-        for chunk in text_chunks:
+        for i, chunk in enumerate(text_chunks):
             if not chunk or len(chunk) < 2:
+                self.logger.debug(f"Skipping empty chunk {i+1}")
                 continue
             item = TTSQueueItem(
                 user_id=message.author.id,
@@ -815,10 +849,13 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 state.queue.put_nowait(item)
                 chunks_queued += 1
+                self.logger.debug(f"Queued chunk {i+1}/{len(text_chunks)}: length={len(chunk)} chars")
             except asyncio.QueueFull:
                 state.stats["dropped"] += 1
-                self.logger.warning(f"Queue full, dropping TTS chunk for user {message.author.id}")
+                self.logger.warning(f"Queue full, dropping TTS chunk {i+1} for user {message.author.id}")
                 break
+
+        self.logger.info(f"Message processing complete: {original_content_length} chars → {len(text_chunks)} chunks → {chunks_queued} queued")
 
         # Start processor if not already running and we queued at least one chunk
         if chunks_queued > 0:
@@ -828,6 +865,7 @@ class VoiceProcessingCog(commands.Cog):
                     state.processor_task = asyncio.create_task(
                         self._process_queue(guild_id)
                     )
+                    self.logger.debug("Started queue processor")
 
     # ============ VOICE STATE UPDATES ============
     @commands.Cog.listener()
