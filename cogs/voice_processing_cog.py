@@ -821,8 +821,6 @@ class VoiceProcessingCog(commands.Cog):
             # Calculate actual prefix length
             prefix = f"{pronounceable_name} says: "
             prefix_len = len(prefix)
-            # Reserve space for prefix (max 4096 total)
-            max_text_length = max(100, 4096 - prefix_len)  # Ensure at least 100 chars for text
             cleaned_text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
             if not cleaned_text or len(cleaned_text) < 2:
                 self.logger.debug("Cleaned text too short, skipping")
