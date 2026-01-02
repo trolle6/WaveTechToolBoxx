@@ -4,16 +4,12 @@ Secret Santa Checks Module - Permission and Validation Functions
 RESPONSIBILITIES:
 - Permission checks (mod/admin, participant)
 - Validation decorators for commands
-
-ISOLATION:
-- Discord command checks only
-- Reusable across commands
 """
 
 from __future__ import annotations
 
-from disnake.ext import commands
 import disnake
+from disnake.ext import commands
 
 
 def mod_check():
@@ -29,7 +25,6 @@ def mod_check():
                 if mod_role_id and any(r.id == mod_role_id for r in inter.author.roles):
                     return True
         except (AttributeError, TypeError):
-            # Config doesn't exist or is malformed, fall back to admin-only
             pass
 
         return False
@@ -51,11 +46,6 @@ def participant_check():
 
             return str(inter.author.id) in event.get("participants", {})
         except Exception:
-            # If anything goes wrong, deny access
             return False
 
     return commands.check(predicate)
-
-
-
-

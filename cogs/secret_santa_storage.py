@@ -6,21 +6,13 @@ RESPONSIBILITIES:
 - State file management with fallback
 - Archive operations and loading
 - Cross-platform compatibility (Windows/Linux)
-- Health monitoring (disk space, permissions, early warnings)
-
-ISOLATION:
-- No Discord dependencies
-- Pure file/state operations
-- Can be tested independently
 """
 
 import datetime as dt
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-
+from typing import Any, Dict, Optional
 
 # Paths - relative to cogs directory
 ROOT = Path(__file__).parent
@@ -34,10 +26,9 @@ BACKUPS_DIR.mkdir(exist_ok=True)
 
 
 def load_json(path: Path, default: Any = None) -> Any:
-    """Load JSON with error handling (cross-platform compatible)"""
+    """Load JSON with error handling"""
     if path.exists():
         try:
-            # Explicit UTF-8 encoding for cross-platform compatibility
             text = path.read_text(encoding='utf-8').strip()
             return json.loads(text) if text else (default or {})
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
@@ -46,36 +37,25 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def save_json(path: Path, data: Any, logger=None):
-    """
-    Save JSON atomically with error handling (cross-platform compatible).
-    
-    FEATURES:
-    - Atomic writes (temp file + rename for safety)
-    """
-    
+    """Save JSON atomically with error handling"""
     temp = path.with_suffix('.tmp')
     try:
-        # Explicit UTF-8 encoding for cross-platform compatibility
         temp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False),
             encoding='utf-8'
         )
         temp.replace(path)
     except Exception as e:
-        # Clean up temp file if save failed
         if temp.exists():
             try:
                 temp.unlink()
             except Exception:
                 pass
-        raise  # Re-raise so caller knows save failed
+        raise
 
 
 def get_default_state() -> dict:
-    """
-    Get default state structure (DRY - used in multiple places).
-    Extracted to avoid repetition in fallback logic.
-    """
+    """Get default state structure"""
     return {
         "current_year": dt.date.today().year,
         "pair_history": {},
@@ -84,12 +64,7 @@ def get_default_state() -> dict:
 
 
 def validate_state_structure(state: dict, logger=None) -> dict:
-    """
-    Validate and fix state structure.
-    
-    Returns: Validated state (repaired if needed)
-    """
-    # Ensure it's actually a dict
+    """Validate and fix state structure"""
     if not isinstance(state, dict):
         if logger:
             logger.error("State is not a dict, using defaults")
@@ -115,7 +90,6 @@ def validate_state_structure(state: dict, logger=None) -> dict:
                 logger.error("Invalid event state - participants not a dict, resetting")
             state["current_event"] = None
         else:
-            # Check for required fields
             required_fields = ["active", "participants", "assignments", "guild_id"]
             if not all(field in current_event for field in required_fields):
                 if logger:
@@ -125,17 +99,7 @@ def validate_state_structure(state: dict, logger=None) -> dict:
 
 
 def load_state_with_fallback(logger=None) -> dict:
-    """
-    Load state with multi-layer fallback system.
-    
-    Fallback chain:
-    1. Load main state file
-    2. Validate structure
-    3. If corrupted → Try backup file
-    4. If backup fails → Use clean defaults
-    
-    Returns: Valid state dict (guaranteed)
-    """
+    """Load state with multi-layer fallback system"""
     # Try main state file
     try:
         state = load_json(STATE_FILE, get_default_state())
@@ -174,11 +138,7 @@ def load_state_with_fallback(logger=None) -> dict:
 
 
 def save_state(state: dict, logger=None) -> bool:
-    """
-    Save state to disk with error handling and backup.
-    
-    Returns: True if successful, False otherwise
-    """
+    """Save state to disk with error handling and backup"""
     try:
         save_json(STATE_FILE, state, logger)
         return True
@@ -198,25 +158,17 @@ def save_state(state: dict, logger=None) -> bool:
 
 
 def load_all_archives(logger=None) -> Dict[int, dict]:
-    """
-    Load all archive files from archive directory.
-    
-    Handles both:
-    - Current unified format (event key with full data)
-    - Legacy format (assignments list)
-    
-    Returns: Dict mapping year → archive data
-    """
+    """Load all archive files from archive directory"""
     archives = {}
     
     for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
-        # Skip files in backups subdirectory (indestructible backup system)
+        # Skip files in backups subdirectory
         if "backups" in archive_file.parts:
             continue
             
         year_str = archive_file.stem
         
-        # Skip non-4-digit year files (e.g., backup files)
+        # Skip non-4-digit year files
         if not year_str.isdigit() or len(year_str) != 4:
             continue
         
@@ -246,7 +198,6 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
                     if receiver_id:
                         participants[receiver_id] = receiver_name
                     
-                    # Only add gifts if there's actual data
                     if gift and gift != "No description":
                         gifts[giver_id] = {
                             "gift": gift,
@@ -275,26 +226,11 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
     return archives
 
 
-# Export paths for cog usage
-__all__ = [
-    'ROOT', 'STATE_FILE', 'ARCHIVE_DIR', 'BACKUPS_DIR',
-    'load_json', 'save_json', 'get_default_state', 'validate_state_structure',
-    'load_state_with_fallback', 'save_state', 'load_all_archives', 'archive_event'
-]
-
-
 def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
     """
-    Archive event data in unified format with CRITICAL overwrite protection.
+    Archive event data in unified format with overwrite protection.
     
-    ARCHIVE PROTECTION MECHANICS:
-    - Checks if YYYY.json already exists (e.g., 2025.json)
-    - If exists: Saves to timestamped backup instead (2025_backup_20251216_153045.json)
-    - If new: Saves normally to YYYY.json
-    - NEVER overwrites existing archives (prevents data loss!)
-    
-    Returns:
-        Filename of the saved archive (e.g., "2025.json" or "2025_backup_20251216_153045.json")
+    If archive already exists, saves to timestamped backup instead.
     """
     archive_data = {
         "year": year,
@@ -305,22 +241,26 @@ def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
     
     archive_path = ARCHIVE_DIR / f"{year}.json"
     
-    # CRITICAL SAFETY CHECK: Prevent data loss from accidental overwrites
+    # Prevent data loss from accidental overwrites
     if archive_path.exists():
-        # Archive already exists! Save to backup file instead (NEVER overwrite!)
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = ARCHIVE_DIR / f"{year}_backup_{timestamp}.json"
         save_json(backup_path, archive_data, logger)
         
         if logger:
             logger.warning(f"⚠️ Archive {year}.json already exists! Saved to {backup_path.name} instead")
-            logger.warning(f"This suggests you ran multiple events in {year}. Please review archives manually!")
         
         return backup_path.name
     else:
-        # Safe to save normally
         save_json(archive_path, archive_data, logger)
         if logger:
             logger.info(f"Archived Secret Santa {year} → {archive_path.name}")
         return archive_path.name
 
+
+# Export paths for cog usage
+__all__ = [
+    'ROOT', 'STATE_FILE', 'ARCHIVE_DIR', 'BACKUPS_DIR',
+    'load_json', 'save_json', 'get_default_state', 'validate_state_structure',
+    'load_state_with_fallback', 'save_state', 'load_all_archives', 'archive_event'
+]
