@@ -6,6 +6,7 @@ RESPONSIBILITIES:
 - State file management with fallback
 - Archive operations and loading
 - Cross-platform compatibility (Windows/Linux)
+- Health monitoring (disk space, permissions, early warnings)
 
 ISOLATION:
 - No Discord dependencies
@@ -18,6 +19,22 @@ import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Lazy import to avoid circular dependencies
+_health_monitor = None
+
+
+def _get_health_monitor(logger=None):
+    """Get or create health monitor instance (lazy initialization)"""
+    global _health_monitor
+    if _health_monitor is None:
+        try:
+            from .health_monitor import HealthMonitor
+            _health_monitor = HealthMonitor(logger)
+        except ImportError:
+            # If health monitor not available, return None (graceful degradation)
+            return None
+    return _health_monitor
 
 
 # Paths - relative to cogs directory
@@ -43,8 +60,28 @@ def load_json(path: Path, default: Any = None) -> Any:
     return default or {}
 
 
-def save_json(path: Path, data: Any):
-    """Save JSON atomically with error handling (cross-platform compatible)"""
+def save_json(path: Path, data: Any, logger=None):
+    """
+    Save JSON atomically with error handling and health checks (cross-platform compatible).
+    
+    FEATURES:
+    - Proactive disk space and permission checks before writing
+    - Early warnings if operation may fail
+    - Atomic writes (temp file + rename for safety)
+    """
+    # Health check before operation (proactive failure detection)
+    monitor = _get_health_monitor(logger)
+    if monitor:
+        is_safe, warning = monitor.validate_path_safety(path, operation="write")
+        if not is_safe:
+            # Critical failure - cannot proceed
+            if logger:
+                logger.error(f"Cannot save {path}: {warning}")
+            raise OSError(f"Health check failed: {warning}")
+        elif warning and logger:
+            # Warning but safe to proceed
+            logger.warning(f"Health check warning for {path}: {warning}")
+    
     temp = path.with_suffix('.tmp')
     try:
         # Explicit UTF-8 encoding for cross-platform compatibility
@@ -172,7 +209,7 @@ def save_state(state: dict, logger=None) -> bool:
     Returns: True if successful, False otherwise
     """
     try:
-        save_json(STATE_FILE, state)
+        save_json(STATE_FILE, state, logger)
         return True
     except Exception as e:
         if logger:
@@ -180,7 +217,7 @@ def save_state(state: dict, logger=None) -> bool:
         # Try to save a backup
         try:
             backup_path = STATE_FILE.with_suffix('.backup')
-            save_json(backup_path, state)
+            save_json(backup_path, state, logger)
             if logger:
                 logger.warning(f"Saved to backup file: {backup_path}")
         except Exception as backup_error:
@@ -302,7 +339,7 @@ def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
         # Archive already exists! Save to backup file instead (NEVER overwrite!)
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = ARCHIVE_DIR / f"{year}_backup_{timestamp}.json"
-        save_json(backup_path, archive_data)
+        save_json(backup_path, archive_data, logger)
         
         if logger:
             logger.warning(f"⚠️ Archive {year}.json already exists! Saved to {backup_path.name} instead")
@@ -311,7 +348,7 @@ def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
         return backup_path.name
     else:
         # Safe to save normally
-        save_json(archive_path, archive_data)
+        save_json(archive_path, archive_data, logger)
         if logger:
             logger.info(f"Archived Secret Santa {year} → {archive_path.name}")
         return archive_path.name

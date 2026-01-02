@@ -32,6 +32,7 @@ COMMANDS (Anyone):
 - /ss history [year] - View specific year details
 - /ss user_history @user - View one user's complete history
 - /ss test_emoji_consistency @user - Test emoji consistency across years
+- /ss edit_gift [year] [description] - Edit your gift submission from any past year
 
 SAFETY FEATURES:
 - ✅ Cryptographic randomness (secrets.SystemRandom)
@@ -41,6 +42,7 @@ SAFETY FEATURES:
 - ✅ Automatic hourly backups
 - ✅ Atomic file writes (prevents corruption)
 - ✅ Validation on state load
+- ✅ Health monitoring (disk space, permissions, early failure detection)
 
 DATA STORAGE:
 - secret_santa_state.json - Active event state
@@ -173,8 +175,10 @@ class SecretSantaCog(commands.Cog):
             embed.set_footer(text=footer)
         return embed
     
-    def _truncate_text(self, text: str, max_length: int = 100) -> str:
-        """Truncate text with ellipsis if needed"""
+    def _truncate_text(self, text: Optional[str], max_length: int = 100) -> str:
+        """Truncate text with ellipsis if needed. Handles None values."""
+        if not text:
+            return ""
         if len(text) <= max_length:
             return text
         return f"{text[:max_length]}..."
@@ -1062,12 +1066,14 @@ class SecretSantaCog(commands.Cog):
                 return
             
             # Handle both formats: list format (legacy) and unified format
+            is_unified_format = False
             assignments = None
             if "assignments" in archive_data and isinstance(archive_data["assignments"], list):
                 # Legacy list format
                 assignments = archive_data["assignments"]
             elif "event" in archive_data and "assignments" in archive_data["event"]:
                 # Unified format - convert to list for editing
+                is_unified_format = True
                 event = archive_data["event"]
                 participants = event.get("participants", {})
                 assignments_map = event.get("assignments", {})
@@ -1111,17 +1117,38 @@ class SecretSantaCog(commands.Cog):
             
             # Recalculate statistics
             total_participants = len(assignments)
-            gifts_exchanged = sum(1 for a in assignments if a.get("gift") and a.get("gift") != "No description")
+            gifts_exchanged = sum(1 for a in assignments if a.get("gift"))
             completion_percentage = int((gifts_exchanged / total_participants) * 100) if total_participants > 0 else 0
             
-            # Update statistics in archive
-            if "statistics" in archive_data:
+            # If unified format, convert updated list back to unified format
+            if is_unified_format:
+                event = archive_data["event"]
+                # Update gift_submissions in unified format
+                if "gift_submissions" not in event:
+                    event["gift_submissions"] = {}
+                
+                receiver_id = user_assignment.get("receiver_id")
+                receiver_name = user_assignment.get("receiver_name", "Unknown")
+                event["gift_submissions"][user_id] = {
+                    "gift": gift_description,
+                    "receiver_id": receiver_id,
+                    "receiver_name": receiver_name
+                }
+                
+                # Update statistics in unified format
+                if "statistics" not in archive_data:
+                    archive_data["statistics"] = {}
                 archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
                 archive_data["statistics"]["completion_percentage"] = completion_percentage
+            else:
+                # Legacy format - update statistics
+                if "statistics" in archive_data:
+                    archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
+                    archive_data["statistics"]["completion_percentage"] = completion_percentage
             
             # Save updated archive
             async with self._lock:
-                save_json(archive_path, archive_data)
+                save_json(archive_path, archive_data, self.logger)
             
             # Create success embed
             receiver_name = user_assignment.get("receiver_name", "Unknown")

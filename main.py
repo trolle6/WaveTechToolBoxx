@@ -379,6 +379,13 @@ bot.http_mgr = HttpManager()
 bot.discord_handler = discord_handler
 bot.ready_once = False
 
+# Connection tracking for monitoring disconnections
+bot._connection_stats = {
+    "disconnects": [],
+    "last_disconnect": None,
+    "disconnect_count_24h": 0
+}
+
 
 # Discord feedback utilities
 # Level emoji mapping (shared by all Discord message functions)
@@ -434,6 +441,10 @@ async def send_to_discord_channel(message: str, level: str = "INFO"):
 bot.send_to_discord_log = send_to_discord_log
 bot.send_to_discord_channel = send_to_discord_channel
 
+def is_bot_connected() -> bool:
+    """Check if bot is currently connected to Discord"""
+    return bot.is_ready()
+
 
 @bot.event
 async def on_ready():
@@ -458,12 +469,92 @@ async def on_ready():
 
 @bot.event
 async def on_disconnect():
-    logger.debug("Bot disconnected from Discord")  # Changed to debug (too noisy for Discord channel)
+    """
+    Track disconnections and log with details.
+    
+    MONITORING:
+    - Tracks all disconnections with timestamps
+    - Calculates frequency and duration
+    - Warns if disconnections are too frequent (>10 in 24h)
+    - Logs time since last disconnect to detect patterns
+    
+    CONCERNS:
+    - Frequent disconnections may interrupt user operations
+    - Could indicate network instability or Discord API issues
+    - May cause data loss if operations are in progress
+    """
+    disconnect_time = time.time()
+    
+    # Track disconnection
+    bot._connection_stats["last_disconnect"] = disconnect_time
+    bot._connection_stats["disconnects"].append(disconnect_time)
+    
+    # Keep only last 24 hours of disconnects
+    cutoff = disconnect_time - 86400  # 24 hours
+    bot._connection_stats["disconnects"] = [d for d in bot._connection_stats["disconnects"] if d > cutoff]
+    bot._connection_stats["disconnect_count_24h"] = len(bot._connection_stats["disconnects"])
+    
+    # Calculate time since last disconnect (if any)
+    if len(bot._connection_stats["disconnects"]) > 1:
+        time_since_last = disconnect_time - bot._connection_stats["disconnects"][-2]
+        logger.info(f"⚠️ Bot disconnected from Discord (disconnect #{bot._connection_stats['disconnect_count_24h']} in last 24h, {time_since_last:.1f}s since last)")
+    else:
+        logger.info(f"⚠️ Bot disconnected from Discord (disconnect #{bot._connection_stats['disconnect_count_24h']} in last 24h)")
+    
+    # Warn if disconnections are too frequent
+    if bot._connection_stats["disconnect_count_24h"] >= 10:
+        logger.warning(f"🚨 HIGH DISCONNECTION RATE: {bot._connection_stats['disconnect_count_24h']} disconnects in last 24 hours - possible network or Discord API issues")
+        # Send to Discord log channel if available
+        try:
+            await send_to_discord_log(
+                f"High disconnection rate detected: {bot._connection_stats['disconnect_count_24h']} disconnects in 24h. "
+                "This may indicate network issues or Discord API problems.",
+                "WARNING"
+            )
+        except Exception:
+            pass  # Don't fail if Discord is down
 
 
 @bot.event
 async def on_resumed():
-    logger.debug("Bot reconnected to Discord")  # Changed to debug (reconnects are normal)
+    """
+    Track reconnections and log with duration.
+    
+    MONITORING:
+    - Calculates disconnection duration
+    - Warns if disconnection was longer than expected (>5s)
+    - Alerts if disconnection was very long (>60s) - may have interrupted operations
+    
+    IMPACT:
+    - Short disconnections (<5s): Usually harmless, Discord gateway resets
+    - Medium disconnections (5-60s): May interrupt some operations
+    - Long disconnections (>60s): Likely interrupted user operations (TTS, DALL-E, Secret Santa)
+    """
+    reconnect_time = time.time()
+    
+    if bot._connection_stats["last_disconnect"]:
+        disconnect_duration = reconnect_time - bot._connection_stats["last_disconnect"]
+        
+        # Log reconnection with duration
+        if disconnect_duration < 5:
+            logger.info(f"✅ Bot reconnected to Discord (disconnected for {disconnect_duration:.2f}s)")
+        elif disconnect_duration < 60:
+            logger.warning(f"⚠️ Bot reconnected to Discord after {disconnect_duration:.1f}s - longer than expected")
+        else:
+            logger.error(f"🚨 Bot reconnected to Discord after {disconnect_duration:.1f}s - very long disconnection!")
+            # Send to Discord log channel
+            try:
+                await send_to_discord_log(
+                    f"Long disconnection detected: {disconnect_duration:.1f}s. "
+                    "This may have interrupted user operations.",
+                    "ERROR"
+                )
+            except Exception:
+                pass
+        
+        bot._connection_stats["last_disconnect"] = None
+    else:
+        logger.info("✅ Bot reconnected to Discord")
 
 
 @bot.event
@@ -561,8 +652,8 @@ def handle_signal(signum, frame):
         asyncio.run(graceful_shutdown())
 
 
-for sig in (signal.SIGINT, signal.SIGTERM):
-    signal.signal(sig, handle_signal)
+# Signal handlers will be set in main block after bot initialization
+# (moved to avoid conflicts with retry loop)
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
@@ -609,41 +700,63 @@ if __name__ == "__main__":
 
     logger.info(f"Successfully loaded {num_loaded} cogs")
 
-    # Run bot with automatic retry on failures
-    MAX_RETRIES = 5
+    # Run bot with INFINITE retry on failures (24/7/365 operation)
+    # Bot will NEVER give up - only stops on KeyboardInterrupt (Ctrl+C) or signal
     retry_count = 0
+    shutdown_flag = [False]  # Use list to allow modification in nested function
+    
+    def handle_shutdown_signal_wrapper(signum, frame):
+        """Handle shutdown signals gracefully - sets flag and calls original handler"""
+        shutdown_flag[0] = True
+        logger.info(f"Shutdown signal {signum} received - will shutdown after current operation")
+        handle_signal(signum, frame)
+    
+    # Override signal handlers to set shutdown flag
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, handle_shutdown_signal_wrapper)
     
     try:
-        while retry_count < MAX_RETRIES:
+        while not shutdown_flag[0]:
             try:
                 bot.run(config.DISCORD_TOKEN, reconnect=True)
-                break  # Bot shut down normally
+                # If bot.run() returns, it was a normal shutdown (KeyboardInterrupt)
+                break
             except KeyboardInterrupt:
-                logger.info("Keyboard interrupt received")
+                logger.info("Keyboard interrupt received - shutting down gracefully")
+                shutdown_flag[0] = True
                 break
             except Exception as e:
                 retry_count += 1
-                logger.critical(f"Bot failed (attempt {retry_count}/{MAX_RETRIES}): {e}", exc_info=True)
+                logger.critical(f"Bot crashed (attempt #{retry_count}): {e}", exc_info=True)
                 
-                if retry_count < MAX_RETRIES:
-                    # Exponential backoff (max 30 seconds)
-                    wait_time = min(30, 5 * retry_count)
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logger.critical("Max retries exceeded. Bot will not restart.")
+                # Exponential backoff with cap (prevents spam but ensures reconnection)
+                # Max wait: 60 seconds (reasonable for network issues)
+                wait_time = min(60, 5 * min(retry_count, 12))  # Cap at 12 retries for backoff calc
+                logger.warning(f"Bot will retry in {wait_time} seconds... (retry #{retry_count}, will retry FOREVER until manually stopped)")
+                time.sleep(wait_time)
+                
+                # Reset retry count after many attempts (prevents infinite backoff)
+                # This ensures if bot was down for hours, it doesn't wait 60s forever
+                if retry_count > 100:
+                    logger.info("Resetting retry backoff after many attempts")
+                    retry_count = 0
     finally:
-        # Ensure cleanup runs regardless of how bot exits
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(graceful_shutdown())
-            else:
+        # Only cleanup if shutdown was requested (not on crash)
+        if shutdown_flag[0]:
+            logger.info("Performing graceful shutdown...")
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(graceful_shutdown())
+                else:
+                    asyncio.run(graceful_shutdown())
+            except RuntimeError:
                 asyncio.run(graceful_shutdown())
-        except RuntimeError:
-            asyncio.run(graceful_shutdown())
-        except Exception as cleanup_error:
-            logger.error(f"Cleanup failed: {cleanup_error}")
-        finally:
-            import os
-            os._exit(0)  # Force exit to prevent hanging
+            except Exception as cleanup_error:
+                logger.error(f"Cleanup failed: {cleanup_error}")
+            finally:
+                import os
+                os._exit(0)  # Force exit to prevent hanging
+        else:
+            # If we get here, it's a crash - don't exit, let the loop retry
+            logger.warning("Bot crashed - will retry automatically (infinite retries enabled)")

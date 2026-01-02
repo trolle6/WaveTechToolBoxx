@@ -3,6 +3,7 @@ Voice Processing Cog - Text-to-Speech with Smart Features
 
 FEATURES:
 - 🎤 Automatic TTS for messages from users in voice channels
+- 📏 Smart long message splitting (handles messages up to Discord's 2000 char limit)
 - 🎭 6 unique voice assignments (alloy, echo, fable, onyx, nova, shimmer)
 - 🔄 Session-based voice rotation (users get variety between sessions)
 - 🤖 AI pronunciation improvement for acronyms and usernames
@@ -1007,8 +1008,96 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.debug(f"Pronunciation improvement error: {e}")
             return text
 
-    async def _clean_text(self, text: str, max_length: int = 400) -> str:
-        """Clean and process text for TTS with AI pronunciation improvement"""
+    def _split_text_intelligently(self, text: str, max_chunk_size: int = 4000) -> list[str]:
+        """
+        Split long text into chunks intelligently for TTS.
+        
+        SPLITTING STRATEGY (in order of preference):
+        1. Split at sentence boundaries (. ! ?) - best for natural speech
+        2. Split at clause boundaries (; : ,) - good for readability
+        3. Split at word boundaries (spaces) - preserves words
+        4. Split at character boundaries - last resort
+        
+        Args:
+            text: Text to split
+            max_chunk_size: Maximum characters per chunk (default 4000, OpenAI limit is 4096)
+        
+        Returns:
+            List of text chunks, each under max_chunk_size
+        """
+        if len(text) <= max_chunk_size:
+            return [text]
+        
+        chunks = []
+        remaining = text
+        
+        while len(remaining) > max_chunk_size:
+            # Try to split at sentence boundary first (best for TTS)
+            sentence_end = max(
+                remaining.rfind('.', 0, max_chunk_size),
+                remaining.rfind('!', 0, max_chunk_size),
+                remaining.rfind('?', 0, max_chunk_size)
+            )
+            
+            if sentence_end > max_chunk_size * 0.5:  # Only use if we're not cutting off too much
+                chunk = remaining[:sentence_end + 1].strip()
+                remaining = remaining[sentence_end + 1:].strip()
+                if chunk:
+                    chunks.append(chunk)
+                continue
+            
+            # Try clause boundaries (; :)
+            clause_end = max(
+                remaining.rfind(';', 0, max_chunk_size),
+                remaining.rfind(':', 0, max_chunk_size)
+            )
+            
+            if clause_end > max_chunk_size * 0.5:
+                chunk = remaining[:clause_end + 1].strip()
+                remaining = remaining[clause_end + 1:].strip()
+                if chunk:
+                    chunks.append(chunk)
+                continue
+            
+            # Try comma boundaries
+            comma_end = remaining.rfind(',', 0, max_chunk_size)
+            
+            if comma_end > max_chunk_size * 0.5:
+                chunk = remaining[:comma_end + 1].strip()
+                remaining = remaining[comma_end + 1:].strip()
+                if chunk:
+                    chunks.append(chunk)
+                continue
+            
+            # Split at word boundary (space)
+            space_end = remaining.rfind(' ', 0, max_chunk_size)
+            
+            if space_end > max_chunk_size * 0.5:
+                chunk = remaining[:space_end].strip()
+                remaining = remaining[space_end + 1:].strip()
+                if chunk:
+                    chunks.append(chunk)
+                continue
+            
+            # Last resort: hard cut at max_chunk_size
+            chunk = remaining[:max_chunk_size].strip()
+            remaining = remaining[max_chunk_size:].strip()
+            if chunk:
+                chunks.append(chunk)
+        
+        # Add remaining text
+        if remaining:
+            chunks.append(remaining.strip())
+        
+        return chunks
+
+    async def _clean_text(self, text: str, max_length: int = None) -> str:
+        """
+        Clean and process text for TTS with AI pronunciation improvement.
+        
+        Note: max_length is now optional - if None, text won't be truncated.
+        Long texts should be split before calling this function.
+        """
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text.strip())
 
@@ -1025,11 +1114,11 @@ class VoiceProcessingCog(commands.Cog):
             # Use AI to improve pronunciation (e.g., "JKM" → "Jay Kay Em")
             text = await self._improve_pronunciation(text)
 
-        # Truncate
-        if len(text) > max_length:
+        # Truncate only if max_length is specified (for backward compatibility)
+        if max_length and len(text) > max_length:
             text = text[:max_length - 3] + "..."
 
-        # Ensure punctuation
+        # Ensure punctuation (only if text exists)
         if text and text[-1] not in '.!?,;:':
             text += '.'
 
@@ -1407,8 +1496,9 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         # Clean text (now async for AI pronunciation improvement)
-        text = await self._clean_text(message.content)
-        if not text or len(text) < 2:
+        # Don't truncate - we'll handle long messages by splitting
+        raw_text = await self._clean_text(message.content, max_length=None)
+        if not raw_text or len(raw_text) < 2:
             return
 
         # SMART NAME ANNOUNCEMENT SYSTEM:
@@ -1437,6 +1527,7 @@ class VoiceProcessingCog(commands.Cog):
                 self._announced_users[guild_id].add(user_id)
         
         # AI processing and text modification happens OUTSIDE the lock for better performance
+        name_prefix = ""
         if is_first_message:
             # Get user's display name and make it pronounceable
             display_name = message.author.display_name
@@ -1447,8 +1538,8 @@ class VoiceProcessingCog(commands.Cog):
             else:
                 pronounceable_name = display_name
             
-            # Prepend name announcement
-            text = f"{pronounceable_name} says: {text}"
+            # Create name prefix (will be added to first chunk only)
+            name_prefix = f"{pronounceable_name} says: "
             
             self.logger.info(f"✅ Announcing {display_name} (user {user_id}) - first message in session")
         else:
@@ -1458,35 +1549,67 @@ class VoiceProcessingCog(commands.Cog):
         # Pass member object so we can check roles, pronouns, and free up voices if needed
         user_voice = await self._get_voice_for_user(message.author)
 
-        # Add to queue IMMEDIATELY for strict FIFO ordering
+        # Split long messages intelligently (OpenAI TTS limit is 4096 chars, use 4000 to be safe)
+        # This handles messages up to Discord's 2000 char limit and beyond
+        MAX_TTS_CHUNK_SIZE = 4000
+        text_chunks = self._split_text_intelligently(raw_text, MAX_TTS_CHUNK_SIZE)
+        
+        if len(text_chunks) > 1:
+            self.logger.info(f"📝 Splitting long message ({len(raw_text)} chars) into {len(text_chunks)} chunks for TTS")
+
+        # Add all chunks to queue IMMEDIATELY for strict FIFO ordering
         # TTS will be generated in order by the queue processor
         state = await self._get_or_create_state(message.guild.id)
-
-        item = TTSQueueItem(
-            user_id=message.author.id,
-            channel_id=message.author.voice.channel.id,
-            text=text,
-            voice=user_voice,  # Use per-user voice
-            audio_data=None,  # Will be generated in queue processor
-            timestamp=time.time()
-        )
-
+        
+        # Check queue health before adding (proactive warning)
+        queue_size = state.queue.qsize()
+        max_queue = 20  # Default max_queue_size from GuildVoiceState.__init__
+        # Try to get actual max from queue if available
+        if hasattr(state.queue, 'maxsize') and state.queue.maxsize:
+            max_queue = state.queue.maxsize
+        
         try:
-            state.queue.put_nowait(item)
-            self.logger.debug(f"Queued message from {message.author.display_name}: '{text[:50]}...' (queue size: {state.queue.qsize()})")
+            from .health_monitor import HealthMonitor
+            monitor = HealthMonitor(self.logger)
+            warning = monitor.check_queue_warning(queue_size, max_queue, warn_threshold=0.8)
+            if warning:
+                self.logger.warning(f"TTS queue: {warning}")
+        except ImportError:
+            pass  # Health monitor not available, continue anyway
+        
+        for chunk_idx, chunk_text in enumerate(text_chunks):
+            # Add name prefix only to first chunk
+            if chunk_idx == 0 and name_prefix:
+                final_text = name_prefix + chunk_text
+            else:
+                final_text = chunk_text
+            
+            item = TTSQueueItem(
+                user_id=message.author.id,
+                channel_id=message.author.voice.channel.id,
+                text=final_text,
+                voice=user_voice,  # Use per-user voice
+                audio_data=None,  # Will be generated in queue processor
+                timestamp=time.time()
+            )
+            
+            try:
+                state.queue.put_nowait(item)
+                self.logger.debug(f"Queued chunk {chunk_idx + 1}/{len(text_chunks)} from {message.author.display_name}: '{final_text[:50]}...' (queue size: {state.queue.qsize()})")
+            except asyncio.QueueFull:
+                self.logger.warning(f"TTS queue full for {message.guild.name} - dropping chunk {chunk_idx + 1}/{len(text_chunks)}")
+                await message.channel.send("❌ TTS queue is full. Please try again in a few minutes.", delete_after=10)
+                return  # Stop adding chunks if queue is full
 
-            # Start processor if not running
-            # Protected by state_lock to prevent race condition where two messages
-            # arrive simultaneously and both try to start the processor
-            async with self._state_lock:
-                if not state.is_processing:
-                    state.is_processing = True  # Set BEFORE creating task
-                    state.processor_task = asyncio.create_task(
-                        self._process_queue(message.guild.id)
-                    )
-
-        except asyncio.QueueFull:
-            self.logger.warning(f"Queue full for {message.guild.name}")
+        # Start processor if not running (only once, after all chunks are queued)
+        # Protected by state_lock to prevent race condition where two messages
+        # arrive simultaneously and both try to start the processor
+        async with self._state_lock:
+            if not state.is_processing:
+                state.is_processing = True  # Set BEFORE creating task
+                state.processor_task = asyncio.create_task(
+                    self._process_queue(message.guild.id)
+                )
 
     async def _should_disconnect_from_empty_channel(self, guild: disnake.Guild) -> bool:
         """
