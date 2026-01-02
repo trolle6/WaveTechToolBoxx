@@ -330,7 +330,10 @@ class VoiceProcessingCog(commands.Cog):
         OpenAI TTS API supports up to 4096 characters per request.
         """
         original_length = len(text)
-        text = re.sub(r'\s+', ' ', text.strip())
+        # Normalize excessive formatting: multiple newlines, dashes, etc.
+        text = re.sub(r'-{3,}', ' ', text)  # Replace 3+ dashes with space
+        text = re.sub(r'\n{3,}', '\n\n', text)  # Replace 3+ newlines with 2
+        text = re.sub(r'\s+', ' ', text.strip())  # Normalize all whitespace to single spaces
         after_whitespace = len(text)
         text = self._discord_cleanup_pattern.sub('', text)
         after_discord_cleanup = len(text)
@@ -483,11 +486,12 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.debug(f"Sending to TTS API: length={len(text)}, preview={text[:200]}...")
 
         try:
-            # Increase timeout for longer texts (estimate: ~0.05s per 100 chars)
-            # For 3500 chars: 3500/100*0.05 + 20 = 21.75s, for 4000 chars: 4000/100*0.05 + 20 = 22s
+            # Increase timeout for longer texts
+            # OpenAI TTS API can take longer for complex/long texts
+            # Use more generous timeout: 30s base + 0.1s per 100 chars
             base_timeout = getattr(self.bot.config, 'TTS_TIMEOUT', 15)
-            text_timeout = len(text) / 100 * 0.05 + 20  # 20s base + 0.05s per 100 chars
-            tts_timeout = max(base_timeout, min(90, text_timeout))  # Use larger of base or calculated, cap at 90s
+            text_timeout = len(text) / 100 * 0.1 + 30  # 30s base + 0.1s per 100 chars
+            tts_timeout = max(base_timeout, min(120, text_timeout))  # Use larger of base or calculated, cap at 120s
             self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, base={base_timeout}, calculated={text_timeout:.1f})")
             session = await self.bot.http_mgr.get_session(timeout=tts_timeout)
 
