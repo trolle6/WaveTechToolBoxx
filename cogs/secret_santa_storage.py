@@ -47,25 +47,11 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 def save_json(path: Path, data: Any, logger=None):
     """
-    Save JSON atomically with error handling and health checks (cross-platform compatible).
+    Save JSON atomically with error handling (cross-platform compatible).
     
     FEATURES:
-    - Proactive disk space and permission checks before writing
-    - Early warnings if operation may fail
     - Atomic writes (temp file + rename for safety)
     """
-    # Health check before operation (proactive failure detection)
-    monitor = _get_health_monitor(logger)
-    if monitor:
-        is_safe, warning = monitor.validate_path_safety(path, operation="write")
-        if not is_safe:
-            # Critical failure - cannot proceed
-            if logger:
-                logger.error(f"Cannot save {path}: {warning}")
-            raise OSError(f"Health check failed: {warning}")
-        elif warning and logger:
-            # Warning but safe to proceed
-            logger.warning(f"Health check warning for {path}: {warning}")
     
     temp = path.with_suffix('.tmp')
     try:
