@@ -247,6 +247,67 @@ class SecretSantaCog(commands.Cog):
         msg += "*Your giftee is happy to help you find the perfect gift!*"
         return msg
     
+    def _get_join_message(self, year: int) -> str:
+        """Get the join message for participants"""
+        return (
+            f"✅ You've joined Secret Santa {year}! 🎄\n\n"
+            f"**What happens next:**\n"
+            f"• Build your wishlist: `/ss wishlist add [item]`\n"
+            f"• When the organizer starts assignments, I'll message you here\n"
+            f"• You'll see your giftee's wishlist once you're their Santa\n\n"
+            f"🔒 *Your wishlist is hidden from everyone except your Secret Santa!*\n"
+            f"💡 *Start adding items now so your Santa knows what to get you!*"
+        )
+    
+    def _get_assignment_message(self, year: int, receiver_id: int, receiver_name: str) -> str:
+        """Get the assignment message for a Santa"""
+        messages = [
+            "🎅 **Ho ho ho!** You're Secret Santa for {receiver}!",
+            "🎄 **You've been assigned** to gift {receiver}!",
+            "✨ **The magic of Christmas** has paired you with {receiver}!",
+            "🦌 **Rudolph has chosen** you to spread joy to {receiver}!",
+            "🎁 **Your mission** is to make {receiver}'s Christmas magical!",
+            "❄️ **Winter magic** has matched you with {receiver}!"
+        ]
+        
+        msg = f"**SECRET SANTA {year}**\n\n"
+        msg += f"**YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver_id}> ({receiver_name})')}\n\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"**SEE WHAT THEY WANT:**\n"
+        msg += f"• `/ss view_giftee_wishlist` - Check {receiver_name}'s wishlist\n\n"
+        msg += f"**OTHER COMMANDS:**\n"
+        msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions anonymously\n"
+        msg += f"• `/ss reply_santa` - Reply if they message you\n"
+        msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"**BUILD YOUR WISHLIST TOO:**\n"
+        msg += f"• `/ss wishlist add [item]` - So your Santa knows what to get you!\n\n"
+        msg += f"**NEED HELP?**\n"
+        msg += f"• Contact a moderator if you have any issues\n"
+        msg += f"• They'll sort it out for you!\n\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"*Optional: Use `/ss ask_giftee use_ai_rewrite:True` for extra anonymity*\n"
+        msg += f"*Don't reveal your identity during the event!*"
+        return msg
+    
+    def _get_event_end_message(self, year: int) -> str:
+        """Get the event end message for participants"""
+        return (
+            f"**SECRET SANTA {year} - EVENT ENDED**\n\n"
+            f"Thank you for being part of Secret Santa this year! Your kindness made someone's holiday brighter.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Hope you had as much fun as your giftee!\n\n"
+            f"See you next year!"
+        )
+    
+    def _get_leave_message(self, year: int) -> str:
+        """Get the leave message for participants"""
+        return (
+            f"👋 You've left Secret Santa {year}\n\n"
+            f"Your wishlist has been removed and you won't receive an assignment.\n\n"
+            f"💡 *Changed your mind? React to the announcement message again to rejoin!*"
+        )
+    
     # State loading now uses load_state_with_fallback from secret_santa_storage module
 
     async def cog_load(self):
@@ -547,19 +608,8 @@ class SecretSantaCog(commands.Cog):
             self._save()
 
         # Send confirmation DMs
-        dm_tasks = [
-            self._send_dm(
-                int(uid),
-                f"✅ You've joined Secret Santa {current_year}! 🎄\n\n"
-                f"**What happens next:**\n"
-                f"• Build your wishlist: `/ss wishlist add [item]`\n"
-                f"• When the organizer starts assignments, I'll message you here\n"
-                f"• You'll see your giftee's wishlist once you're their Santa\n\n"
-                f"🔒 *Your wishlist is hidden from everyone except your Secret Santa!*\n"
-                f"💡 *Start adding items now so your Santa knows what to get you!*"
-            )
-            for uid in participants
-        ]
+        join_msg = self._get_join_message(current_year)
+        dm_tasks = [self._send_dm(int(uid), join_msg) for uid in participants]
 
         results = await asyncio.gather(*dm_tasks, return_exceptions=True)
         successful = sum(1 for r in results if r is True)
@@ -688,54 +738,10 @@ class SecretSantaCog(commands.Cog):
                     pass
 
         # Send assignment DMs - Santa knows who they're gifting to!
-        messages = [
-            "🎅 **Ho ho ho!** You're Secret Santa for {receiver}!",
-            "🎄 **You've been assigned** to gift {receiver}!",
-            "✨ **The magic of Christmas** has paired you with {receiver}!",
-            "🦌 **Rudolph has chosen** you to spread joy to {receiver}!",
-            "🎁 **Your mission** is to make {receiver}'s Christmas magical!",
-            "❄️ **Winter magic** has matched you with {receiver}!"
-        ]
-
         dm_tasks = []
         for giver, receiver in assignments.items():
-            # Get receiver's name for natural messaging
             receiver_name = event["participants"].get(str(receiver), f"User {receiver}")
-            
-            # Create clean, focused assignment message
-            msg = f"**SECRET SANTA {self.state['current_year']}**\n\n"
-            
-            # WHO YOU GOT (most important!)
-            msg += f"**YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver}> ({receiver_name})')}\n\n"
-            
-            msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            # Highlight wishlist viewing first!
-            msg += f"**SEE WHAT THEY WANT:**\n"
-            msg += f"• `/ss view_giftee_wishlist` - Check {receiver_name}'s wishlist\n\n"
-            
-            # Other helpful commands
-            msg += f"**OTHER COMMANDS:**\n"
-            msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions anonymously\n"
-            msg += f"• `/ss reply_santa` - Reply if they message you\n"
-            msg += f"• `/ss submit_gift` - Log your gift when ready\n\n"
-            
-            msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            msg += f"**BUILD YOUR WISHLIST TOO:**\n"
-            msg += f"• `/ss wishlist add [item]` - So your Santa knows what to get you!\n\n"
-            
-            # Support section
-            msg += f"**NEED HELP?**\n"
-            msg += f"• Contact a moderator if you have any issues\n"
-            msg += f"• They'll sort it out for you!\n\n"
-            
-            msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            # Footer
-            msg += f"*Optional: Use `/ss ask_giftee use_ai_rewrite:True` for extra anonymity*\n"
-            msg += f"*Don't reveal your identity during the event!*"
-            
+            msg = self._get_assignment_message(self.state['current_year'], receiver, receiver_name)
             dm_tasks.append(self._send_dm(giver, msg))
 
         await asyncio.gather(*dm_tasks)
@@ -784,17 +790,8 @@ class SecretSantaCog(commands.Cog):
         # Send thank you message to all participants
         participants = event.get("participants", {})
         if participants:
-            dm_tasks = [
-                self._send_dm(
-                    int(uid),
-                    f"**SECRET SANTA {year} - EVENT ENDED**\n\n"
-                    f"Thank you for being part of Secret Santa this year! Your kindness made someone's holiday brighter.\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"Hope you had as much fun as your giftee!\n\n"
-                    f"See you next year!"
-                )
-                for uid in participants
-            ]
+            end_msg = self._get_event_end_message(year)
+            dm_tasks = [self._send_dm(int(uid), end_msg) for uid in participants]
             await asyncio.gather(*dm_tasks, return_exceptions=True)
 
         # Archive event (with automatic backup protection)
@@ -2198,16 +2195,8 @@ class SecretSantaCog(commands.Cog):
             self._save()
 
         # Send confirmation (same message as /ss start)
-        await self._send_dm(
-            payload.user_id,
-            f"✅ You've joined Secret Santa {self.state['current_year']}! 🎄\n\n"
-            f"**What happens next:**\n"
-            f"• Build your wishlist: `/ss wishlist add [item]`\n"
-            f"• When the organizer starts assignments, I'll message you here\n"
-            f"• You'll see your giftee's wishlist once you're their Santa\n\n"
-            f"🔒 *Your wishlist is hidden from everyone except your Secret Santa!*\n"
-            f"💡 *Start adding items now so your Santa knows what to get you!*"
-        )
+        join_msg = self._get_join_message(self.state['current_year'])
+        await self._send_dm(payload.user_id, join_msg)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: disnake.RawReactionActionEvent):
@@ -2255,12 +2244,8 @@ class SecretSantaCog(commands.Cog):
                     event["participants"].pop(user_id, None)
                     self._save()
 
-                await self._send_dm(
-                    payload.user_id,
-                    f"👋 You've left Secret Santa {self.state['current_year']}\n\n"
-                    f"Your wishlist has been removed and you won't receive an assignment.\n\n"
-                    f"💡 *Changed your mind? React to the announcement message again to rejoin!*"
-                )
+                leave_msg = self._get_leave_message(self.state['current_year'])
+                await self._send_dm(payload.user_id, leave_msg)
 
         except Exception as e:
             self.logger.error(f"Error handling reaction remove: {e}")
