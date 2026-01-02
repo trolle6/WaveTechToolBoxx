@@ -29,35 +29,42 @@ load_dotenv("config.env", override=True)
 
 
 # ============ CONFIG ============
+# Configuration constants for clarity and maintainability
+REQUIRED_CONFIG_KEYS = {
+    "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID",
+    "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY"
+}
+
+CONFIG_DEFAULTS = {
+    "DEBUG_MODE": False,
+    "LOG_LEVEL": "INFO",
+    "MAX_TTS_CACHE": 50,
+    "TTS_TIMEOUT": 15,
+    "SKIP_API_VALIDATION": False,
+    "MAX_QUEUE_SIZE": 50,
+    "RATE_LIMIT_REQUESTS": 15,
+    "RATE_LIMIT_WINDOW": 60,
+    "VOICE_TIMEOUT": 10,
+    "AUTO_DISCONNECT_TIMEOUT": 300,
+    "TTS_ROLE_ID": None,
+    "BOT_OWNER_USERNAME": "trolle6",
+}
+
+
 class Config:
-    """Configuration loader with validation"""
+    """
+    Configuration loader with validation.
     
-    REQUIRED = {
-        "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID",
-        "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY"
-    }
-    
-    DEFAULTS = {
-        "DEBUG_MODE": False,
-        "LOG_LEVEL": "INFO",
-        "MAX_TTS_CACHE": 50,
-        "TTS_TIMEOUT": 15,
-        "SKIP_API_VALIDATION": False,
-        "MAX_QUEUE_SIZE": 50,
-        "RATE_LIMIT_REQUESTS": 15,
-        "RATE_LIMIT_WINDOW": 60,
-        "VOICE_TIMEOUT": 10,
-        "AUTO_DISCONNECT_TIMEOUT": 300,
-        "TTS_ROLE_ID": None,
-        "BOT_OWNER_USERNAME": "trolle6",
-    }
+    Loads environment variables, validates required keys, and provides
+    type-safe access to configuration values with sensible defaults.
+    """
     
     def __init__(self):
         self.data = {}
         missing = []
         
-        # Load required vars
-        for key in self.REQUIRED:
+        # Load required vars - must exist or bot cannot start
+        for key in REQUIRED_CONFIG_KEYS:
             val = os.getenv(key)
             if not val:
                 missing.append(key)
@@ -67,8 +74,8 @@ class Config:
         if missing:
             raise RuntimeError(f"Missing required config: {', '.join(missing)}")
         
-        # Load optional vars with defaults
-        for key, default in self.DEFAULTS.items():
+        # Load optional vars with defaults and type conversion
+        for key, default in CONFIG_DEFAULTS.items():
             val = os.getenv(key)
             if val is None:
                 self.data[key] = default
@@ -80,12 +87,28 @@ class Config:
                 self.data[key] = val
     
     def __getattr__(self, name: str):
-        return self.data.get(name.upper(), self.DEFAULTS.get(name.upper()))
+        """Access config values via attribute (e.g., config.DISCORD_TOKEN)"""
+        key = name.upper()
+        if key in self.data:
+            return self.data[key]
+        return CONFIG_DEFAULTS.get(key)
 
 
 # ============ HTTP MANAGER ============
+# HTTP connection pool configuration
+HTTP_CONNECTION_LIMIT = 10  # Maximum total connections
+HTTP_CONNECTION_LIMIT_PER_HOST = 5  # Maximum connections per host
+HTTP_DNS_CACHE_TTL = 300  # DNS cache time-to-live (seconds)
+HTTP_DEFAULT_TIMEOUT = 30  # Default request timeout (seconds)
+
+
 class HttpManager:
-    """Singleton HTTP session manager"""
+    """
+    Singleton HTTP session manager.
+    
+    Maintains a single aiohttp ClientSession with connection pooling
+    for efficient reuse across all API requests (OpenAI, etc.).
+    """
     _instance = None
     _session: Optional[aiohttp.ClientSession] = None
     
@@ -94,12 +117,23 @@ class HttpManager:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    async def get_session(self, timeout: int = 30) -> aiohttp.ClientSession:
-        """Get or create HTTP session"""
+    async def get_session(self, timeout: int = HTTP_DEFAULT_TIMEOUT) -> aiohttp.ClientSession:
+        """
+        Get or create HTTP session with connection pooling.
+        
+        Args:
+            timeout: Request timeout in seconds (default: HTTP_DEFAULT_TIMEOUT)
+        
+        Returns:
+            Configured aiohttp ClientSession
+        """
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(
-                limit=10, limit_per_host=5, ttl_dns_cache=300,
-                enable_cleanup_closed=True, force_close=True
+                limit=HTTP_CONNECTION_LIMIT,
+                limit_per_host=HTTP_CONNECTION_LIMIT_PER_HOST,
+                ttl_dns_cache=HTTP_DNS_CACHE_TTL,
+                enable_cleanup_closed=True,
+                force_close=True
             )
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=timeout),
@@ -109,11 +143,11 @@ class HttpManager:
         return self._session
     
     async def close(self):
-        """Close HTTP session"""
+        """Cleanly close HTTP session and connection pool"""
         if self._session and not self._session.closed:
             try:
                 await self._session.close()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  # Allow pending requests to finish
                 if hasattr(self._session, '_connector') and self._session._connector:
                     await self._session._connector.close()
             except Exception:
@@ -205,9 +239,12 @@ def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
-    # File handler
+    # File handler with rotation to prevent log files from growing too large
     fh = logging.handlers.RotatingFileHandler(
-        "bot.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8"
+        "bot.log",
+        maxBytes=LOG_FILE_MAX_BYTES,
+        backupCount=LOG_FILE_BACKUP_COUNT,
+        encoding="utf-8"
     )
     fh.setFormatter(fmt)
     logger.addHandler(fh)
@@ -225,24 +262,42 @@ def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
     return logger, discord_handler
 
 
+# OpenAI API validation configuration
+OPENAI_VALIDATION_URL = "https://api.openai.com/v1/models"
+OPENAI_VALIDATION_TIMEOUT = 10  # seconds
+OPENAI_API_KEY_PREFIX = "sk-"
+
+
 async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
-    """Validate OpenAI API key"""
+    """
+    Validate OpenAI API key format and connectivity.
+    
+    Checks key format (must start with 'sk-') and makes a test API call.
+    Allows bot to start even on network errors (may be transient).
+    
+    Args:
+        key: OpenAI API key to validate
+        logger: Logger instance for validation messages
+    
+    Returns:
+        True if key appears valid, False if format is wrong or key is invalid
+    """
     key = key.strip() if key else ""
     
     if not key:
         logger.error("OPENAI_API_KEY is empty")
         return False
     
-    if not key.startswith("sk-"):
-        logger.error("Invalid API key format (should start with 'sk-')")
+    if not key.startswith(OPENAI_API_KEY_PREFIX):
+        logger.error(f"Invalid API key format (should start with '{OPENAI_API_KEY_PREFIX}')")
         return False
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                "https://api.openai.com/v1/models",
+                OPENAI_VALIDATION_URL,
                 headers={"Authorization": f"Bearer {key}"},
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=OPENAI_VALIDATION_TIMEOUT)
             ) as r:
                 if r.status == 200:
                     logger.info("OpenAI API key is valid")
@@ -251,10 +306,10 @@ async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
                     logger.error("API key is invalid or expired")
                     return False
                 else:
-                    logger.warning(f"Unexpected API response: {r.status}")
-                    return True  # Allow start on unexpected responses
+                    logger.warning(f"Unexpected API response: {r.status} - allowing bot to start")
+                    return True  # Allow start on unexpected responses (may be transient)
     except asyncio.TimeoutError:
-        logger.warning("API validation timeout - allowing bot to start")
+        logger.warning("API validation timeout - allowing bot to start (may be network issue)")
         return True
     except Exception as e:
         logger.warning(f"API validation error: {e} - allowing bot to start")
@@ -262,6 +317,13 @@ async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
 
 
 # ============ BOT SETUP ============
+# Bot initialization constants
+PYTHON_MIN_VERSION = (3, 9)  # Minimum required Python version
+LOG_FILE_MAX_BYTES = 5_000_000  # 5MB - max log file size before rotation
+LOG_FILE_BACKUP_COUNT = 5  # Number of rotated log files to keep
+DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
+SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
+
 try:
     config = Config()
 except RuntimeError as e:
@@ -270,7 +332,7 @@ except RuntimeError as e:
 
 logger, discord_handler = setup_logging(config)
 
-# Initialize bot
+# Initialize bot with all intents (needed for voice, members, etc.)
 intents = disnake.Intents.all()
 bot = commands.InteractionBot(intents=intents)
 bot.config = config
@@ -279,7 +341,7 @@ bot.http_mgr = HttpManager()
 bot.discord_handler = discord_handler
 bot.ready_once = False
 
-# Connection tracking
+# Connection tracking for monitoring stability
 bot._connection_stats = {
     "disconnects": [],
     "last_disconnect": None,
@@ -345,27 +407,32 @@ async def on_ready():
 
 @bot.event
 async def on_disconnect():
-    """Track disconnections"""
+    """
+    Track disconnections and log frequency.
+    
+    Monitors connection stability by tracking disconnect timestamps
+    and warning if disconnects become too frequent (indicates network issues).
+    """
     now = time.time()
     stats = bot._connection_stats
     
     stats["last_disconnect"] = now
     stats["disconnects"].append(now)
     
-    # Keep only last 24 hours
-    cutoff = now - 86400
+    # Keep only last 24 hours for accurate tracking
+    cutoff = now - SECONDS_PER_DAY
     stats["disconnects"] = [d for d in stats["disconnects"] if d > cutoff]
     stats["disconnect_count_24h"] = len(stats["disconnects"])
     
-    # Log disconnect
+    # Log disconnect with context
     if len(stats["disconnects"]) > 1:
         time_since = now - stats["disconnects"][-2]
         logger.info(f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h, {time_since:.1f}s since last)")
     else:
         logger.info(f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h)")
     
-    # Warn if too frequent
-    if stats["disconnect_count_24h"] >= 10:
+    # Warn if disconnects are too frequent (indicates stability issues)
+    if stats["disconnect_count_24h"] >= DISCONNECT_WARNING_THRESHOLD:
         logger.warning(f"🚨 HIGH DISCONNECTION RATE: {stats['disconnect_count_24h']} disconnects in 24h")
         try:
             await send_to_discord_log(
@@ -494,17 +561,22 @@ def load_cogs() -> int:
 if __name__ == "__main__":
     logger.info("Starting bot...")
     
-    # Python version check
-    if sys.version_info < (3, 9):
-        logger.critical(f"Python 3.9+ required. Current: {sys.version_info.major}.{sys.version_info.minor}")
+    # Python version check - disnake requires 3.9+
+    if sys.version_info < PYTHON_MIN_VERSION:
+        logger.critical(
+            f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ required. "
+            f"Current: {sys.version_info.major}.{sys.version_info.minor}"
+        )
         sys.exit(1)
     
-    # Ensure directories exist
-    for dir_path in ['cogs/archive', 'cogs/archive/backups']:
+    # Ensure required directories exist for cogs (Secret Santa archives, etc.)
+    REQUIRED_DIRS = ['cogs/archive', 'cogs/archive/backups']
+    for dir_path in REQUIRED_DIRS:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
     
-    # Check file permissions
-    for file_path in ['main.py', 'cogs/SecretSanta_cog.py']:
+    # Check critical file permissions before starting
+    CRITICAL_FILES = ['main.py', 'cogs/SecretSanta_cog.py']
+    for file_path in CRITICAL_FILES:
         if not os.access(file_path, os.R_OK):
             logger.critical(f"Cannot read {file_path} - check permissions")
             sys.exit(1)
@@ -531,22 +603,30 @@ if __name__ == "__main__":
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, handle_signal)
     
-    # Run bot with infinite retry
+    # Retry configuration for infinite retry with exponential backoff
+    MAX_RETRY_WAIT = 60  # Maximum wait time between retries (seconds)
+    RETRY_BACKOFF_MULTIPLIER = 5  # Seconds per retry attempt (up to max)
+    RETRY_BACKOFF_CAP = 12  # Maximum retry count before capping wait time
+    RETRY_RESET_THRESHOLD = 100  # Reset backoff after this many retries (prevents overflow)
+    
     retry_count = 0
     shutdown_flag = [False]
     
     def shutdown_wrapper(signum, frame):
+        """Wrapper to set shutdown flag when signal received"""
         shutdown_flag[0] = True
         handle_signal(signum, frame)
     
+    # Register signal handlers for graceful shutdown (SIGINT = Ctrl+C, SIGTERM = termination)
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, shutdown_wrapper)
     
+    # Main bot loop with infinite retry on crashes (ensures 24/7/365 uptime)
     try:
         while not shutdown_flag[0]:
             try:
                 bot.run(config.DISCORD_TOKEN, reconnect=True)
-                break
+                break  # Normal shutdown (signal received)
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt - shutting down")
                 shutdown_flag[0] = True
@@ -555,12 +635,14 @@ if __name__ == "__main__":
                 retry_count += 1
                 logger.critical(f"Bot crashed (attempt #{retry_count}): {e}", exc_info=True)
                 
-                wait_time = min(60, 5 * min(retry_count, 12))
+                # Exponential backoff: 5s, 10s, 15s... up to 60s max
+                wait_time = min(MAX_RETRY_WAIT, RETRY_BACKOFF_MULTIPLIER * min(retry_count, RETRY_BACKOFF_CAP))
                 logger.warning(f"Retrying in {wait_time}s... (will retry forever)")
                 time.sleep(wait_time)
                 
-                if retry_count > 100:
-                    retry_count = 0  # Reset backoff
+                # Reset counter periodically to prevent integer overflow on long-running systems
+                if retry_count > RETRY_RESET_THRESHOLD:
+                    retry_count = 0
     finally:
         if shutdown_flag[0]:
             logger.info("Performing graceful shutdown...")

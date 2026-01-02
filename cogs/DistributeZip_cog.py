@@ -40,8 +40,9 @@ METADATA_FILE = ROOT / "distributed_files_metadata.json"
 # Ensure files directory exists
 FILES_DIR.mkdir(exist_ok=True)
 
-# Maximum file size (25MB - Discord's limit for attachments)
-MAX_FILE_SIZE = 25 * 1024 * 1024
+# File size limits and configuration
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB - Discord's limit for attachments
+MEGABYTE = 1024 * 1024  # Bytes in one megabyte (for size formatting)
 
 
 def load_metadata() -> Dict:
@@ -96,8 +97,8 @@ class DistributeZipCog(commands.Cog):
             return "❌ Error: File must be a .zip file"
         
         if attachment.size > MAX_FILE_SIZE:
-            size_mb = attachment.size / 1024 / 1024
-            return f"❌ Error: File size ({size_mb:.2f}MB) exceeds maximum allowed size (25MB)"
+            size_mb = attachment.size / MEGABYTE
+            return f"❌ Error: File size ({size_mb:.2f}MB) exceeds maximum allowed size ({MAX_FILE_SIZE / MEGABYTE:.0f}MB)"
         
         # Validate filename
         issues = []

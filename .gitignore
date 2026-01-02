@@ -27,5 +27,15 @@ Thumbs.db
 *.tmp
 *.temp
 
+# Test files (removed from repo)
+tests/
+test_*.py
+*_test.py
+
 # Local notes and reminders (not for version control)
 things todo and remember in the future.txt
+
+# Deployment scripts (keep deploy.sh, remove others if not needed)
+deploy_cross_platform.py
+deploy_windows.ps1
+deploy_linux.sh

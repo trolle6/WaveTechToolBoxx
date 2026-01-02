@@ -37,20 +37,39 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def save_json(path: Path, data: Any, logger=None):
-    """Save JSON atomically with error handling"""
+    """
+    Save JSON atomically with error handling.
+    
+    Uses write-temp-replace pattern to ensure atomic writes:
+    writes to temporary file first, then replaces original.
+    This prevents corruption if process crashes during write.
+    
+    Args:
+        path: File path to save to
+        data: Data to serialize (must be JSON-serializable)
+        logger: Optional logger for error reporting
+    
+    Raises:
+        Exception: If write fails (caller should handle)
+    """
     temp = path.with_suffix('.tmp')
     try:
         temp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False),
             encoding='utf-8'
         )
+        # Atomic replace - on Unix/Linux this is guaranteed atomic
+        # On Windows, this is the best we can do without fsync
         temp.replace(path)
     except Exception as e:
+        # Clean up temp file on error
         if temp.exists():
             try:
                 temp.unlink()
             except Exception:
                 pass
+        if logger:
+            logger.error(f"Failed to save JSON to {path}: {e}")
         raise
 
 
