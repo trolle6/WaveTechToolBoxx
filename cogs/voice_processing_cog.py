@@ -322,9 +322,14 @@ class VoiceProcessingCog(commands.Cog):
         
         OpenAI TTS API supports up to 4096 characters per request.
         """
+        original_length = len(text)
         text = re.sub(r'\s+', ' ', text.strip())
+        after_whitespace = len(text)
         text = self._discord_cleanup_pattern.sub('', text)
+        after_discord_cleanup = len(text)
         text = self._apply_corrections(text)
+        after_corrections = len(text)
+        self.logger.debug(f"Text cleaning: {original_length} → {after_whitespace} (whitespace) → {after_discord_cleanup} (discord) → {after_corrections} (corrections)")
 
         if self._detect_needs_pronunciation_help(text):
             text = await self._improve_pronunciation(text)
