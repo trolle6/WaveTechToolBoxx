@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
+import aiohttp
 import disnake
 from disnake.ext import commands
 
