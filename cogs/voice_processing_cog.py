@@ -313,10 +313,14 @@ class VoiceProcessingCog(commands.Cog):
             text = pattern.sub(replacement, text)
         return re.sub(r'\s+', ' ', text)
 
-    async def _clean_text(self, text: str, max_length: int = 4096) -> str:
+    async def _clean_text(self, text: str, max_length: Optional[int] = None) -> str:
         """Clean and process text for TTS
         
-        OpenAI TTS API supports up to 4096 characters.
+        Args:
+            text: Text to clean
+            max_length: Optional max length (None = no truncation, used for splitting)
+        
+        OpenAI TTS API supports up to 4096 characters per request.
         """
         text = re.sub(r'\s+', ' ', text.strip())
         text = self._discord_cleanup_pattern.sub('', text)
@@ -325,7 +329,7 @@ class VoiceProcessingCog(commands.Cog):
         if self._detect_needs_pronunciation_help(text):
             text = await self._improve_pronunciation(text)
 
-        # Truncate if exceeds OpenAI's limit (4096 chars)
+        # Truncate if max_length specified and exceeds limit
         if max_length and len(text) > max_length:
             # Try to truncate at sentence boundary for natural breaks
             truncated = text[:max_length]
@@ -341,7 +345,8 @@ class VoiceProcessingCog(commands.Cog):
                 # No good sentence break found, truncate cleanly
                 text = truncated.rstrip() + "..."
 
-        if text and text[-1] not in '.!?,;:':
+        # Only add period if we're not splitting (max_length=None means we'll split)
+        if max_length is not None and text and text[-1] not in '.!?,;:':
             text += '.'
 
         return text.strip()
@@ -362,6 +367,48 @@ class VoiceProcessingCog(commands.Cog):
             return truncated[:last_break + 1]
         else:
             return truncated.rstrip() + "..."
+    
+    def _split_text_into_chunks(self, text: str, max_chunk_size: int = 4000) -> list[str]:
+        """Split long text into chunks at sentence boundaries
+        
+        Args:
+            text: Text to split
+            max_chunk_size: Maximum size per chunk (default 4000 to leave buffer for API)
+        
+        Returns:
+            List of text chunks, each <= max_chunk_size
+        """
+        if len(text) <= max_chunk_size:
+            return [text]
+        
+        chunks = []
+        remaining = text
+        min_chunk_size = max_chunk_size * 0.5  # Don't create tiny chunks
+        
+        while len(remaining) > max_chunk_size:
+            # Try to find a good sentence break
+            chunk = remaining[:max_chunk_size]
+            last_period = chunk.rfind('.')
+            last_exclamation = chunk.rfind('!')
+            last_question = chunk.rfind('?')
+            last_newline = chunk.rfind('\n')
+            last_break = max(last_period, last_exclamation, last_question, last_newline)
+            
+            # Use sentence break if found and keeps reasonable chunk size
+            if last_break >= min_chunk_size:
+                split_point = last_break + 1
+                chunks.append(remaining[:split_point].strip())
+                remaining = remaining[split_point:].strip()
+            else:
+                # No good break found, split at max_chunk_size
+                chunks.append(chunk.rstrip())
+                remaining = remaining[max_chunk_size:].strip()
+        
+        # Add remaining text
+        if remaining:
+            chunks.append(remaining)
+        
+        return chunks
 
     # ============ TTS GENERATION ============
     def _cache_key(self, text: str, voice: str) -> str:
@@ -731,42 +778,56 @@ class VoiceProcessingCog(commands.Cog):
             prefix_len = len(prefix)
             # Reserve space for prefix (max 4096 total)
             max_text_length = max(100, 4096 - prefix_len)  # Ensure at least 100 chars for text
-            text = await self._clean_text(message.content, max_length=max_text_length)
+            text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
             if not text or len(text) < 2:
                 return
-            # Add prefix and ensure total doesn't exceed 4096
+            # Add prefix
             text = prefix + text
-            text = self._ensure_text_length(text, max_length=4096)
         else:
-            text = await self._clean_text(message.content)
+            text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
             if not text or len(text) < 2:
                 return
 
         # Get voice
         user_voice = await self._get_voice_for_user(message.author)
 
-        # Queue item
+        # Split into chunks if needed (4000 chars per chunk to leave buffer)
+        text_chunks = self._split_text_into_chunks(text, max_chunk_size=4000)
+        
+        # Ensure each chunk doesn't exceed 4096 (safety check)
+        for i, chunk in enumerate(text_chunks):
+            if len(chunk) > 4096:
+                text_chunks[i] = self._ensure_text_length(chunk, max_length=4096)
+
+        # Queue all chunks sequentially
         state = await self._get_or_create_state(guild_id)
-        item = TTSQueueItem(
-            user_id=message.author.id,
-            channel_id=message.author.voice.channel.id,
-            text=text,
-            voice=user_voice,
-            timestamp=time.time()
-        )
+        chunks_queued = 0
+        for chunk in text_chunks:
+            if not chunk or len(chunk) < 2:
+                continue
+            item = TTSQueueItem(
+                user_id=message.author.id,
+                channel_id=message.author.voice.channel.id,
+                text=chunk,
+                voice=user_voice,
+                timestamp=time.time()
+            )
+            try:
+                state.queue.put_nowait(item)
+                chunks_queued += 1
+            except asyncio.QueueFull:
+                state.stats["dropped"] += 1
+                self.logger.warning(f"Queue full, dropping TTS chunk for user {message.author.id}")
+                break
 
-        try:
-            state.queue.put_nowait(item)
-
+        # Start processor if not already running and we queued at least one chunk
+        if chunks_queued > 0:
             async with self._state_lock:
                 if not state.is_processing:
                     state.is_processing = True
                     state.processor_task = asyncio.create_task(
                         self._process_queue(guild_id)
                     )
-
-        except asyncio.QueueFull:
-            await message.channel.send("❌ TTS queue is full. Please try again in a few minutes.", delete_after=10)
 
     # ============ VOICE STATE UPDATES ============
     @commands.Cog.listener()
