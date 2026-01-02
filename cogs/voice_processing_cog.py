@@ -327,22 +327,41 @@ class VoiceProcessingCog(commands.Cog):
 
         # Truncate if exceeds OpenAI's limit (4096 chars)
         if max_length and len(text) > max_length:
-            # Try to truncate at sentence boundary
+            # Try to truncate at sentence boundary for natural breaks
             truncated = text[:max_length]
             last_period = truncated.rfind('.')
             last_exclamation = truncated.rfind('!')
             last_question = truncated.rfind('?')
             last_break = max(last_period, last_exclamation, last_question)
             
-            if last_break > max_length * 0.8:  # Only use if we're keeping most of the text
+            # Only use sentence break if found and keeps at least 80% of text
+            if last_break >= 0 and last_break > max_length * 0.8:
                 text = truncated[:last_break + 1]
             else:
+                # No good sentence break found, truncate cleanly
                 text = truncated.rstrip() + "..."
 
         if text and text[-1] not in '.!?,;:':
             text += '.'
 
         return text.strip()
+    
+    def _ensure_text_length(self, text: str, max_length: int = 4096) -> str:
+        """Ensure text doesn't exceed max_length, truncating if needed"""
+        if len(text) <= max_length:
+            return text
+        
+        # Try to truncate at sentence boundary
+        truncated = text[:max_length]
+        last_period = truncated.rfind('.')
+        last_exclamation = truncated.rfind('!')
+        last_question = truncated.rfind('?')
+        last_break = max(last_period, last_exclamation, last_question)
+        
+        if last_break >= 0 and last_break > max_length * 0.8:
+            return truncated[:last_break + 1]
+        else:
+            return truncated.rstrip() + "..."
 
     # ============ TTS GENERATION ============
     def _cache_key(self, text: str, voice: str) -> str:
@@ -688,11 +707,6 @@ class VoiceProcessingCog(commands.Cog):
         if not await self.rate_limiter.check(str(message.author.id)):
             return
 
-        # Clean text
-        text = await self._clean_text(message.content)
-        if not text or len(text) < 2:
-            return
-
         # Name announcement (first message per session)
         guild_id = message.guild.id
         user_id = message.author.id
@@ -705,13 +719,28 @@ class VoiceProcessingCog(commands.Cog):
             if is_first_message:
                 self._announced_users[guild_id].add(user_id)
 
+        # Clean text - reserve space for name prefix if first message
         if is_first_message:
             display_name = message.author.display_name
             if self._detect_needs_pronunciation_help(display_name):
                 pronounceable_name = await self._improve_pronunciation(display_name)
             else:
                 pronounceable_name = display_name
-            text = f"{pronounceable_name} says: {text}"
+            # Calculate actual prefix length
+            prefix = f"{pronounceable_name} says: "
+            prefix_len = len(prefix)
+            # Reserve space for prefix (max 4096 total)
+            max_text_length = max(100, 4096 - prefix_len)  # Ensure at least 100 chars for text
+            text = await self._clean_text(message.content, max_length=max_text_length)
+            if not text or len(text) < 2:
+                return
+            # Add prefix and ensure total doesn't exceed 4096
+            text = prefix + text
+            text = self._ensure_text_length(text, max_length=4096)
+        else:
+            text = await self._clean_text(message.content)
+            if not text or len(text) < 2:
+                return
 
         # Get voice
         user_voice = await self._get_voice_for_user(message.author)
