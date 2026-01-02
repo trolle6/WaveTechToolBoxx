@@ -149,17 +149,23 @@ class VoiceProcessingCog(commands.Cog):
         self._unloaded = False
 
         # Convert to int to match message.channel.id type
-        channel_id = bot.config.DISCORD_CHANNEL_ID
-        if channel_id:
+        # Config loads DISCORD_CHANNEL_ID as string from env, convert to int
+        channel_id_raw = bot.config.DISCORD_CHANNEL_ID
+        if channel_id_raw:
             try:
-                # Strip whitespace and convert to int
-                self.allowed_channel = int(str(channel_id).strip())
-                self.logger.info(f"Allowed channel set to: {self.allowed_channel} (type: {type(self.allowed_channel).__name__})")
+                # Ensure it's a string, strip whitespace, then convert to int
+                channel_id_str = str(channel_id_raw).strip()
+                self.allowed_channel = int(channel_id_str)
+                self.logger.info(
+                    f"Allowed channel configured: {self.allowed_channel} "
+                    f"(from config: {repr(channel_id_raw)}, type: {type(self.allowed_channel).__name__})"
+                )
             except (ValueError, TypeError) as e:
-                self.logger.error(f"Failed to convert DISCORD_CHANNEL_ID to int: {channel_id} - {e}")
+                self.logger.error(f"Failed to convert DISCORD_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
                 self.allowed_channel = None
         else:
             self.allowed_channel = None
+            self.logger.warning("DISCORD_CHANNEL_ID not set - TTS will work in all channels")
 
     # ============ PRONOUN DETECTION ============
     async def _detect_pronouns(self, member: disnake.Member) -> Optional[str]:
@@ -636,21 +642,13 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel - ensure both are int for proper comparison
         if self.allowed_channel is not None:
-            # Convert both to int explicitly
-            try:
-                msg_channel_id = int(message.channel.id)
-                allowed_channel_id = int(self.allowed_channel)
-            except (ValueError, TypeError) as e:
-                self.logger.error(f"Failed to convert channel IDs to int: {e}")
-                return False
+            # Get message channel ID (should already be int, but ensure it)
+            msg_channel_id = int(message.channel.id)
             
-            # Compare - if they don't match, skip
-            if msg_channel_id != allowed_channel_id:
-                self.logger.warning(
-                    f"CHANNEL MISMATCH: msg={msg_channel_id} (type: {type(msg_channel_id).__name__}, "
-                    f"repr: {repr(msg_channel_id)}) != allowed={allowed_channel_id} "
-                    f"(type: {type(allowed_channel_id).__name__}, repr: {repr(allowed_channel_id)}), "
-                    f"comparison: {msg_channel_id != allowed_channel_id}"
+            # Compare directly - both should be int at this point
+            if msg_channel_id != self.allowed_channel:
+                self.logger.debug(
+                    f"Channel check failed: message channel {msg_channel_id} != allowed {self.allowed_channel}"
                 )
                 return False
             # Channel matches - continue processing
