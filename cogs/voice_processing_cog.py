@@ -637,12 +637,17 @@ class VoiceProcessingCog(commands.Cog):
         # Check channel - ensure both are int for proper comparison
         if self.allowed_channel is not None:
             msg_channel_id = int(message.channel.id)  # Ensure it's an int
+            # Explicit comparison with detailed logging
             if msg_channel_id != self.allowed_channel:
-                self.logger.debug(
-                    f"Message from channel {msg_channel_id} (type: {type(msg_channel_id).__name__}) "
-                    f"doesn't match allowed channel {self.allowed_channel} (type: {type(self.allowed_channel).__name__}), skipping"
+                self.logger.warning(
+                    f"CHANNEL MISMATCH: msg_channel_id={msg_channel_id} (type: {type(msg_channel_id).__name__}, "
+                    f"repr: {repr(msg_channel_id)}) != allowed_channel={self.allowed_channel} "
+                    f"(type: {type(self.allowed_channel).__name__}, repr: {repr(self.allowed_channel)}), "
+                    f"comparison result: {msg_channel_id != self.allowed_channel}"
                 )
                 return False
+            else:
+                self.logger.debug(f"Channel match confirmed: {msg_channel_id} == {self.allowed_channel}")
 
         # Check voice
         if not message.author.voice or not message.author.voice.channel:
