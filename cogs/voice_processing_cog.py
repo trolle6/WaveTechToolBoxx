@@ -626,6 +626,10 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel
         if self.allowed_channel and message.channel.id != self.allowed_channel:
+            self.logger.debug(
+                f"Message from channel {message.channel.id} (type: {type(message.channel.id).__name__}) "
+                f"doesn't match allowed channel {self.allowed_channel} (type: {type(self.allowed_channel).__name__}), skipping"
+            )
             return False
 
         # Check voice
