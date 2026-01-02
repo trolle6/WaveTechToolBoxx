@@ -3,30 +3,19 @@ File Browser for DistributeZip - Interactive file selection UI
 
 Provides an interactive file browser using Discord select menus
 to make file selection easier than typing file names.
-Works like File Explorer (Windows) or Finder (Mac/Linux).
 """
 
 import disnake
 from pathlib import Path
-from typing import List, Optional, Callable, Awaitable
+from typing import List, Optional, Callable, Awaitable, Tuple
 
 
 def create_file_browser_view(
     files_dir: Path,
     metadata: dict,
     action_type: str = "get"
-) -> tuple[disnake.Embed, 'FileBrowserSelectView']:
-    """
-    Create a file browser view for file selection.
-    
-    Args:
-        files_dir: Directory containing files
-        metadata: File metadata dictionary
-        action_type: Type of action ("get", "remove", "browse")
-    
-    Returns:
-        Tuple of (embed, view) to display
-    """
+) -> Tuple[disnake.Embed, Optional['FileBrowserSelectView']]:
+    """Create a file browser view for file selection"""
     files = metadata.get("files", {})
     
     if not files:
@@ -79,11 +68,15 @@ class FileSelectMenu(disnake.ui.Select):
             min_values=1,
             max_values=1
         )
-        self.view: 'FileBrowserSelectView' = None  # Will be set by parent view
+        self.view: Optional['FileBrowserSelectView'] = None
     
     async def callback(self, inter: disnake.MessageInteraction):
         """Handle file selection"""
         view = self.view
+        if not view:
+            await inter.response.send_message("❌ View not found", ephemeral=True)
+            return
+        
         file_id = self.values[0]
         file_data = view.metadata["files"].get(file_id)
         
@@ -109,10 +102,7 @@ class FileSelectMenu(disnake.ui.Select):
 
 
 class FileBrowserSelectView(disnake.ui.View):
-    """
-    Interactive file browser using Discord select menus.
-    Works like File Explorer/Finder - select from dropdown menu.
-    """
+    """Interactive file browser using Discord select menus"""
     
     def __init__(self, files_dir: Path, metadata: dict, sorted_files: List, action_type: str, timeout: float = 300):
         super().__init__(timeout=timeout)
@@ -120,7 +110,7 @@ class FileBrowserSelectView(disnake.ui.View):
         self.metadata = metadata
         self.sorted_files = sorted_files
         self.action_type = action_type
-        self.selection_handler = None  # Set by parent command
+        self.selection_handler: Optional[Callable[[disnake.MessageInteraction, str, dict, Path], Awaitable[None]]] = None
         
         # Limit to 25 options (Discord's max per select menu)
         display_files = sorted_files[:25]
@@ -150,7 +140,7 @@ class FileBrowserSelectView(disnake.ui.View):
         if options:
             placeholder = f"📦 Select a file to {action_type}..."
             select_menu = FileSelectMenu(options, placeholder)
-            select_menu.view = self  # Set reference back to view
+            select_menu.view = self
             self.add_item(select_menu)
     
     async def on_timeout(self):
