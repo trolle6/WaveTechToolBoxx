@@ -9,21 +9,11 @@ FEATURES:
 - 💾 Persistent storage of file metadata
 - 💻 Cross-platform compatible (Windows, Linux, macOS)
 
-CROSS-PLATFORM COMPATIBILITY:
-- ZIP format is standardized and works on all operating systems
-- Validates filenames to prevent issues with invalid characters
-- Files can be extracted on Windows, Linux, and macOS without issues
-- Minecraft texture packs work identically across all platforms
-
 COMMANDS:
 - /distributezip upload [attachment] [required_by] - Upload a zip file and distribute it
 - /distributezip list - List all uploaded files
 - /distributezip get [file_name] - Get a specific file
 - /distributezip remove [file_name] - Remove a file (moderator only)
-
-DATA STORAGE:
-- distributed_files/ - Directory containing uploaded files
-- distributed_files_metadata.json - Metadata about uploaded files
 """
 
 from __future__ import annotations
@@ -33,7 +23,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Tuple
 
 import disnake
 from disnake.ext import commands
@@ -43,7 +33,7 @@ from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 
 # Paths
-ROOT = Path(__file__).parent  # This is the 'cogs' directory
+ROOT = Path(__file__).parent
 FILES_DIR = ROOT / "distributed_files"
 METADATA_FILE = ROOT / "distributed_files_metadata.json"
 
@@ -55,10 +45,9 @@ MAX_FILE_SIZE = 25 * 1024 * 1024
 
 
 def load_metadata() -> Dict:
-    """Load file metadata (cross-platform compatible)"""
+    """Load file metadata"""
     if METADATA_FILE.exists():
         try:
-            # Explicit UTF-8 encoding for cross-platform compatibility
             return json.loads(METADATA_FILE.read_text(encoding='utf-8'))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return {}
@@ -66,9 +55,8 @@ def load_metadata() -> Dict:
 
 
 def save_metadata(data: Dict):
-    """Save file metadata (cross-platform compatible)"""
+    """Save file metadata"""
     try:
-        # Explicit UTF-8 encoding for cross-platform compatibility
         METADATA_FILE.write_text(
             json.dumps(data, indent=2, ensure_ascii=False),
             encoding='utf-8'
@@ -84,16 +72,17 @@ class DistributeZipCog(commands.Cog):
         self.bot = bot
         self.logger = bot.logger.getChild("distributezip")
         self.metadata = load_metadata()
-        self._sending_lock = asyncio.Lock()  # Prevent concurrent sends
+        self._sending_lock = asyncio.Lock()
         
         # Ensure metadata structure
         self.metadata.setdefault("files", {})
         self.metadata.setdefault("history", [])
         
         self.logger.info("DistributeZip cog initialized")
-    
-    def _find_file_by_name(self, file_name: str) -> Optional[tuple]:
-        """Find file by name (case-insensitive). Returns (file_id, file_data) or None"""
+
+    # ============ FILE UTILITIES ============
+    def _find_file_by_name(self, file_name: str) -> Optional[Tuple[str, dict]]:
+        """Find file by name (case-insensitive)"""
         files = self.metadata.get("files", {})
         file_name_lower = file_name.lower()
         for fid, data in files.items():
@@ -107,7 +96,8 @@ class DistributeZipCog(commands.Cog):
             return "❌ Error: File must be a .zip file"
         
         if attachment.size > MAX_FILE_SIZE:
-            return f"❌ Error: File size ({attachment.size / 1024 / 1024:.2f}MB) exceeds maximum allowed size (25MB)"
+            size_mb = attachment.size / 1024 / 1024
+            return f"❌ Error: File size ({size_mb:.2f}MB) exceeds maximum allowed size (25MB)"
         
         # Validate filename
         issues = []
@@ -120,16 +110,14 @@ class DistributeZipCog(commands.Cog):
             issues.append(f"Contains invalid characters: {', '.join(found)}")
         
         if issues:
-            return f"⚠️ Warning: Filename may cause issues on some systems:\n" + "\n".join(f"• {issue}" for issue in issues) + "\n\nConsider renaming the file before uploading."
+            warnings = "\n".join(f"• {issue}" for issue in issues)
+            return f"⚠️ Warning: Filename may cause issues on some systems:\n{warnings}\n\nConsider renaming the file before uploading."
         
         return None
     
     def _create_file_embed(self, file_data: dict, color: disnake.Color = disnake.Color.green()) -> disnake.Embed:
-        """Create a standard file embed (anonymous)"""
-        embed = disnake.Embed(
-            title=f"📦 {file_data.get('name')}",
-            color=color
-        )
+        """Create a standard file embed"""
+        embed = disnake.Embed(title=f"📦 {file_data.get('name')}", color=color)
         embed.add_field(name="Required By", value="🎅 A Secret Santa", inline=False)
         embed.add_field(
             name="Uploaded",
@@ -137,9 +125,10 @@ class DistributeZipCog(commands.Cog):
             inline=False
         )
         return embed
-    
+
+    # ============ FILE BROWSER ============
     async def _handle_file_browser(self, inter: disnake.ApplicationCommandInteraction, action_type: str, handler_func):
-        """Common file browser setup - reduces duplication"""
+        """Common file browser setup"""
         files = self.metadata.get("files", {})
         if not files:
             await inter.edit_original_response(content="📦 No files have been uploaded yet")
@@ -153,48 +142,146 @@ class DistributeZipCog(commands.Cog):
         browser_view.selection_handler = handler_func
         await inter.edit_original_response(embed=embed, view=browser_view)
 
-    async def cog_load(self):
-        """Initialize cog"""
-        self.logger.info("DistributeZip cog loaded")
-        if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log("📦 DistributeZip cog loaded successfully", "SUCCESS")
+    # ============ DISTRIBUTION ============
+    async def _get_distribution_targets(self, guild: disnake.Guild) -> Tuple[list, str]:
+        """Get members to distribute to and distribution type"""
+        # Check if Secret Santa event is active
+        secret_santa_cog = self.bot.get_cog("SecretSantaCog")
+        participant_ids = []
+        
+        if secret_santa_cog:
+            try:
+                state = secret_santa_cog.state
+                event = state.get("current_event")
+                if event and event.get("active"):
+                    participants = event.get("participants", {})
+                    if participants:
+                        participant_ids = [int(uid) for uid in participants.keys() if uid.isdigit()]
+                        self.logger.info(f"Using Secret Santa participants: {len(participant_ids)} participants")
+            except Exception as e:
+                self.logger.debug(f"Could not check Secret Santa state: {e}")
+        
+        # Get members to send to
+        if participant_ids:
+            members = []
+            for user_id in participant_ids:
+                try:
+                    member = guild.get_member(user_id)
+                    if member and not member.bot:
+                        members.append(member)
+                except Exception:
+                    pass
+            return members, "Secret Santa participants"
+        else:
+            members = [member for member in guild.members if not member.bot]
+            return members, "all server members"
 
-    def cog_unload(self):
-        """Cleanup cog"""
-        self.logger.info("Unloading DistributeZip cog...")
-        # Save metadata on unload
-        save_metadata(self.metadata)
+    async def _distribute_file(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        file_id: str,
+        file_name: str,
+        file_path: Path,
+        required_by: disnake.Member
+    ):
+        """Distribute file to Secret Santa participants (if active) or all server members"""
+        guild = inter.guild
+        if not guild:
+            await inter.followup.send("❌ Error: Command must be used in a server")
+            return
+        
+        members, distribution_type = await self._get_distribution_targets(guild)
+        
+        if not members:
+            await inter.followup.send("⚠️ No members found to send the file to")
+            return
+        
+        # Create embed
+        embed = disnake.Embed(
+            title="📦 File Distribution",
+            description=f"**{file_name}**",
+            color=disnake.Color.green()
+        )
+        
+        required_by_text = "🎅 A Secret Santa requires this file" if distribution_type == "Secret Santa participants" else "📋 A server member requires this file"
+        embed.add_field(name="Required By", value=required_by_text, inline=False)
+        embed.add_field(name="Uploaded At", value=f"<t:{int(time.time())}:F>", inline=False)
+        embed.add_field(
+            name="💻 Cross-Platform Compatible",
+            value="✅ This ZIP file works on **Windows, Linux, and macOS**\n"
+                  "The ZIP format is standardized and supported on all platforms.",
+            inline=False
+        )
+        embed.set_footer(text=f"This file is required for {distribution_type}")
+        
+        # Send to all members
+        successful = 0
+        failed = 0
+        
+        async with self._sending_lock:
+            for i, member in enumerate(members, 1):
+                try:
+                    # Skip uploader
+                    if member.id == inter.author.id:
+                        successful += 1
+                        continue
+                    
+                    # Create file object for each member
+                    file = disnake.File(file_path, filename=file_path.name)
+                    
+                    try:
+                        await member.send(embed=embed, file=file)
+                        successful += 1
+                    except disnake.Forbidden:
+                        failed += 1
+                    except Exception as e:
+                        failed += 1
+                        self.logger.warning(f"Error sending to {member.display_name}: {e}")
+                    
+                    # Rate limiting
+                    if i % 10 == 0:
+                        await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    failed += 1
+                    self.logger.error(f"Unexpected error sending to {member.display_name}: {e}")
+        
+        # Update download count
+        if file_id in self.metadata["files"]:
+            self.metadata["files"][file_id]["download_count"] = successful
+            save_metadata(self.metadata)
+        
+        # Send summary
+        summary_embed = disnake.Embed(
+            title="📊 Distribution Complete",
+            description=f"File '{file_name}' has been distributed to {distribution_type}",
+            color=disnake.Color.blue()
+        )
+        summary_embed.add_field(name="✅ Successful", value=str(successful), inline=True)
+        summary_embed.add_field(name="❌ Failed", value=str(failed), inline=True)
+        summary_embed.add_field(name="📦 Total Recipients", value=str(len(members)), inline=True)
+        if distribution_type == "Secret Santa participants":
+            summary_embed.set_footer(text="Distributed to Secret Santa participants")
+        
+        await inter.followup.send(embed=summary_embed)
 
-    @commands.slash_command(
-        name="distributezip",
-        description="Zip file distribution management"
-    )
+    # ============ COMMANDS ============
+    @commands.slash_command(name="distributezip", description="Zip file distribution management")
     async def distributezip(self, inter: disnake.ApplicationCommandInteraction):
         """Main distributezip command group"""
         pass
 
-    @distributezip.sub_command(
-        name="upload",
-        description="Upload a zip file and distribute it to Secret Santa participants or all members"
-    )
+    @distributezip.sub_command(name="upload", description="Upload a zip file and distribute it")
     async def upload_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
         attachment: disnake.Attachment,
         required_by: disnake.Member = None
     ):
-        """
-        Upload a zip file and send it to Secret Santa participants (if active) or all server members
-        
-        Parameters
-        ----------
-        attachment: The zip file to upload
-        required_by: The user who requires this file (defaults to you)
-        """
+        """Upload a zip file and send it to Secret Santa participants (if active) or all server members"""
         await inter.response.defer()
         
-        # PERMISSION CHECK: Only bot owner can upload files
-        # This does NOT affect Secret Santa commands (ask_giftee, reply_santa, etc.)
+        # Permission check
         if not is_owner(inter):
             owner_name = get_owner_mention()
             await inter.edit_original_response(
@@ -213,15 +300,13 @@ class DistributeZipCog(commands.Cog):
             await inter.edit_original_response(content=validation_error)
             return
         
-        # Determine who required it
+        # Determine requester
         requester = required_by or inter.author
-        file_name = Path(attachment.filename).stem  # Remove .zip extension
+        file_name = Path(attachment.filename).stem
         
         try:
             # Download the file
-            await inter.edit_original_response(
-                content=f"📥 Downloading file '{file_name}'..."
-            )
+            await inter.edit_original_response(content=f"📥 Downloading file '{file_name}'...")
             
             file_data = await attachment.read()
             file_path = FILES_DIR / attachment.filename
@@ -230,7 +315,7 @@ class DistributeZipCog(commands.Cog):
             file_path.write_bytes(file_data)
             
             # Update metadata
-            file_id = str(int(time.time()))  # Use timestamp as ID
+            file_id = str(int(time.time()))
             self.metadata["files"][file_id] = {
                 "name": file_name,
                 "filename": attachment.filename,
@@ -253,8 +338,7 @@ class DistributeZipCog(commands.Cog):
             
             # Notify about upload success
             await inter.edit_original_response(
-                content=f"✅ File '{file_name}' uploaded successfully!\n"
-                       f"📤 Starting distribution..."
+                content=f"✅ File '{file_name}' uploaded successfully!\n📤 Starting distribution..."
             )
             
             # Distribute to members
@@ -262,163 +346,9 @@ class DistributeZipCog(commands.Cog):
             
         except Exception as e:
             self.logger.error(f"Error uploading file: {e}", exc_info=True)
-            await inter.edit_original_response(
-                content=f"❌ Error uploading file: {str(e)}"
-            )
+            await inter.edit_original_response(content=f"❌ Error uploading file: {str(e)}")
 
-    async def _distribute_file(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        file_id: str,
-        file_name: str,
-        file_path: Path,
-        required_by: disnake.Member
-    ):
-        """Distribute file to Secret Santa participants (if active) or all server members"""
-        guild = inter.guild
-        if not guild:
-            await inter.followup.send("❌ Error: Command must be used in a server")
-            return
-        
-        # Check if Secret Santa event is active and get participants
-        secret_santa_cog = self.bot.get_cog("SecretSantaCog")
-        use_secret_santa = False
-        participant_ids = []
-        
-        if secret_santa_cog:
-            try:
-                state = secret_santa_cog.state
-                event = state.get("current_event")
-                if event and event.get("active"):
-                    participants = event.get("participants", {})
-                    if participants:
-                        # Get participant user IDs (they're stored as strings in the dict keys)
-                        participant_ids = [int(uid) for uid in participants.keys() if uid.isdigit()]
-                        use_secret_santa = True
-                        self.logger.info(f"Using Secret Santa participants: {len(participant_ids)} participants")
-            except Exception as e:
-                self.logger.debug(f"Could not check Secret Santa state: {e}")
-        
-        # Get members to send to
-        if use_secret_santa and participant_ids:
-            # Get Secret Santa participants
-            members = []
-            for user_id in participant_ids:
-                try:
-                    member = guild.get_member(user_id)
-                    if member and not member.bot:
-                        members.append(member)
-                except Exception as e:
-                    self.logger.debug(f"Could not get member {user_id}: {e}")
-            
-            distribution_type = "Secret Santa participants"
-        else:
-            # Get all server members
-            members = [member for member in guild.members if not member.bot]
-            distribution_type = "all server members"
-        
-        total_members = len(members)
-        
-        if total_members == 0:
-            await inter.followup.send("⚠️ No members found to send the file to")
-            return
-        
-        # Create embed with anonymous messaging
-        embed = disnake.Embed(
-            title="📦 File Distribution",
-            description=f"**{file_name}**",
-            color=disnake.Color.green()
-        )
-        
-        # Anonymous "Required By" field - don't reveal who requested it
-        if use_secret_santa:
-            embed.add_field(
-                name="Required By",
-                value="🎅 A Secret Santa requires this file",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Required By",
-                value="📋 A server member requires this file",
-                inline=False
-            )
-        
-        embed.add_field(
-            name="Uploaded At",
-            value=f"<t:{int(time.time())}:F>",
-            inline=False
-        )
-        embed.add_field(
-            name="💻 Cross-Platform Compatible",
-            value="✅ This ZIP file works on **Windows, Linux, and macOS**\n"
-                  "The ZIP format is standardized and supported on all platforms.",
-            inline=False
-        )
-        if use_secret_santa:
-            embed.set_footer(text="This file is required for Secret Santa participants")
-        else:
-            embed.set_footer(text="This file is required for the server")
-        
-        # Send to all members
-        successful = 0
-        failed = 0
-        
-        async with self._sending_lock:
-            for i, member in enumerate(members, 1):
-                try:
-                    # Skip if member is the uploader (they already have it)
-                    if member.id == inter.author.id:
-                        successful += 1
-                        continue
-                    
-                    # Create a new file object for each member (Discord file objects can only be used once)
-                    file = disnake.File(file_path, filename=file_path.name)
-                    
-                    # Try to send DM
-                    try:
-                        await member.send(embed=embed, file=file)
-                        successful += 1
-                        self.logger.debug(f"Sent file to {member.display_name} ({member.id})")
-                    except disnake.Forbidden:
-                        # User has DMs disabled
-                        failed += 1
-                        self.logger.debug(f"Could not send DM to {member.display_name} (DMs disabled)")
-                    except Exception as e:
-                        failed += 1
-                        self.logger.warning(f"Error sending to {member.display_name}: {e}")
-                    
-                    # Rate limiting - wait a bit between sends
-                    if i % 10 == 0:
-                        await asyncio.sleep(1)  # Small delay every 10 sends
-                    
-                except Exception as e:
-                    failed += 1
-                    self.logger.error(f"Unexpected error sending to {member.display_name}: {e}")
-        
-        # Update download count
-        if file_id in self.metadata["files"]:
-            self.metadata["files"][file_id]["download_count"] = successful
-            save_metadata(self.metadata)
-        
-        # Send summary
-        summary_embed = disnake.Embed(
-            title="📊 Distribution Complete",
-            description=f"File '{file_name}' has been distributed to {distribution_type}",
-            color=disnake.Color.blue()
-        )
-        summary_embed.add_field(name="✅ Successful", value=str(successful), inline=True)
-        summary_embed.add_field(name="❌ Failed", value=str(failed), inline=True)
-        summary_embed.add_field(name="📦 Total Recipients", value=str(total_members), inline=True)
-        if use_secret_santa:
-            summary_embed.set_footer(text="Distributed to Secret Santa participants")
-        
-        await inter.followup.send(embed=summary_embed)
-
-    @distributezip.sub_command(
-        name="list",
-        description="List all uploaded files"
-    )
+    @distributezip.sub_command(name="list", description="List all uploaded files")
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
         """List all uploaded files"""
         await inter.response.defer()
@@ -426,9 +356,7 @@ class DistributeZipCog(commands.Cog):
         files = self.metadata.get("files", {})
         
         if not files:
-            await inter.edit_original_response(
-                content="📦 No files have been uploaded yet"
-            )
+            await inter.edit_original_response(content="📦 No files have been uploaded yet")
             return
         
         # Sort by upload time (newest first)
@@ -438,18 +366,14 @@ class DistributeZipCog(commands.Cog):
             reverse=True
         )
         
-        embed = disnake.Embed(
-            title="📦 Uploaded Files",
-            color=disnake.Color.blue()
-        )
+        embed = disnake.Embed(title="📦 Uploaded Files", color=disnake.Color.blue())
         
-        for file_id, file_data in sorted_files[:10]:  # Show top 10
+        for file_id, file_data in sorted_files[:10]:
             file_name = file_data.get("name", "Unknown")
             uploaded_at = file_data.get("uploaded_at", 0)
             size = file_data.get("size", 0)
             download_count = file_data.get("download_count", 0)
             
-            # Anonymous display - don't reveal who requested it
             embed.add_field(
                 name=f"📦 {file_name}",
                 value=(
@@ -466,12 +390,9 @@ class DistributeZipCog(commands.Cog):
         
         await inter.edit_original_response(embed=embed)
     
-    @distributezip.sub_command(
-        name="browse",
-        description="Browse and select files using an interactive file browser (like File Explorer)"
-    )
+    @distributezip.sub_command(name="browse", description="Browse and select files using an interactive file browser")
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):
-        """Browse files using an interactive file browser (like File Explorer/Finder)"""
+        """Browse files using an interactive file browser"""
         await inter.response.defer()
         
         async def handler(interaction, file_id, file_data, file_path):
@@ -484,20 +405,13 @@ class DistributeZipCog(commands.Cog):
         
         await self._handle_file_browser(inter, "browse", handler)
 
-    @distributezip.sub_command(
-        name="get",
-        description="Get/download a file (use browse command for easier selection)"
-    )
+    @distributezip.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
     async def get_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
         file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)")
     ):
-        """
-        Get/download a specific file.
-        
-        💡 Tip: Leave file_name empty to use the interactive file browser (like File Explorer)!
-        """
+        """Get/download a specific file"""
         await inter.response.defer()
         
         if not file_name:
@@ -528,10 +442,7 @@ class DistributeZipCog(commands.Cog):
         file = disnake.File(file_path, filename=file_data.get("filename"))
         await inter.edit_original_response(embed=embed, file=file)
 
-    @distributezip.sub_command(
-        name="remove",
-        description="Remove a file (moderator only, use browse for easier selection)"
-    )
+    @distributezip.sub_command(name="remove", description="Remove a file (moderator only, use browse for easier selection)")
     @mod_check()
     async def remove_file(
         self,
@@ -579,7 +490,19 @@ class DistributeZipCog(commands.Cog):
             self.logger.error(f"Error removing file: {e}", exc_info=True)
             await inter.edit_original_response(content=f"❌ Error removing file: {str(e)}")
 
+    # ============ COG LIFECYCLE ============
+    async def cog_load(self):
+        """Initialize cog"""
+        self.logger.info("DistributeZip cog loaded")
+        if hasattr(self.bot, 'send_to_discord_log'):
+            await self.bot.send_to_discord_log("📦 DistributeZip cog loaded successfully", "SUCCESS")
+
+    def cog_unload(self):
+        """Cleanup cog"""
+        self.logger.info("Unloading DistributeZip cog...")
+        save_metadata(self.metadata)
+
 
 def setup(bot):
+    """Setup the cog"""
     bot.add_cog(DistributeZipCog(bot))
-
