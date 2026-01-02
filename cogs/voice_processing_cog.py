@@ -313,8 +313,11 @@ class VoiceProcessingCog(commands.Cog):
             text = pattern.sub(replacement, text)
         return re.sub(r'\s+', ' ', text)
 
-    async def _clean_text(self, text: str, max_length: int = 400) -> str:
-        """Clean and process text for TTS"""
+    async def _clean_text(self, text: str, max_length: int = 4096) -> str:
+        """Clean and process text for TTS
+        
+        OpenAI TTS API supports up to 4096 characters.
+        """
         text = re.sub(r'\s+', ' ', text.strip())
         text = self._discord_cleanup_pattern.sub('', text)
         text = self._apply_corrections(text)
@@ -322,8 +325,19 @@ class VoiceProcessingCog(commands.Cog):
         if self._detect_needs_pronunciation_help(text):
             text = await self._improve_pronunciation(text)
 
+        # Truncate if exceeds OpenAI's limit (4096 chars)
         if max_length and len(text) > max_length:
-            text = text[:max_length - 3] + "..."
+            # Try to truncate at sentence boundary
+            truncated = text[:max_length]
+            last_period = truncated.rfind('.')
+            last_exclamation = truncated.rfind('!')
+            last_question = truncated.rfind('?')
+            last_break = max(last_period, last_exclamation, last_question)
+            
+            if last_break > max_length * 0.8:  # Only use if we're keeping most of the text
+                text = truncated[:last_break + 1]
+            else:
+                text = truncated.rstrip() + "..."
 
         if text and text[-1] not in '.!?,;:':
             text += '.'
