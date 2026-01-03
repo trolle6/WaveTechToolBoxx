@@ -345,7 +345,11 @@ bot.ready_once = False
 bot._connection_stats = {
     "disconnects": [],
     "last_disconnect": None,
-    "disconnect_count_24h": 0
+    "last_connect": None,  # Timestamp of last successful connection
+    "connection_start": None,  # Timestamp when bot first connected
+    "disconnect_count_24h": 0,
+    "total_uptime": 0.0,  # Total seconds connected in last 24h
+    "longest_uptime": 0.0  # Longest continuous connection period
 }
 
 
@@ -387,9 +391,16 @@ bot.send_to_discord_channel = send_to_discord_channel
 # ============ BOT EVENTS ============
 @bot.event
 async def on_ready():
-    """Bot ready event"""
+    """Bot ready event - tracks connection start time for stability metrics"""
+    now = time.time()
+    stats = bot._connection_stats
+    
     if not bot.ready_once:
         logger.info(f"Logged in as {bot.user}")
+        
+        # Track connection start time for uptime calculation
+        stats["connection_start"] = now
+        stats["last_connect"] = now
         
         if discord_handler:
             discord_handler.set_bot(bot)
@@ -403,18 +414,45 @@ async def on_ready():
             pass
         
         bot.ready_once = True
+    else:
+        # Reconnection - update connection start
+        stats["last_connect"] = now
+        if stats["last_disconnect"]:
+            # Calculate uptime since last disconnect
+            downtime = now - stats["last_disconnect"]
+            if downtime > 60:
+                logger.info(f"📊 Connection restored after {downtime:.1f}s downtime")
 
 
 @bot.event
 async def on_disconnect():
     """
-    Track disconnections and log frequency.
+    Track disconnections and log frequency with uptime metrics.
     
-    Monitors connection stability by tracking disconnect timestamps
-    and warning if disconnects become too frequent (indicates network issues).
+    Monitors connection stability by tracking disconnect timestamps and calculating
+    uptime statistics. Disconnects are often network-level or Discord API-side issues
+    (not code problems) - the reconnection system handles these automatically.
     """
     now = time.time()
     stats = bot._connection_stats
+    
+    # Calculate uptime since last connection
+    if stats["last_connect"]:
+        uptime = now - stats["last_connect"]
+        stats["total_uptime"] += uptime
+        if uptime > stats["longest_uptime"]:
+            stats["longest_uptime"] = uptime
+        
+        # Format uptime for logging
+        if uptime < 60:
+            uptime_str = f"{uptime:.1f}s"
+        elif uptime < 3600:
+            uptime_str = f"{uptime/60:.1f}m"
+        else:
+            uptime_str = f"{uptime/3600:.1f}h"
+    else:
+        uptime_str = "unknown"
+        uptime = 0
     
     stats["last_disconnect"] = now
     stats["disconnects"].append(now)
@@ -424,19 +462,31 @@ async def on_disconnect():
     stats["disconnects"] = [d for d in stats["disconnects"] if d > cutoff]
     stats["disconnect_count_24h"] = len(stats["disconnects"])
     
+    # Calculate uptime percentage (approximate, resets on first disconnect after 24h)
+    uptime_percent = (stats["total_uptime"] / SECONDS_PER_DAY * 100) if stats["total_uptime"] > 0 else 0
+    
     # Log disconnect with context
     if len(stats["disconnects"]) > 1:
         time_since = now - stats["disconnects"][-2]
-        logger.info(f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h, {time_since:.1f}s since last)")
+        logger.info(
+            f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h, "
+            f"{time_since:.1f}s since last, uptime: {uptime_str})"
+        )
     else:
-        logger.info(f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h)")
+        logger.info(
+            f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h, uptime: {uptime_str})"
+        )
     
     # Warn if disconnects are too frequent (indicates stability issues)
     if stats["disconnect_count_24h"] >= DISCONNECT_WARNING_THRESHOLD:
-        logger.warning(f"🚨 HIGH DISCONNECTION RATE: {stats['disconnect_count_24h']} disconnects in 24h")
+        logger.warning(
+            f"🚨 HIGH DISCONNECTION RATE: {stats['disconnect_count_24h']} disconnects in 24h "
+            f"(uptime: {uptime_percent:.1f}%)"
+        )
         try:
             await send_to_discord_log(
-                f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h",
+                f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
+                f"(uptime: {uptime_percent:.1f}%)",
                 "WARNING"
             )
         except Exception:
@@ -445,17 +495,25 @@ async def on_disconnect():
 
 @bot.event
 async def on_resumed():
-    """Track reconnections"""
+    """
+    Track reconnections with downtime metrics.
+    
+    Logs reconnection time and updates connection statistics. Quick reconnections
+    (< 5s) are normal and indicate the auto-reconnect system is working properly.
+    """
     now = time.time()
     stats = bot._connection_stats
+    
+    # Update connection start time for next uptime calculation
+    stats["last_connect"] = now
     
     if stats["last_disconnect"]:
         duration = now - stats["last_disconnect"]
         
         if duration < 5:
-            logger.info(f"✅ Bot reconnected ({duration:.2f}s)")
+            logger.info(f"✅ Bot reconnected ({duration:.2f}s downtime - auto-reconnect working)")
         elif duration < 60:
-            logger.warning(f"⚠️ Bot reconnected after {duration:.1f}s")
+            logger.warning(f"⚠️ Bot reconnected after {duration:.1f}s downtime")
         else:
             logger.error(f"🚨 Bot reconnected after {duration:.1f}s - very long disconnection!")
             try:
