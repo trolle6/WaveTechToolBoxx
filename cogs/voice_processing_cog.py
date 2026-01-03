@@ -961,6 +961,20 @@ class VoiceProcessingCog(commands.Cog):
                     else:
                         state.stats["errors"] += 1
                         self.logger.warning("Audio playback failed")
+                    
+                    # Check if anyone is still in voice channel after playback
+                    # (users might have left during playback)
+                    if guild.voice_client and guild.voice_client.is_connected():
+                        try:
+                            channel = guild.voice_client.channel
+                            if channel:
+                                humans = [m for m in channel.members if not m.bot]
+                                if not humans:
+                                    self.logger.info(f"No humans left in voice channel after playback, disconnecting from {channel.name}")
+                                    await guild.voice_client.disconnect()
+                                    break  # Exit queue processing loop
+                        except Exception as e:
+                            self.logger.error(f"Error checking voice channel members: {e}", exc_info=True)
 
                 except asyncio.TimeoutError:
                     break
