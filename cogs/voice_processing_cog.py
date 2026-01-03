@@ -3,7 +3,7 @@ Voice Processing Cog - Text-to-Speech with Smart Features
 
 FEATURES:
 - 🎤 Automatic TTS for messages from users in voice channels
-- 🎭 Pronoun-based voice assignment (6 voices: alloy, echo, fable, onyx, nova, shimmer)
+- 🎭 Session-based voice assignment (13 voices, assigned per-guild session)
 - 🤖 AI pronunciation improvement for acronyms and usernames
 - 📝 Smart grammar corrections
 - 👤 Name announcement (first message per session)
@@ -22,7 +22,7 @@ DESIGN DECISIONS:
 - Opus format: Used instead of MP3 for better compression and Discord-native support
 - Dynamic timeouts: API and playback timeouts scale with text/audio length
 - Sequential processing: Chunks are processed one at a time for reliability (not parallel)
-- User ID-based voice assignment: Ensures consistent voice per user using deterministic hashing
+- Session-based voice assignment: Voices assigned per-guild session, cleared when user leaves voice channel
 """
 
 import asyncio
@@ -206,10 +206,14 @@ class VoiceProcessingCog(commands.Cog):
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
         self.default_voice = "alloy"
-        self.available_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+        # All available OpenAI TTS voices (13 total)
+        self.available_voices = [
+            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", 
+            "onyx", "sage", "shimmer", "verse", "marin", "cedar"
+        ]
         
-        # Voice assignments (in-memory, session-based)
-        self._voice_assignments: Dict[str, str] = {}
+        # Voice assignments (per-guild, session-based - cleared when user leaves voice)
+        self._voice_assignments: Dict[int, Dict[int, str]] = {}  # guild_id -> {user_id: voice}
         self._voice_lock = asyncio.Lock()
         
         # TTS role requirement (optional)
@@ -251,50 +255,27 @@ class VoiceProcessingCog(commands.Cog):
             self.allowed_channel = None
             self.logger.warning("DISCORD_CHANNEL_ID not set - TTS will work in all channels")
 
-    # ============ PRONOUN DETECTION ============
-    async def _detect_pronouns(self, member: disnake.Member) -> Optional[str]:
-        """Detect pronouns from display name/username"""
-        text = f"{member.display_name} {member.name}".lower()
-        
-        # Formal patterns: (he/him), she/her, [they/them]
-        if any(p in text for p in ['he/him', 'he / him', '(he)', '[he]']):
-            return 'he'
-        if any(p in text for p in ['she/her', 'she / her', '(she)', '[she]']):
-            return 'she'
-        if any(p in text for p in ['they/them', 'they / them', '(they)', '[they]']):
-            return 'they'
-        
-        # Casual patterns: | he, - she, • they
-        match = re.search(r'[|\-•\[\]\(\)]\s*(he|she|they)', text)
-        if match:
-            return match.group(1)
-        
-        # Descriptive terms
-        if re.search(r'\b(man|guy|dude|male|boy|bro|mr|king)\b', text):
-            return 'he'
-        if re.search(r'\b(woman|girl|gal|female|lady|sis|ms|queen)\b', text):
-            return 'she'
-        
-        # Standalone pronouns at end
-        match = re.search(r'\s+(he|she|they)\s*$', text)
-        if match:
-            return match.group(1)
-        
-        return None
-
-    def _get_voice_for_pronouns(self, pronouns: Optional[str], user_id: int) -> str:
-        """Map pronouns to voice (consistent based on user ID)"""
-        if pronouns == 'he':
-            return 'echo' if user_id % 2 == 0 else 'onyx'
-        elif pronouns == 'she':
-            return 'nova' if user_id % 2 == 0 else 'shimmer'
-        elif pronouns == 'they':
-            return 'alloy'
-        return 'alloy'  # Default
-
+    # ============ VOICE ASSIGNMENT ============
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
-        """Get or assign voice for user"""
-        user_key = str(member.id)
+        """
+        Get or assign voice for user (session-based, per-guild).
+        
+        DESIGN DECISIONS:
+        - Session-based: Voice assignments are per-guild and cleared when user leaves voice channel
+        - Deterministic: Uses user_id hash to consistently assign same voice within a session
+        - All voices: Uses all 13 available voices for better variety
+        - No pronoun detection: Simplified to just hash-based assignment for consistency
+        
+        Args:
+            member: Discord member to get voice for
+            
+        Returns:
+            Voice name to use for TTS
+        """
+        if not member.guild:
+            return self.default_voice
+        
+        guild_id = member.guild.id
         user_id = member.id
         
         # Check role requirement
@@ -302,17 +283,25 @@ class VoiceProcessingCog(commands.Cog):
             if not any(role.id == self.tts_role_id for role in member.roles):
                 return self.default_voice
         
-        # Return existing assignment or detect and assign new voice
+        # Get or assign voice for this user in this guild (session-based)
         async with self._voice_lock:
-            if user_key in self._voice_assignments:
-                voice = self._voice_assignments[user_key]
+            # Initialize guild dict if needed
+            if guild_id not in self._voice_assignments:
+                self._voice_assignments[guild_id] = {}
+            
+            guild_assignments = self._voice_assignments[guild_id]
+            
+            # Return existing assignment if present
+            if user_id in guild_assignments:
+                voice = guild_assignments[user_id]
                 if voice in self.available_voices:
                     return voice
             
-            # Detect and assign new voice
-            pronouns = await self._detect_pronouns(member)
-            new_voice = self._get_voice_for_pronouns(pronouns, user_id)
-            self._voice_assignments[user_key] = new_voice
+            # Assign new voice for this session (deterministic based on user_id)
+            # Use modulo to distribute across all available voices
+            voice_index = user_id % len(self.available_voices)
+            new_voice = self.available_voices[voice_index]
+            guild_assignments[user_id] = new_voice
             return new_voice
 
     # ============ API HELPERS ============
@@ -1154,9 +1143,10 @@ class VoiceProcessingCog(commands.Cog):
                 if guild.id in self._announced_users:
                     self._announced_users[guild.id].discard(member.id)
             
-            # Free voice assignment
+            # Clear voice assignment for this session (user left voice channel)
             async with self._voice_lock:
-                self._voice_assignments.pop(str(member.id), None)
+                if guild.id in self._voice_assignments:
+                    self._voice_assignments[guild.id].pop(member.id, None)
             
             # Check if should disconnect
             if guild.voice_client and guild.voice_client.is_connected():
