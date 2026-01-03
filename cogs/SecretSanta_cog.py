@@ -25,7 +25,7 @@ COMMANDS (Participant):
 - /ss wishlist remove [number] - Remove item from wishlist
 - /ss wishlist view - View your wishlist
 - /ss wishlist clear - Clear your wishlist
-- /ss view_giftee_wishlist - See your giftee's wishlist
+- /ss giftee - See your giftee's wishlist
 
 COMMANDS (Anyone):
 - /ss history - View all years overview
@@ -274,7 +274,7 @@ class SecretSantaCog(commands.Cog):
         msg += f"**YOUR GIFTEE:** {secrets.choice(messages).format(receiver=f'<@{receiver_id}> ({receiver_name})')}\n\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         msg += f"**SEE WHAT THEY WANT:**\n"
-        msg += f"• `/ss view_giftee_wishlist` - Check {receiver_name}'s wishlist\n\n"
+        msg += f"• `/ss giftee` - Check {receiver_name}'s wishlist\n\n"
         msg += f"**OTHER COMMANDS:**\n"
         msg += f"• `/ss ask_giftee` - Ask {receiver_name} questions anonymously\n"
         msg += f"• `/ss reply_santa` - Reply if they message you\n"
@@ -1350,7 +1350,7 @@ class SecretSantaCog(commands.Cog):
 
         await inter.edit_original_response(content="✅ Wishlist cleared!")
 
-    @ss_root.sub_command(name="view_giftee_wishlist", description="View your giftee's wishlist")
+    @ss_root.sub_command(name="giftee", description="View your giftee's wishlist")
     async def ss_view_giftee_wishlist(self, inter: disnake.ApplicationCommandInteraction):
         """View giftee's wishlist"""
         await inter.response.defer(ephemeral=True)

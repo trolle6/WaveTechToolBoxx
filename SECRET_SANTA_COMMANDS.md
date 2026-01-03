@@ -59,7 +59,7 @@
 - `/ss wishlist clear`
   - Clear your entire wishlist
 
-- `/ss view_giftee_wishlist`
+- `/ss giftee`
   - View your giftee's wishlist (what they want)
 
 ---
