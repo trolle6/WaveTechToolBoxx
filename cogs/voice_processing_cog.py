@@ -840,7 +840,19 @@ class VoiceProcessingCog(commands.Cog):
 
     # ============ QUEUE PROCESSING ============
     async def _process_queue(self, guild_id: int):
-        """Process TTS queue for a guild"""
+        """
+        Process TTS queue for a guild with FIFO generation.
+        
+        DESIGN DECISIONS:
+        - Batch generation: Collects all queued items upfront and generates TTS for all of them
+          before playback starts. This prevents items from expiring during long playback times.
+        - Sequential generation: Generates TTS sequentially (not parallel) to respect API rate limits
+        - FIFO playback: Plays items in order after all are generated
+        - Expiration check: Checks expiration before generation (not just before playback)
+        
+        This ensures that even if playback takes minutes, all queued items are generated
+        and ready, preventing expiration issues.
+        """
         state = await self._get_or_create_state(guild_id)
         guild = self.bot.get_guild(guild_id)
 
@@ -853,52 +865,96 @@ class VoiceProcessingCog(commands.Cog):
         try:
             while not self._shutdown.is_set():
                 try:
-                    item = await asyncio.wait_for(state.queue.get(), timeout=300)
+                    # Get first item to start batch (with timeout)
+                    try:
+                        first_item = await asyncio.wait_for(state.queue.get(), timeout=300)
+                    except asyncio.TimeoutError:
+                        break
                     
                     if self._shutdown.is_set():
                         break
                     
                     state.mark_active()
-                    self.logger.debug(f"Processing TTS item: text_length={len(item.text)} chars, voice={item.voice}")
-
-                    if item.is_expired():
-                        state.stats["dropped"] += 1
-                        self.logger.debug("TTS item expired, dropping")
-                        continue
-
-                    member = guild.get_member(item.user_id)
-                    if not member or not member.voice or not member.voice.channel:
-                        state.stats["dropped"] += 1
-                        self.logger.debug("Member not in voice, dropping")
-                        continue
-
-                    channel = member.voice.channel
-
-                    # Generate TTS if not already generated
-                    if not item.audio_data:
-                        self.logger.debug(f"Generating TTS for {len(item.text)} chars")
-                        item.audio_data = await self._generate_tts(item.text, item.voice)
-                        if not item.audio_data:
-                            state.stats["errors"] += 1
-                            self.logger.warning("TTS generation failed")
+                    
+                    # Collect all available items from queue (batch collection)
+                    # This ensures we generate TTS for all items upfront before playback
+                    batch_items = [first_item]
+                    max_batch_size = 20  # Limit batch size to prevent memory issues
+                    
+                    while len(batch_items) < max_batch_size:
+                        try:
+                            item = state.queue.get_nowait()
+                            batch_items.append(item)
+                        except asyncio.QueueEmpty:
+                            break
+                    
+                    self.logger.debug(f"Processing batch of {len(batch_items)} TTS items")
+                    
+                    # Generate TTS for all items in batch (sequential to respect rate limits)
+                    valid_items = []
+                    for item in batch_items:
+                        if self._shutdown.is_set():
+                            break
+                        
+                        # Check expiration before generation
+                        if item.is_expired():
+                            state.stats["dropped"] += 1
+                            self.logger.debug("TTS item expired before generation, dropping")
                             continue
-                        self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
-
-                    # Connect to voice
-                    vc = await self._connect_to_voice(channel)
-                    if not vc:
-                        state.stats["errors"] += 1
-                        self.logger.warning("Failed to connect to voice")
-                        continue
-
-                    # Play audio
-                    self.logger.debug(f"Playing audio: {len(item.audio_data)} bytes")
-                    if await self._play_audio(vc, item.audio_data):
-                        state.stats["processed"] += 1
-                        self.logger.debug("Audio playback completed successfully")
-                    else:
-                        state.stats["errors"] += 1
-                        self.logger.warning("Audio playback failed")
+                        
+                        # Verify member is still in voice
+                        member = guild.get_member(item.user_id)
+                        if not member or not member.voice or not member.voice.channel:
+                            state.stats["dropped"] += 1
+                            self.logger.debug("Member not in voice, dropping")
+                            continue
+                        
+                        # Generate TTS if not already generated
+                        if not item.audio_data:
+                            self.logger.debug(f"Generating TTS for {len(item.text)} chars (batch generation)")
+                            item.audio_data = await self._generate_tts(item.text, item.voice)
+                            if not item.audio_data:
+                                state.stats["errors"] += 1
+                                self.logger.warning("TTS generation failed, skipping item")
+                                continue
+                            self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
+                        
+                        valid_items.append(item)
+                    
+                    # Play all valid items sequentially (FIFO order)
+                    for item in valid_items:
+                        if self._shutdown.is_set():
+                            break
+                        
+                        # Re-check expiration and member status before playback
+                        if item.is_expired():
+                            state.stats["dropped"] += 1
+                            self.logger.debug("TTS item expired before playback, dropping")
+                            continue
+                        
+                        member = guild.get_member(item.user_id)
+                        if not member or not member.voice or not member.voice.channel:
+                            state.stats["dropped"] += 1
+                            self.logger.debug("Member not in voice before playback, dropping")
+                            continue
+                        
+                        channel = member.voice.channel
+                        
+                        # Connect to voice
+                        vc = await self._connect_to_voice(channel)
+                        if not vc:
+                            state.stats["errors"] += 1
+                            self.logger.warning("Failed to connect to voice")
+                            continue
+                        
+                        # Play audio
+                        self.logger.debug(f"Playing audio: {len(item.audio_data)} bytes")
+                        if await self._play_audio(vc, item.audio_data):
+                            state.stats["processed"] += 1
+                            self.logger.debug("Audio playback completed successfully")
+                        else:
+                            state.stats["errors"] += 1
+                            self.logger.warning("Audio playback failed")
 
                 except asyncio.TimeoutError:
                     break
