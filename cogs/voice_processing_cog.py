@@ -1178,25 +1178,28 @@ class VoiceProcessingCog(commands.Cog):
                         message_list = list(self._processed_messages)
                         self._processed_messages = set(message_list[-500:])
 
-                # Cleanup voice assignments for users not in VC
+                # Cleanup voice assignments for users not in VC (per-guild)
                 async with self._voice_lock:
-                    user_ids = list(self._voice_assignments.keys())
-                
-                users_to_remove = []
-                for user_id_str in user_ids:
-                    user_id = int(user_id_str)
-                    user_in_voice = False
-                    for guild in self.bot.guilds:
-                        member = guild.get_member(user_id)
-                        if member and member.voice and member.voice.channel:
-                            user_in_voice = True
-                            break
-                    if not user_in_voice:
-                        users_to_remove.append(user_id_str)
-                
-                async with self._voice_lock:
-                    for user_id_str in users_to_remove:
-                        self._voice_assignments.pop(user_id_str, None)
+                    for guild_id, guild_assignments in list(self._voice_assignments.items()):
+                        guild = self.bot.get_guild(guild_id)
+                        if not guild:
+                            # Guild no longer exists, remove all assignments
+                            del self._voice_assignments[guild_id]
+                            continue
+                        
+                        # Remove assignments for users not in voice channel
+                        users_to_remove = []
+                        for user_id in list(guild_assignments.keys()):
+                            member = guild.get_member(user_id)
+                            if not member or not member.voice or not member.voice.channel:
+                                users_to_remove.append(user_id)
+                        
+                        for user_id in users_to_remove:
+                            guild_assignments.pop(user_id, None)
+                        
+                        # Remove empty guild dicts
+                        if not guild_assignments:
+                            self._voice_assignments.pop(guild_id, None)
 
                 # Cleanup idle states
                 async with self._state_lock:
