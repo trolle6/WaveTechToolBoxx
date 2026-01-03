@@ -841,17 +841,17 @@ class VoiceProcessingCog(commands.Cog):
     # ============ QUEUE PROCESSING ============
     async def _process_queue(self, guild_id: int):
         """
-        Process TTS queue for a guild with FIFO generation.
+        Process TTS queue with smart pipeline generation.
         
         DESIGN DECISIONS:
-        - Batch generation: Collects all queued items upfront and generates TTS for all of them
-          before playback starts. This prevents items from expiring during long playback times.
-        - Sequential generation: Generates TTS sequentially (not parallel) to respect API rate limits
-        - FIFO playback: Plays items in order after all are generated
-        - Expiration check: Checks expiration before generation (not just before playback)
+        - FIFO processing: Items are always processed and played in order
+        - Hybrid generation: For long playback (>30s), generate next item during playback (pipeline).
+          For short playback, process normally (efficiency priority).
+        - Expiration prevention: Pipeline generation ensures next item is ready before current finishes,
+          preventing expiration during long playback times.
         
-        This ensures that even if playback takes minutes, all queued items are generated
-        and ready, preventing expiration issues.
+        This balances efficiency (short messages process quickly) with reliability (long messages
+        don't cause queue items to expire).
         """
         state = await self._get_or_create_state(guild_id)
         guild = self.bot.get_guild(guild_id)
@@ -861,106 +861,124 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         state.is_processing = True
+        PIPELINE_THRESHOLD = 30.0  # Start pipeline generation if playback will be >30 seconds
+        prepared_item = None  # Next item prepared by pipeline generation
 
         try:
             while not self._shutdown.is_set():
                 try:
-                    # Get first item to start batch (with timeout)
-                    try:
-                        first_item = await asyncio.wait_for(state.queue.get(), timeout=300)
-                    except asyncio.TimeoutError:
-                        break
+                    # Get next item (FIFO) - either from queue or from pipeline
+                    if prepared_item:
+                        item = prepared_item
+                        prepared_item = None
+                    else:
+                        try:
+                            item = await asyncio.wait_for(state.queue.get(), timeout=300)
+                        except asyncio.TimeoutError:
+                            break
                     
                     if self._shutdown.is_set():
                         break
                     
                     state.mark_active()
-                    
-                    # Collect all available items from queue (batch collection)
-                    # This ensures we generate TTS for all items upfront before playback
-                    batch_items = [first_item]
-                    max_batch_size = 20  # Limit batch size to prevent memory issues
-                    
-                    while len(batch_items) < max_batch_size:
-                        try:
-                            item = state.queue.get_nowait()
-                            batch_items.append(item)
-                        except asyncio.QueueEmpty:
-                            break
-                    
-                    self.logger.debug(f"Processing batch of {len(batch_items)} TTS items")
-                    
-                    # Generate TTS for all items in batch (sequential to respect rate limits)
-                    valid_items = []
-                    for item in batch_items:
-                        if self._shutdown.is_set():
-                            break
-                        
-                        # Check expiration before generation
-                        if item.is_expired():
-                            state.stats["dropped"] += 1
-                            self.logger.debug("TTS item expired before generation, dropping")
-                            continue
-                        
-                        # Verify member is still in voice
-                        member = guild.get_member(item.user_id)
-                        if not member or not member.voice or not member.voice.channel:
-                            state.stats["dropped"] += 1
-                            self.logger.debug("Member not in voice, dropping")
-                            continue
-                        
-                        # Generate TTS if not already generated
+                    self.logger.debug(f"Processing TTS item: text_length={len(item.text)} chars, voice={item.voice}")
+
+                    # Check expiration before generation
+                    if item.is_expired():
+                        state.stats["dropped"] += 1
+                        self.logger.debug("TTS item expired, dropping")
+                        continue
+
+                    # Verify member is still in voice
+                    member = guild.get_member(item.user_id)
+                    if not member or not member.voice or not member.voice.channel:
+                        state.stats["dropped"] += 1
+                        self.logger.debug("Member not in voice, dropping")
+                        continue
+
+                    channel = member.voice.channel
+
+                    # Generate TTS if not already generated
+                    if not item.audio_data:
+                        self.logger.debug(f"Generating TTS for {len(item.text)} chars")
+                        item.audio_data = await self._generate_tts(item.text, item.voice)
                         if not item.audio_data:
-                            self.logger.debug(f"Generating TTS for {len(item.text)} chars (batch generation)")
-                            item.audio_data = await self._generate_tts(item.text, item.voice)
-                            if not item.audio_data:
-                                state.stats["errors"] += 1
-                                self.logger.warning("TTS generation failed, skipping item")
-                                continue
-                            self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
-                        
-                        valid_items.append(item)
+                            state.stats["errors"] += 1
+                            self.logger.warning("TTS generation failed")
+                            continue
+                        self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
+
+                    # Estimate playback duration to decide on pipeline generation
+                    estimated_duration = len(item.audio_data) / OPUS_BYTES_PER_SECOND
+                    will_pipeline = estimated_duration > PIPELINE_THRESHOLD
+
+                    # If playback will be long, start generating next item in background (pipeline)
+                    next_gen_task = None
+                    if will_pipeline:
+                        try:
+                            next_item = state.queue.get_nowait()
+                            # Only pipeline if next item exists and isn't expired
+                            if next_item.is_expired():
+                                state.stats["dropped"] += 1
+                                self.logger.debug("Pipeline: Next item expired, skipping pipeline")
+                            else:
+                                next_member = guild.get_member(next_item.user_id)
+                                if not next_member or not next_member.voice or not next_member.voice.channel:
+                                    state.stats["dropped"] += 1
+                                    self.logger.debug("Pipeline: Next item member not in voice, skipping pipeline")
+                                elif not next_item.audio_data:
+                                    # Start generating next item in background
+                                    async def generate_next():
+                                        try:
+                                            self.logger.debug(f"Pipeline: Generating next TTS for {len(next_item.text)} chars")
+                                            next_item.audio_data = await self._generate_tts(next_item.text, next_item.voice)
+                                            if next_item.audio_data:
+                                                self.logger.debug(f"Pipeline: Next TTS generated: {len(next_item.audio_data)} bytes")
+                                        except Exception as e:
+                                            self.logger.error(f"Pipeline generation error: {e}", exc_info=True)
+                                    
+                                    next_gen_task = asyncio.create_task(generate_next())
+                                    prepared_item = next_item  # Store for next iteration
+                                    self.logger.debug(f"Pipeline: Started generating next item during playback (estimated {estimated_duration:.1f}s playback)")
+                        except asyncio.QueueEmpty:
+                            pass  # No next item, no pipeline needed
+
+                    # Connect to voice
+                    vc = await self._connect_to_voice(channel)
+                    if not vc:
+                        state.stats["errors"] += 1
+                        self.logger.warning("Failed to connect to voice")
+                        if next_gen_task:
+                            next_gen_task.cancel()
+                        prepared_item = None  # Clear prepared item on error
+                        continue
+
+                    # Play audio
+                    self.logger.debug(f"Playing audio: {len(item.audio_data)} bytes")
+                    playback_success = await self._play_audio(vc, item.audio_data)
                     
-                    # Play all valid items sequentially (FIFO order)
-                    for item in valid_items:
-                        if self._shutdown.is_set():
-                            break
-                        
-                        # Re-check expiration and member status before playback
-                        if item.is_expired():
-                            state.stats["dropped"] += 1
-                            self.logger.debug("TTS item expired before playback, dropping")
-                            continue
-                        
-                        member = guild.get_member(item.user_id)
-                        if not member or not member.voice or not member.voice.channel:
-                            state.stats["dropped"] += 1
-                            self.logger.debug("Member not in voice before playback, dropping")
-                            continue
-                        
-                        channel = member.voice.channel
-                        
-                        # Connect to voice
-                        vc = await self._connect_to_voice(channel)
-                        if not vc:
-                            state.stats["errors"] += 1
-                            self.logger.warning("Failed to connect to voice")
-                            continue
-                        
-                        # Play audio
-                        self.logger.debug(f"Playing audio: {len(item.audio_data)} bytes")
-                        if await self._play_audio(vc, item.audio_data):
-                            state.stats["processed"] += 1
-                            self.logger.debug("Audio playback completed successfully")
-                        else:
-                            state.stats["errors"] += 1
-                            self.logger.warning("Audio playback failed")
+                    # Wait for pipeline generation to complete if it was started
+                    if next_gen_task and not next_gen_task.done():
+                        self.logger.debug("Pipeline: Waiting for next item generation to complete")
+                        try:
+                            await next_gen_task
+                        except Exception as e:
+                            self.logger.error(f"Pipeline generation error: {e}", exc_info=True)
+                            prepared_item = None  # Clear on error
+                    
+                    if playback_success:
+                        state.stats["processed"] += 1
+                        self.logger.debug("Audio playback completed successfully")
+                    else:
+                        state.stats["errors"] += 1
+                        self.logger.warning("Audio playback failed")
 
                 except asyncio.TimeoutError:
                     break
                 except Exception as e:
                     self.logger.error(f"Queue processing error: {e}", exc_info=True)
                     state.stats["errors"] += 1
+                    prepared_item = None  # Clear prepared item on error
                     await asyncio.sleep(1)
 
         except asyncio.CancelledError:
