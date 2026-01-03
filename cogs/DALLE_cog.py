@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import aiohttp
 import disnake
 from disnake.ext import commands
 
@@ -248,18 +249,35 @@ class DALLECog(commands.Cog):
             self.stats["total_requests"] += 1
 
         # Retry with exponential backoff
+        # DALL-E API can take 15-30 seconds for generation, so use a generous timeout
+        REQUEST_TIMEOUT = 45  # seconds - enough for DALL-E generation
+        
+        self.logger.debug(f"Generating DALL-E image: prompt_length={len(prompt)}, size={size}, quality={quality}")
+        
         for attempt in range(self.max_retries):
             try:
-                session = await self.bot.http_mgr.get_session(timeout=45)
-
+                session = await self.bot.http_mgr.get_session()
+                
+                # Use request-level timeout to ensure proper timeout handling
+                # (session timeout might be different if session was reused)
+                request_timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+                
                 async with session.post(
                     self.api_url,
                     json=payload,
-                    headers=headers
+                    headers=headers,
+                    timeout=request_timeout
                 ) as resp:
 
                     if resp.status == 200:
-                        result = await resp.json()
+                        try:
+                            result = await resp.json()
+                        except Exception as json_err:
+                            self.logger.error(f"Failed to parse JSON response: {json_err}")
+                            if attempt < self.max_retries - 1:
+                                continue
+                            return {"success": False, "error": "Invalid API response format"}
+                        
                         async with self._stats_lock:
                             self.stats["successful"] += 1
                         return {"success": True, "data": result}
@@ -274,16 +292,22 @@ class DALLECog(commands.Cog):
                         return {"success": False, "error": f"Rate limited. Try again in {retry_after}s"}
 
                     elif resp.status == 400:
-                        error_data = await resp.json()
-                        error_msg = error_data.get("error", {}).get("message", "Bad request")
+                        try:
+                            error_data = await resp.json()
+                            error_msg = error_data.get("error", {}).get("message", "Bad request")
+                        except Exception:
+                            error_msg = "Bad request (could not parse error message)"
+                        
                         if "content_policy" in error_msg.lower():
                             return {"success": False, "error": "🚫 Content policy violation"}
                         return {"success": False, "error": f"Invalid request: {error_msg}"}
 
                     elif resp.status == 401:
+                        self.logger.error("API authentication failed - check OPENAI_API_KEY")
                         return {"success": False, "error": "🔒 API authentication failed"}
 
                     else:
+                        self.logger.warning(f"DALL-E API returned status {resp.status}")
                         if attempt < self.max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                             continue
