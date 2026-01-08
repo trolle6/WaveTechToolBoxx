@@ -443,6 +443,9 @@ async def on_disconnect():
         # Record this connection period (start, end)
         stats["connection_periods"].append((stats["last_connect"], now))
         
+        # Track longest uptime
+        # Note: This grows indefinitely, but it's just one float (8 bytes) so it's fine even over millions of years
+        # The value itself doesn't affect calculations, it's just for logging/monitoring
         if uptime > stats["longest_uptime"]:
             stats["longest_uptime"] = uptime
         
@@ -480,6 +483,15 @@ async def on_disconnect():
         (start, end) for start, end in stats["connection_periods"]
         if end > cutoff  # Keep if end time is within last 24h
     ]
+    
+    # Safety limit: prevent unbounded growth even in extreme edge cases
+    # Keep only the most recent periods if list somehow exceeds reasonable size
+    # (Should never happen with proper pruning, but protects against bugs/edge cases)
+    MAX_CONNECTION_PERIODS = 10000  # Max periods to track (e.g., ~416 disconnects/hour for 24h)
+    if len(stats["connection_periods"]) > MAX_CONNECTION_PERIODS:
+        # Keep only the most recent periods (they're already sorted by end time)
+        stats["connection_periods"] = stats["connection_periods"][-MAX_CONNECTION_PERIODS:]
+        logger.warning(f"Connection periods list exceeded safety limit, trimmed to {MAX_CONNECTION_PERIODS}")
     
     # Calculate uptime percentage (capped at 100%)
     uptime_percent = min(100.0, (total_uptime_24h / SECONDS_PER_DAY * 100)) if total_uptime_24h > 0 else 0.0
