@@ -344,11 +344,11 @@ bot.ready_once = False
 # Connection tracking for monitoring stability
 bot._connection_stats = {
     "disconnects": [],
+    "connection_periods": [],  # List of (start_time, end_time) tuples for last 24h
     "last_disconnect": None,
     "last_connect": None,  # Timestamp of last successful connection
     "connection_start": None,  # Timestamp when bot first connected
     "disconnect_count_24h": 0,
-    "total_uptime": 0.0,  # Total seconds connected in last 24h
     "longest_uptime": 0.0  # Longest continuous connection period
 }
 
@@ -439,7 +439,10 @@ async def on_disconnect():
     # Calculate uptime since last connection
     if stats["last_connect"]:
         uptime = now - stats["last_connect"]
-        stats["total_uptime"] += uptime
+        
+        # Record this connection period (start, end)
+        stats["connection_periods"].append((stats["last_connect"], now))
+        
         if uptime > stats["longest_uptime"]:
             stats["longest_uptime"] = uptime
         
@@ -462,8 +465,24 @@ async def on_disconnect():
     stats["disconnects"] = [d for d in stats["disconnects"] if d > cutoff]
     stats["disconnect_count_24h"] = len(stats["disconnects"])
     
-    # Calculate uptime percentage (approximate, resets on first disconnect after 24h)
-    uptime_percent = (stats["total_uptime"] / SECONDS_PER_DAY * 100) if stats["total_uptime"] > 0 else 0
+    # Calculate total uptime in last 24 hours by summing connection periods
+    # We calculate BEFORE pruning so we include all periods that have any portion in last 24h
+    total_uptime_24h = 0.0
+    for start, end in stats["connection_periods"]:
+        # Clamp period to last 24 hours (in case start is before cutoff)
+        period_start = max(start, cutoff)
+        period_end = min(end, now)  # Ensure we don't count future time
+        if period_end > period_start:  # Only add if valid period
+            total_uptime_24h += (period_end - period_start)
+    
+    # Prune connection periods older than 24 hours (after calculation)
+    stats["connection_periods"] = [
+        (start, end) for start, end in stats["connection_periods"]
+        if end > cutoff  # Keep if end time is within last 24h
+    ]
+    
+    # Calculate uptime percentage (capped at 100%)
+    uptime_percent = min(100.0, (total_uptime_24h / SECONDS_PER_DAY * 100)) if total_uptime_24h > 0 else 0.0
     
     # Log disconnect with context
     if len(stats["disconnects"]) > 1:
