@@ -489,7 +489,8 @@ async def on_disconnect():
     # (Should never happen with proper pruning, but protects against bugs/edge cases)
     MAX_CONNECTION_PERIODS = 10000  # Max periods to track (e.g., ~416 disconnects/hour for 24h)
     if len(stats["connection_periods"]) > MAX_CONNECTION_PERIODS:
-        # Keep only the most recent periods (they're already sorted by end time)
+        # Sort by end time and keep only the most recent periods
+        stats["connection_periods"].sort(key=lambda x: x[1])  # Sort by end time
         stats["connection_periods"] = stats["connection_periods"][-MAX_CONNECTION_PERIODS:]
         logger.warning(f"Connection periods list exceeded safety limit, trimmed to {MAX_CONNECTION_PERIODS}")
     
