@@ -112,6 +112,7 @@ class SecretSantaCog(commands.Cog):
 
         self._lock = asyncio.Lock()
         self._backup_task: Optional[asyncio.Task] = None
+        self._scheduled_shuffle_task: Optional[asyncio.Task] = None
         self._unloaded = False  # Track if already unloaded
         
         self.logger.info("Secret Santa cog initialized with persistent reply buttons")
@@ -177,11 +178,7 @@ class SecretSantaCog(commands.Cog):
     
     def _truncate_text(self, text: Optional[str], max_length: int = 100) -> str:
         """Truncate text with ellipsis if needed. Handles None values."""
-        if not text:
-            return ""
-        if len(text) <= max_length:
-            return text
-        return f"{text[:max_length]}..."
+        return f"{text[:max_length]}..." if text and len(text) > max_length else (text or "")
     
     async def _require_event(self, inter: disnake.ApplicationCommandInteraction, custom_message: Optional[str] = None) -> Optional[dict]:
         """Require active event. Returns event if active, None otherwise (sends error response)"""
@@ -205,10 +202,7 @@ class SecretSantaCog(commands.Cog):
     
     def _find_santa_for_giftee(self, event: dict, giftee_id: str) -> Optional[int]:
         """Find the Santa (giver) for a given giftee (receiver). Returns santa_id as int, or None"""
-        for giver, receiver in event.get("assignments", {}).items():
-            if receiver == giftee_id:
-                return int(giver)
-        return None
+        return next((int(giver) for giver, receiver in event.get("assignments", {}).items() if receiver == giftee_id), None)
     
     async def _save_communication(self, event: dict, santa_id: str, giftee_id: str, msg_type: str, 
                                   message: str, rewritten: str):
@@ -313,6 +307,7 @@ class SecretSantaCog(commands.Cog):
     async def cog_load(self):
         """Initialize cog"""
         self._backup_task = asyncio.create_task(self._backup_loop())
+        self._scheduled_shuffle_task = asyncio.create_task(self._scheduled_shuffle_checker())
         self.logger.info("Secret Santa cog loaded")
         
         # Notify Discord about cog loading
@@ -353,6 +348,13 @@ class SecretSantaCog(commands.Cog):
                 except asyncio.CancelledError:
                     pass
             
+            if self._scheduled_shuffle_task:
+                self._scheduled_shuffle_task.cancel()
+                try:
+                    await self._scheduled_shuffle_task
+                except asyncio.CancelledError:
+                    pass
+            
             self.logger.info("Secret Santa cog unloaded")
         except Exception as e:
             self.logger.error(f"Async unload error: {e}")
@@ -370,6 +372,68 @@ class SecretSantaCog(commands.Cog):
                     self._save()
         except asyncio.CancelledError:
             pass
+
+    async def _scheduled_shuffle_checker(self):
+        """Background task that checks for scheduled shuffles and executes them"""
+        try:
+            while True:
+                await asyncio.sleep(60)  # Check every minute
+                
+                event = self._get_current_event()
+                if not event:
+                    continue
+                
+                # Check if there's a scheduled shuffle
+                scheduled_time = event.get("scheduled_shuffle_time")
+                if not scheduled_time:
+                    continue
+                
+                # Check if it's time to execute
+                current_time = time.time()
+                if current_time >= scheduled_time:
+                    # Time to shuffle! Get scheduler ID before clearing
+                    scheduler_id = event.get("scheduled_by_user_id")
+                    
+                    # Clear the schedule first to prevent double execution
+                    async with self._lock:
+                        event.pop("scheduled_shuffle_time", None)
+                        event.pop("scheduled_by_user_id", None)
+                        self._save()
+                    
+                    # Execute the shuffle (without interaction, so we pass None for inter)
+                    try:
+                        await self._execute_shuffle_internal(scheduler_id=scheduler_id)
+                        
+                        # Notify the scheduler
+                        if scheduler_id:
+                            try:
+                                user = await self.bot.fetch_user(scheduler_id)
+                                await user.send(
+                                    f"🎉 **Surprise!** Your scheduled Secret Santa shuffle just happened!\n\n"
+                                    f"All participants have been assigned and notified via DM.\n\n"
+                                    f"*You can check the results with `/ss participants` or `/ss view_gifts`*"
+                                )
+                            except Exception as e:
+                                self.logger.warning(f"Failed to notify scheduler {scheduler_id}: {e}")
+                    except Exception as e:
+                        self.logger.error(f"Error executing scheduled shuffle: {e}", exc_info=True)
+                        # Try to notify scheduler about the error
+                        if scheduler_id:
+                            try:
+                                user = await self.bot.fetch_user(scheduler_id)
+                                await user.send(
+                                    f"❌ **Scheduled shuffle failed!**\n\n"
+                                    f"An error occurred while executing the scheduled shuffle:\n"
+                                    f"`{str(e)}`\n\n"
+                                    f"Please run `/ss shuffle` manually to make assignments."
+                                )
+                            except Exception:
+                                pass
+                
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"Scheduled shuffle checker error: {e}", exc_info=True)
 
     async def _send_dm(self, user_id: int, message: str, view: disnake.ui.View = None) -> bool:
         """Send DM to user with optional view"""
@@ -511,18 +575,28 @@ class SecretSantaCog(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         announcement_message_id: str = commands.Param(description="Message ID for reactions"),
-        role_id: str = commands.Param(description="Role ID to assign participants")
+        role_id: Optional[str] = commands.Param(default=None, description="Optional: Role ID to assign participants"),
+        shuffle_date: Optional[str] = commands.Param(default=None, description="Optional: Date to auto-shuffle (e.g., '2025-12-25' or 'December 25, 2025')"),
+        shuffle_time: Optional[str] = commands.Param(default=None, description="Optional: Time to auto-shuffle (e.g., '14:30' or '2:30 PM')")
     ):
-        """Start new Secret Santa event"""
+        """Start new Secret Santa event (optionally schedule automatic shuffle)"""
         await inter.response.defer(ephemeral=True)
 
-        # Validate IDs
+        # Validate message ID
         try:
             msg_id = int(announcement_message_id)
-            role_id_int = int(role_id)
         except ValueError:
-            await inter.edit_original_response(content="❌ Invalid message or role ID")
+            await inter.edit_original_response(content="❌ Invalid message ID")
             return
+
+        # Validate role ID if provided
+        role_id_int = None
+        if role_id:
+            try:
+                role_id_int = int(role_id)
+            except ValueError:
+                await inter.edit_original_response(content="❌ Invalid role ID")
+                return
 
         # Check if event already active
         event = self.state.get("current_event")
@@ -593,6 +667,40 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ Message not found")
             return
 
+        # Parse and validate shuffle schedule if provided
+        scheduled_timestamp = None
+        if shuffle_date and shuffle_time:
+            scheduled_timestamp = self._parse_datetime(shuffle_date, shuffle_time)
+            if not scheduled_timestamp:
+                await inter.edit_original_response(
+                    content="❌ Invalid date or time format!\n\n"
+                           "**Date formats:**\n"
+                           "• `2025-12-25` (YYYY-MM-DD)\n"
+                           "• `12/25/2025` (MM/DD/YYYY)\n"
+                           "• `December 25, 2025`\n\n"
+                           "**Time formats:**\n"
+                           "• `14:30` (24-hour)\n"
+                           "• `2:30 PM` (12-hour)\n\n"
+                           "**Example:** `/ss start ... shuffle_date:2025-12-25 shuffle_time:2:30 PM`"
+                )
+                return
+            
+            # Check if scheduled time is in the past
+            current_time = time.time()
+            if scheduled_timestamp <= current_time:
+                await inter.edit_original_response(
+                    content="❌ Scheduled shuffle time must be in the future!\n\n"
+                           f"Current time: <t:{int(current_time)}:F>\n"
+                           f"Your time: <t:{int(scheduled_timestamp)}:F>"
+                )
+                return
+        elif shuffle_date or shuffle_time:
+            # One provided but not the other
+            await inter.edit_original_response(
+                content="❌ Both `shuffle_date` and `shuffle_time` must be provided together, or leave both empty for manual shuffle."
+            )
+            return
+
         # Create event (current_year already set above during safety check)
         new_event = {
             "active": True,
@@ -606,6 +714,11 @@ class SecretSantaCog(commands.Cog):
             "communications": {},
             "wishlists": {}  # User wishlists
         }
+        
+        # Add scheduled shuffle if provided
+        if scheduled_timestamp:
+            new_event["scheduled_shuffle_time"] = scheduled_timestamp
+            new_event["scheduled_by_user_id"] = inter.author.id
 
         async with self._lock:
             self.state["current_year"] = current_year
@@ -619,130 +732,131 @@ class SecretSantaCog(commands.Cog):
         results = await asyncio.gather(*dm_tasks, return_exceptions=True)
         successful = sum(1 for r in results if r is True)
 
+        # Build response message
         response_msg = (
             f"✅ Secret Santa {current_year} started!\n"
             f"• Participants: {len(participants)}\n"
-            f"• DMs sent: {successful}/{len(participants)}\n"
-            f"• Role ID: {role_id_int}"
+            f"• DMs sent: {successful}/{len(participants)}"
         )
+        if role_id_int:
+            response_msg += f"\n• Role ID: {role_id_int}"
+        
+        if scheduled_timestamp:
+            response_msg += f"\n\n📅 **Shuffle scheduled for:** <t:{int(scheduled_timestamp)}:F>\n"
+            response_msg += f"🎉 You'll be notified when it happens!"
         
         await inter.edit_original_response(response_msg)
         
         # Notify Discord log channel
+        log_msg = f"Secret Santa {current_year} event started by {inter.author.display_name} - {len(participants)} participants joined"
+        if scheduled_timestamp:
+            log_msg += f" (shuffle scheduled for <t:{int(scheduled_timestamp)}:F>)"
         if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log(
-                f"Secret Santa {current_year} event started by {inter.author.display_name} - {len(participants)} participants joined",
-                "SUCCESS"
-            )
+            await self.bot.send_to_discord_log(log_msg, "SUCCESS")
 
-    @ss_root.sub_command(name="shuffle", description="Assign Secret Santas")
-    @owner_check()
-    async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
-        """Make assignments with progressive year-based fallback"""
-        await inter.response.defer(ephemeral=True)
-
-        event = await self._require_event(inter, "❌ No active event - use `/ss start` to create one first")
+    async def _execute_shuffle_internal(self, inter: Optional[disnake.ApplicationCommandInteraction] = None, scheduler_id: Optional[int] = None) -> tuple[bool, Optional[str]]:
+        """
+        Internal method to execute shuffle logic. Can be called from manual command or scheduled task.
+        
+        Returns:
+            Tuple of (success: bool, error_message: Optional[str])
+        """
+        event = self._get_current_event()
         if not event:
-            return
+            error_msg = "❌ No active event - use `/ss start` to create one first"
+            if inter:
+                await inter.edit_original_response(content=error_msg)
+            return False, error_msg
 
         # Convert participant IDs to integers
         participants = [int(uid) for uid in event["participants"]]
 
         if len(participants) < 2:
-            await inter.edit_original_response(content="❌ Need at least 2 participants")
-            return
+            error_msg = "❌ Need at least 2 participants"
+            if inter:
+                await inter.edit_original_response(content=error_msg)
+            return False, error_msg
+
+        # Get guild for role assignment (if inter provided, use it; otherwise try to get from event)
+        guild = None
+        if inter:
+            guild = inter.guild
+        elif event.get("guild_id"):
+            guild = self.bot.get_guild(event["guild_id"])
 
         # HISTORY LOADING: Load all past Secret Santa events from archive files
-        # This builds a map of who has given to who in previous years
-        # Example: history = {"huntoon": [trolle_2023, trolle_2024], "trolle": [squibble_2023, jkm_2024]}
         history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[], logger=self.logger)
         
         self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
         self.logger.info(f"Available history years: {available_years}")
         
-        # PROGRESSIVE FALLBACK SYSTEM:
-        # The algorithm tries to respect ALL history, but if that makes assignments impossible,
-        # it progressively removes older years until assignments become possible.
-        # 
-        # Try 1: Use ALL history (2021, 2022, 2023, 2024) - respect everything
-        # Try 2: Exclude 2021 only - allow repeats from oldest year
-        # Try 3: Exclude 2021, 2022 - allow repeats from 2 oldest years
-        # Try 4: Exclude 2021, 2022, 2023 - only respect most recent year
-        # Try 5: No history (fresh start) - if all else fails
-        # 
-        # This ensures assignments ALWAYS succeed, even after many years of same participants.
-        # In practice, with participant turnover, fallback is rarely (if ever) needed.
+        # PROGRESSIVE FALLBACK SYSTEM
         exclude_years = []
         assignments = None
         fallback_used = False
         
         for attempt in range(len(available_years) + 1):
             if attempt > 0:
-                # Exclude oldest year(s) progressively (2021 first, then 2022, etc.)
                 exclude_years = available_years[:attempt]
                 fallback_used = True
                 self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
-                
-                # Reload history without excluded years
                 history, _ = load_history_from_archives(ARCHIVE_DIR, exclude_years=exclude_years, logger=self.logger)
                 
-                # Inform user about fallback
-                years_str = ", ".join(map(str, exclude_years))
-                await inter.edit_original_response(
-                    content=f"⚠️ Initial assignment difficult... trying fallback (excluding {years_str})..."
-                )
+                if inter:
+                    years_str = ", ".join(map(str, exclude_years))
+                    await inter.edit_original_response(
+                        content=f"⚠️ Initial assignment difficult... trying fallback (excluding {years_str})..."
+                    )
             
-            # Pre-validate assignment possibility
             validation_error = validate_assignment_possibility(participants, history)
             if validation_error:
                 if attempt == len(available_years):
-                    # Last attempt failed
-                    await inter.edit_original_response(content=f"❌ {validation_error}")
-                    
+                    error_msg = f"❌ {validation_error}"
+                    if inter:
+                        await inter.edit_original_response(content=error_msg)
                     if hasattr(self.bot, 'send_to_discord_log'):
                         await self.bot.send_to_discord_log(
                             f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
                             "ERROR"
                         )
-                    return
-                # Try next fallback
+                    return False, error_msg
                 continue
             
-            # Try to make assignments
             try:
                 assignments = make_assignments(participants, history)
-                # Success!
                 break
             except ValueError as e:
                 if attempt == len(available_years):
-                    # Last attempt failed
-                    await inter.edit_original_response(content=f"❌ Assignment failed: {e}")
-                    
+                    error_msg = f"❌ Assignment failed: {e}"
+                    if inter:
+                        await inter.edit_original_response(content=error_msg)
                     if hasattr(self.bot, 'send_to_discord_log'):
                         await self.bot.send_to_discord_log(
                             f"Secret Santa assignment failed even with all fallbacks - {e}",
                             "ERROR"
                         )
-                    return
-                # Try next fallback
+                    return False, error_msg
                 continue
         
         if not assignments:
-            await inter.edit_original_response(content="❌ Assignment failed unexpectedly")
-            return
+            error_msg = "❌ Assignment failed unexpectedly"
+            if inter:
+                await inter.edit_original_response(content=error_msg)
+            return False, error_msg
 
-        # Assign role to participants
-        role = inter.guild.get_role(event["role_id"])
-        if role and inter.guild.me.guild_permissions.manage_roles:
-            for user_id in participants:
-                try:
-                    member = inter.guild.get_member(user_id)
-                    if member and role not in member.roles:
-                        await member.add_roles(role, reason="Secret Santa participant")
-                except Exception:
-                    pass
+        # Assign role to participants (if role_id was provided)
+        if guild and event.get("role_id"):
+            role = guild.get_role(event["role_id"])
+            if role and guild.me.guild_permissions.manage_roles:
+                for user_id in participants:
+                    try:
+                        member = guild.get_member(user_id)
+                        if member and role not in member.roles:
+                            await member.add_roles(role, reason="Secret Santa participant")
+                    except Exception:
+                        pass
 
-        # Send assignment DMs - Santa knows who they're gifting to!
+        # Send assignment DMs
         dm_tasks = []
         for giver, receiver in assignments.items():
             receiver_name = event["participants"].get(str(receiver), f"User {receiver}")
@@ -752,11 +866,12 @@ class SecretSantaCog(commands.Cog):
         await asyncio.gather(*dm_tasks)
 
         # Save assignments
-        # Note: make_assignments already performs validation internally
-        # Convert both keys (givers) and values (receivers) to strings for consistency
         async with self._lock:
             event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
             event["join_closed"] = True
+            # Clear any scheduled shuffle since we just executed
+            event.pop("scheduled_shuffle_time", None)
+            event.pop("scheduled_by_user_id", None)
             self._save()
 
         # Build success message
@@ -770,14 +885,100 @@ class SecretSantaCog(commands.Cog):
             response_msg += f"\n⚠️ **Fallback used:** Excluded history from {years_str} to make assignments possible\n"
             response_msg += f"💡 Consider having Secret Santa more frequently to avoid this!"
         
-        await inter.edit_original_response(content=response_msg)
+        if inter:
+            await inter.edit_original_response(content=response_msg)
         
         # Notify Discord log channel
+        executor_name = inter.author.display_name if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
         if hasattr(self.bot, 'send_to_discord_log'):
-            log_msg = f"Secret Santa assignments completed by {inter.author.display_name} - {len(assignments)} pairs created"
+            log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs created"
             if fallback_used:
                 log_msg += f" (fallback: excluded years {', '.join(map(str, exclude_years))})"
             await self.bot.send_to_discord_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")
+        
+        return True, None
+
+    def _parse_datetime(self, date_str: str, time_str: str) -> Optional[float]:
+        """
+        Parse date and time strings into a Unix timestamp.
+        
+        Supports intuitive formats:
+        - Date: "YYYY-MM-DD", "MM/DD/YYYY", "December 25, 2025"
+        - Time: "HH:MM" (24-hour), "HH:MM AM/PM" (12-hour)
+        
+        Returns:
+            Unix timestamp (float) or None if parsing fails
+        """
+        try:
+            # Try common date formats
+            date_obj = None
+            date_formats = [
+                "%Y-%m-%d",      # 2025-12-25
+                "%m/%d/%Y",      # 12/25/2025
+                "%B %d, %Y",     # December 25, 2025
+                "%b %d, %Y",     # Dec 25, 2025
+                "%d %B %Y",      # 25 December 2025
+                "%d %b %Y",      # 25 Dec 2025
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    date_obj = dt.datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            
+            if not date_obj:
+                return None
+            
+            # Try common time formats
+            time_obj = None
+            time_formats = [
+                "%H:%M",         # 14:30 (24-hour)
+                "%I:%M %p",      # 02:30 PM (12-hour)
+                "%I:%M%p",       # 02:30PM (12-hour, no space)
+                "%H:%M:%S",      # 14:30:00 (24-hour with seconds)
+            ]
+            
+            for fmt in time_formats:
+                try:
+                    time_obj = dt.datetime.strptime(time_str, fmt).time()
+                    break
+                except ValueError:
+                    continue
+            
+            if not time_obj:
+                return None
+            
+            # Combine date and time
+            datetime_obj = dt.datetime.combine(date_obj, time_obj)
+            
+            # Convert to Unix timestamp
+            return datetime_obj.timestamp()
+            
+        except Exception as e:
+            self.logger.debug(f"Date/time parsing error: {e}")
+            return None
+
+    @ss_root.sub_command(name="shuffle", description="🔧 Manually assign Secret Santas (emergency/fallback)")
+    @owner_check()
+    async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
+        """Make assignments manually (use /ss start with shuffle_date/shuffle_time for automatic execution)"""
+        await inter.response.defer(ephemeral=True)
+        
+        # Check if there's a scheduled shuffle and cancel it
+        event = self._get_current_event()
+        if event and event.get("scheduled_shuffle_time"):
+            async with self._lock:
+                event.pop("scheduled_shuffle_time", None)
+                event.pop("scheduled_by_user_id", None)
+                self._save()
+            self.logger.info(f"Manual shuffle cancelled scheduled shuffle (was scheduled for {event.get('scheduled_shuffle_time')})")
+        
+        success, error = await self._execute_shuffle_internal(inter=inter)
+        if not success and error:
+            # Error already sent to inter
+            pass
 
     @ss_root.sub_command(name="stop", description="Stop the Secret Santa event")
     @mod_check()

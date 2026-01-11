@@ -249,7 +249,17 @@ def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
     """
     Archive event data in unified format with overwrite protection.
     
-    If archive already exists, saves to timestamped backup instead.
+    If archive already exists for this year, saves to timestamped backup
+    instead to prevent accidental data loss. This allows archiving multiple
+    times safely (e.g., if event is restarted or needs correction).
+    
+    Args:
+        event: Event data dictionary (participants, assignments, gifts, etc.)
+        year: Year of the event (4-digit integer)
+        logger: Optional logger for status messages
+    
+    Returns:
+        Filename of the created archive (either {year}.json or {year}_backup_TIMESTAMP.json)
     """
     archive_data = {
         "year": year,

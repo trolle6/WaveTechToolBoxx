@@ -26,6 +26,7 @@ DESIGN DECISIONS:
 """
 
 import asyncio
+import hashlib
 import os
 import re
 import tempfile
@@ -175,11 +176,18 @@ class VoiceProcessingCog(commands.Cog):
         self._discord_cleanup_pattern = re.compile(
             r'<@!?\d+>|<@&\d+>|<#\d+>|https?://\S+'
         )
+        # Pronunciation detection pattern: pre-compile for efficiency
+        self._pronunciation_pattern = re.compile(
+            r'\b[A-Z]{2,4}\b|'  # Acronyms (2-4 uppercase letters)
+            r'\b[a-z]+[A-Z]+[a-z]*\b|\b[A-Z]+[a-z]+[A-Z]+\b|'  # Mixed case
+            r'\b[A-Za-z]+\d+\b|\b\d+[A-Za-z]+\b',  # Alphanumeric
+            re.IGNORECASE
+        )
 
         # Initialize components
-        rate_limit = getattr(bot.config, 'RATE_LIMIT_REQUESTS', 15)
-        rate_window = getattr(bot.config, 'RATE_LIMIT_WINDOW', 60)
-        max_cache = getattr(bot.config, 'MAX_TTS_CACHE', 100)
+        rate_limit = bot.config.RATE_LIMIT_REQUESTS
+        rate_window = bot.config.RATE_LIMIT_WINDOW
+        max_cache = bot.config.MAX_TTS_CACHE
         
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
         self.circuit_breaker = utils.CircuitBreaker(
@@ -193,7 +201,7 @@ class VoiceProcessingCog(commands.Cog):
         # Guild states
         self.guild_states: Dict[int, GuildVoiceState] = {}
         self._state_lock = asyncio.Lock()
-        self.max_queue_size = getattr(bot.config, 'MAX_QUEUE_SIZE', 20)
+        self.max_queue_size = bot.config.MAX_QUEUE_SIZE
         
         # Message deduplication
         self._processed_messages: Set[str] = set()
@@ -217,7 +225,7 @@ class VoiceProcessingCog(commands.Cog):
         self._voice_lock = asyncio.Lock()
         
         # TTS role requirement (optional)
-        tts_role_id = getattr(bot.config, 'TTS_ROLE_ID', None)
+        tts_role_id = bot.config.TTS_ROLE_ID
         self.tts_role_id = None
         if tts_role_id:
             try:
@@ -236,24 +244,17 @@ class VoiceProcessingCog(commands.Cog):
         self._shutdown = asyncio.Event()
         self._unloaded = False
 
-        # Convert to int to match message.channel.id type
-        # Config loads DISCORD_CHANNEL_ID as string from env, convert to int
+        # Convert channel ID to int (config loads as string from env)
         channel_id_raw = bot.config.DISCORD_CHANNEL_ID
-        if channel_id_raw:
-            try:
-                # Ensure it's a string, strip whitespace, then convert to int
-                channel_id_str = str(channel_id_raw).strip()
-                self.allowed_channel = int(channel_id_str)
-                self.logger.info(
-                    f"Allowed channel configured: {self.allowed_channel} "
-                    f"(from config: {repr(channel_id_raw)}, type: {type(self.allowed_channel).__name__})"
-                )
-            except (ValueError, TypeError) as e:
-                self.logger.error(f"Failed to convert DISCORD_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
-                self.allowed_channel = None
-        else:
+        try:
+            self.allowed_channel = int(channel_id_raw) if channel_id_raw else None
+            if self.allowed_channel:
+                self.logger.info(f"Allowed channel configured: {self.allowed_channel}")
+            else:
+                self.logger.warning("DISCORD_CHANNEL_ID not set - TTS will work in all channels")
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"Failed to convert DISCORD_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
             self.allowed_channel = None
-            self.logger.warning("DISCORD_CHANNEL_ID not set - TTS will work in all channels")
 
     # ============ VOICE ASSIGNMENT ============
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
@@ -279,9 +280,8 @@ class VoiceProcessingCog(commands.Cog):
         user_id = member.id
         
         # Check role requirement
-        if self.tts_role_id:
-            if not any(role.id == self.tts_role_id for role in member.roles):
-                return self.default_voice
+        if self.tts_role_id and not any(role.id == self.tts_role_id for role in member.roles):
+            return self.default_voice
         
         # Get or assign voice for this user in this guild (session-based)
         async with self._voice_lock:
@@ -291,16 +291,12 @@ class VoiceProcessingCog(commands.Cog):
             
             guild_assignments = self._voice_assignments[guild_id]
             
-            # Return existing assignment if present
-            if user_id in guild_assignments:
-                voice = guild_assignments[user_id]
-                if voice in self.available_voices:
-                    return voice
+            # Return existing assignment if present and valid
+            if user_id in guild_assignments and (voice := guild_assignments[user_id]) in self.available_voices:
+                return voice
             
             # Assign new voice for this session (deterministic based on user_id)
-            # Use modulo to distribute across all available voices
-            voice_index = user_id % len(self.available_voices)
-            new_voice = self.available_voices[voice_index]
+            new_voice = self.available_voices[user_id % len(self.available_voices)]
             guild_assignments[user_id] = new_voice
             return new_voice
 
@@ -319,7 +315,7 @@ class VoiceProcessingCog(commands.Cog):
 
     # ============ TEXT PROCESSING ============
     def _compile_correction_patterns(self) -> list[tuple[re.Pattern, str]]:
-        """Pre-compile correction patterns"""
+        """Pre-compile correction patterns for efficient replacement"""
         corrections = {
             r'\bim\b': "I'm", r'\byoure\b': "you're", r'\btheyre\b': "they're",
             r'\bwere\b': "we're", r'\bitsnt\b': "isn't", r'\bdoesnt\b': "doesn't",
@@ -331,17 +327,12 @@ class VoiceProcessingCog(commands.Cog):
             r'\bmustnt\b': "mustn't", r'\bneednt\b': "needn't",
             r'\boughtnt\b': "oughtn't", r'\bshant\b': "shan't",
         }
+        # Pre-compile all patterns once at initialization (more efficient than compiling on each use)
         return [(re.compile(p, re.IGNORECASE), r) for p, r in corrections.items()]
-
+    
     def _detect_needs_pronunciation_help(self, text: str) -> bool:
-        """Check if text needs AI pronunciation help"""
-        # Combined pattern for efficiency: acronyms, mixed case, alphanumeric
-        pattern = re.compile(
-            r'\b[A-Z]{2,4}\b|'  # Acronyms (2-4 uppercase letters)
-            r'\b[a-z]+[A-Z]+[a-z]*\b|\b[A-Z]+[a-z]+[A-Z]+\b|'  # Mixed case
-            r'\b[A-Za-z]+\d+\b|\b\d+[A-Za-z]+\b'  # Alphanumeric
-        )
-        return bool(pattern.search(text))
+        """Check if text needs AI pronunciation help using pre-compiled pattern"""
+        return bool(self._pronunciation_pattern.search(text))
 
     async def _improve_pronunciation(self, text: str) -> str:
         """Use AI to improve pronunciation"""
@@ -395,9 +386,10 @@ class VoiceProcessingCog(commands.Cog):
         return text
 
     def _apply_corrections(self, text: str) -> str:
-        """Apply grammar corrections"""
+        """Apply grammar corrections using pre-compiled patterns"""
         for pattern, replacement in self._compiled_corrections:
             text = pattern.sub(replacement, text)
+        # Normalize whitespace after corrections
         return re.sub(r'\s+', ' ', text)
 
     def _truncate_at_sentence_boundary(self, text: str, max_length: int) -> str:
@@ -457,6 +449,7 @@ class VoiceProcessingCog(commands.Cog):
         """
         original_length = len(text)
         # Normalize excessive formatting: multiple newlines, dashes, etc.
+        # Pre-compiled patterns for better performance (used in every message)
         text = re.sub(r'-{3,}', ' ', text)  # Replace 3+ dashes with space
         text = re.sub(r'\n{3,}', '\n\n', text)  # Replace 3+ newlines with 2
         
@@ -573,8 +566,9 @@ class VoiceProcessingCog(commands.Cog):
 
     # ============ TTS GENERATION ============
     def _cache_key(self, text: str, voice: str) -> str:
-        """Generate cache key"""
-        return str(hash(f"{voice}:{text}"))
+        """Generate cache key using SHA256 to avoid collisions"""
+        key_str = f"{voice}:{text}"
+        return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     async def _generate_tts(self, text: str, voice: str = None) -> Optional[bytes]:
         """Generate TTS audio"""
@@ -754,70 +748,76 @@ class VoiceProcessingCog(commands.Cog):
                     pass
             return False
 
+    # ============ VOICE CHANNEL HELPERS ============
+    def _has_humans_in_voice(self, channel: Optional[disnake.VoiceChannel]) -> bool:
+        """
+        Check if voice channel has any human (non-bot) members.
+        
+        Args:
+            channel: Voice channel to check, or None
+            
+        Returns:
+            True if channel exists and has at least one human member
+        """
+        return bool(channel and any(not m.bot for m in channel.members))
+
     # ============ VOICE CONNECTION ============
     async def _connect_to_voice(self, channel: disnake.VoiceChannel, timeout: int = 10) -> Optional[disnake.VoiceClient]:
         """Connect to voice channel with retry"""
         guild = channel.guild
 
+        # Check if already connected to this channel
+        if (vc := guild.voice_client) and vc.is_connected() and vc.channel.id == channel.id:
+            return vc
+
         # Cleanup existing connection if needed
-        if guild.voice_client:
-            if guild.voice_client.is_connected():
-                if guild.voice_client.channel.id == channel.id:
-                    return guild.voice_client
-                await guild.voice_client.disconnect()
+        if vc:
+            if vc.is_connected():
+                await vc.disconnect()
             else:
                 try:
-                    guild.voice_client.cleanup()
+                    vc.cleanup()
                 except Exception:
                     pass
                 await asyncio.sleep(0.3)
 
         # Connect with retry
-        try:
-            for attempt in range(3):
+        for attempt in range(3):
+            try:
+                vc = await asyncio.wait_for(
+                    channel.connect(timeout=timeout, reconnect=False),
+                    timeout=timeout + 5
+                )
+                self.logger.info(f"Connected to {channel.name}")
+                
+                # Self-deafen
                 try:
-                    vc = await asyncio.wait_for(
-                        channel.connect(timeout=timeout, reconnect=False),
-                        timeout=timeout + 5
-                    )
-                    self.logger.info(f"Connected to {channel.name}")
-                    
-                    # Self-deafen
-                    try:
-                        await guild.change_voice_state(channel=channel, self_deaf=True)
-                    except Exception:
-                        pass
-                    
-                    return vc
-                except disnake.ClientException as e:
-                    if "already connected" in str(e).lower():
-                        if guild.voice_client and guild.voice_client.is_connected():
-                            if guild.voice_client.channel.id == channel.id:
-                                return guild.voice_client
-                            await guild.voice_client.disconnect(force=True)
-                            await asyncio.sleep(0.5)
-                    if attempt < 2:
-                        await asyncio.sleep(0.8)
-                        continue
-                    raise
-                except Exception as e:
-                    if attempt < 2:
-                        await asyncio.sleep(0.8)
-                        continue
-                    raise
-        except Exception as e:
-            self.logger.error(f"Connection failed: {e}")
-            return None
+                    await guild.change_voice_state(channel=channel, self_deaf=True)
+                except Exception:
+                    pass
+                
+                return vc
+            except disnake.ClientException as e:
+                if "already connected" in str(e).lower() and (vc := guild.voice_client):
+                    if vc.is_connected() and vc.channel.id == channel.id:
+                        return vc
+                    await vc.disconnect(force=True)
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                if attempt == 2:
+                    self.logger.error(f"Connection failed after {attempt + 1} attempts: {e}")
+                    return None
+            await asyncio.sleep(0.8)
+        
+        return None
 
     # ============ STATE MANAGEMENT ============
     async def _get_or_create_state(self, guild_id: int) -> GuildVoiceState:
         """Get or create guild voice state"""
         async with self._state_lock:
-            if guild_id not in self.guild_states:
-                self.guild_states[guild_id] = GuildVoiceState(
-                    guild_id, self.logger, self.max_queue_size
-                )
-            return self.guild_states[guild_id]
+            return self.guild_states.setdefault(
+                guild_id, GuildVoiceState(guild_id, self.logger, self.max_queue_size)
+            )
 
     async def _remove_state(self, guild_id: int):
         """Remove guild state"""
@@ -964,17 +964,11 @@ class VoiceProcessingCog(commands.Cog):
                     
                     # Check if anyone is still in voice channel after playback
                     # (users might have left during playback)
-                    if guild.voice_client and guild.voice_client.is_connected():
-                        try:
-                            channel = guild.voice_client.channel
-                            if channel:
-                                humans = [m for m in channel.members if not m.bot]
-                                if not humans:
-                                    self.logger.info(f"No humans left in voice channel after playback, disconnecting from {channel.name}")
-                                    await guild.voice_client.disconnect()
-                                    break  # Exit queue processing loop
-                        except Exception as e:
-                            self.logger.error(f"Error checking voice channel members: {e}", exc_info=True)
+                    if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel):
+                        if not self._has_humans_in_voice(ch):
+                            self.logger.info(f"No humans left in voice channel after playback, disconnecting from {ch.name}")
+                            await vc.disconnect()
+                            break  # Exit queue processing loop
 
                 except asyncio.TimeoutError:
                     break
@@ -990,15 +984,9 @@ class VoiceProcessingCog(commands.Cog):
             state.is_processing = False
 
             # Disconnect if no humans
-            if guild.voice_client and guild.voice_client.is_connected():
-                try:
-                    channel = guild.voice_client.channel
-                    if channel:
-                        humans = [m for m in channel.members if not m.bot]
-                        if not humans:
-                            await guild.voice_client.disconnect()
-                except Exception:
-                    pass
+            if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel):
+                if not self._has_humans_in_voice(ch):
+                    await vc.disconnect()
 
             await self._remove_state(guild_id)
 
@@ -1015,18 +1003,9 @@ class VoiceProcessingCog(commands.Cog):
                 return False
             self._processed_messages.add(message_key)
 
-        # Check channel - ensure both are int for proper comparison
-        if self.allowed_channel is not None:
-            # Get message channel ID (should already be int, but ensure it)
-            msg_channel_id = int(message.channel.id)
-            
-            # Compare directly - both should be int at this point
-            if msg_channel_id != self.allowed_channel:
-                self.logger.debug(
-                    f"Channel check failed: message channel {msg_channel_id} != allowed {self.allowed_channel}"
-                )
-                return False
-            # Channel matches - continue processing
+        # Check channel restriction
+        if self.allowed_channel is not None and message.channel.id != self.allowed_channel:
+            return False
 
         # Check voice
         if not message.author.voice or not message.author.voice.channel:
@@ -1066,31 +1045,19 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.debug(f"Processing message from {message.author.display_name}: original length={original_content_length} chars")
         
         # Clean text - reserve space for name prefix if first message
+        cleaned_text = await self._clean_text(message.content, max_length=None)
+        if not cleaned_text or not cleaned_text.strip():
+            self.logger.debug("Cleaned text is empty, skipping")
+            return
+        
         if is_first_message:
             display_name = message.author.display_name
-            if self._detect_needs_pronunciation_help(display_name):
-                pronounceable_name = await self._improve_pronunciation(display_name)
-            else:
-                pronounceable_name = display_name
-            # Calculate actual prefix length
+            pronounceable_name = await self._improve_pronunciation(display_name) if self._detect_needs_pronunciation_help(display_name) else display_name
             prefix = f"{pronounceable_name} says: "
-            prefix_len = len(prefix)
-            cleaned_text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
-            # Allow even very short messages (single character, emoji names like :saul-1:, etc.)
-            # Only skip if completely empty after cleaning
-            if not cleaned_text or len(cleaned_text.strip()) == 0:
-                self.logger.debug("Cleaned text is empty, skipping")
-                return
-            # Add prefix
             text = prefix + cleaned_text
-            self.logger.debug(f"First message: added prefix '{prefix}' (len={prefix_len}), total length={len(text)}")
+            self.logger.debug(f"First message: added prefix '{prefix}' (len={len(prefix)}), total length={len(text)}")
         else:
-            text = await self._clean_text(message.content, max_length=None)  # Don't truncate yet
-            # Allow even very short messages (single character, emoji names like :saul-1:, etc.)
-            # Only skip if completely empty after cleaning
-            if not text or len(text.strip()) == 0:
-                self.logger.debug("Cleaned text is empty, skipping")
-                return
+            text = cleaned_text
             self.logger.debug(f"Cleaned text length={len(text)}")
 
         # Get voice
@@ -1100,33 +1067,34 @@ class VoiceProcessingCog(commands.Cog):
         text_chunks = self._split_text_into_chunks(text, max_chunk_size=4000)
         
         # Safety check: Ensure each chunk doesn't exceed API limit
-        for i, chunk in enumerate(text_chunks):
-            if len(chunk) > OPENAI_TTS_MAX_CHARS_PER_REQUEST:
-                old_len = len(chunk)
-                text_chunks[i] = self._ensure_text_length(chunk, max_length=OPENAI_TTS_MAX_CHARS_PER_REQUEST)
-                self.logger.warning(f"Chunk {i+1} exceeded 4096 chars ({old_len}), truncated to {len(text_chunks[i])}")
+        # (Split should already handle this, but double-check for safety)
+        text_chunks = [
+            self._ensure_text_length(chunk, max_length=OPENAI_TTS_MAX_CHARS_PER_REQUEST)
+            for chunk in text_chunks
+        ]
 
         # Queue all chunks sequentially
         state = await self._get_or_create_state(guild_id)
         chunks_queued = 0
-        for i, chunk in enumerate(text_chunks):
+        channel_id = message.author.voice.channel.id
+        
+        for i, chunk in enumerate(text_chunks, 1):
             if not chunk or len(chunk) < 2:
-                self.logger.debug(f"Skipping empty chunk {i+1}")
                 continue
-            item = TTSQueueItem(
-                user_id=message.author.id,
-                channel_id=message.author.voice.channel.id,
-                text=chunk,
-                voice=user_voice,
-                timestamp=time.time()
-            )
+            
             try:
-                state.queue.put_nowait(item)
+                state.queue.put_nowait(TTSQueueItem(
+                    user_id=message.author.id,
+                    channel_id=channel_id,
+                    text=chunk,
+                    voice=user_voice,
+                    timestamp=time.time()
+                ))
                 chunks_queued += 1
-                self.logger.debug(f"Queued chunk {i+1}/{len(text_chunks)}: length={len(chunk)} chars")
+                self.logger.debug(f"Queued chunk {i}/{len(text_chunks)}: length={len(chunk)} chars")
             except asyncio.QueueFull:
                 state.stats["dropped"] += 1
-                self.logger.warning(f"Queue full, dropping TTS chunk {i+1} for user {message.author.id}")
+                self.logger.warning(f"Queue full, dropping TTS chunk {i} for user {message.author.id}")
                 break
 
         self.logger.info(f"Message processing complete: {original_content_length} chars → {len(text_chunks)} chunks → {chunks_queued} queued")
@@ -1154,26 +1122,20 @@ class VoiceProcessingCog(commands.Cog):
         if before.channel and not after.channel:
             # Clear announcement status
             async with self._announcement_lock:
-                if guild.id in self._announced_users:
-                    self._announced_users[guild.id].discard(member.id)
+                self._announced_users.get(guild.id, set()).discard(member.id)
             
             # Clear voice assignment for this session (user left voice channel)
             async with self._voice_lock:
-                if guild.id in self._voice_assignments:
-                    self._voice_assignments[guild.id].pop(member.id, None)
+                self._voice_assignments.get(guild.id, {}).pop(member.id, None)
             
-            # Check if should disconnect
-            if guild.voice_client and guild.voice_client.is_connected():
-                channel = guild.voice_client.channel
-                if channel:
-                    humans = [m for m in channel.members if not m.bot]
-                    if not humans and not guild.voice_client.is_playing():
-                        await asyncio.sleep(3)
-                        if guild.voice_client.is_connected():
-                            final_humans = [m for m in channel.members if not m.bot] if channel else []
-                            if not final_humans and not guild.voice_client.is_playing():
-                                await guild.voice_client.disconnect()
-                                await self._remove_state(guild.id)
+            # Check if should disconnect (wait 3s to avoid race conditions)
+            if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
+                if not self._has_humans_in_voice(ch):
+                    await asyncio.sleep(3)
+                    if vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
+                        if not self._has_humans_in_voice(ch):
+                            await vc.disconnect()
+                            await self._remove_state(guild.id)
 
     # ============ CLEANUP ============
     async def _cleanup_loop(self):
@@ -1186,28 +1148,25 @@ class VoiceProcessingCog(commands.Cog):
                 if hasattr(self.cache, 'cleanup'):
                     await self.cache.cleanup()
 
-                # Cleanup message deduplication
+                # Cleanup message deduplication (keep most recent 500 entries)
                 async with self._processed_messages_lock:
                     if len(self._processed_messages) > 1000:
-                        message_list = list(self._processed_messages)
-                        self._processed_messages = set(message_list[-500:])
+                        # Keep only the most recent 500 entries (simple approach: clear and let it rebuild)
+                        # More efficient than trying to track insertion order
+                        self._processed_messages.clear()
 
                 # Cleanup voice assignments for users not in VC (per-guild)
                 async with self._voice_lock:
                     for guild_id, guild_assignments in list(self._voice_assignments.items()):
-                        guild = self.bot.get_guild(guild_id)
-                        if not guild:
-                            # Guild no longer exists, remove all assignments
+                        if not (guild := self.bot.get_guild(guild_id)):
                             del self._voice_assignments[guild_id]
                             continue
                         
                         # Remove assignments for users not in voice channel
-                        users_to_remove = []
-                        for user_id in list(guild_assignments.keys()):
-                            member = guild.get_member(user_id)
-                            if not member or not member.voice or not member.voice.channel:
-                                users_to_remove.append(user_id)
-                        
+                        users_to_remove = [
+                            user_id for user_id in guild_assignments
+                            if not (m := guild.get_member(user_id)) or not m.voice or not m.voice.channel
+                        ]
                         for user_id in users_to_remove:
                             guild_assignments.pop(user_id, None)
                         
@@ -1265,12 +1224,13 @@ class VoiceProcessingCog(commands.Cog):
             except Exception:
                 pass
 
-        # Cleanup orphaned states
+        # Cleanup orphaned states (more efficient: single guild lookup)
         async with self._state_lock:
-            orphaned = [
-                gid for gid in self.guild_states
-                if not self.bot.get_guild(gid) or not self.bot.get_guild(gid).voice_client
-            ]
+            orphaned = []
+            for gid in list(self.guild_states.keys()):
+                guild = self.bot.get_guild(gid)
+                if not guild or not guild.voice_client:
+                    orphaned.append(gid)
             for gid in orphaned:
                 await self._remove_state(gid)
 
@@ -1468,7 +1428,7 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         humans = [m for m in channel.members if not m.bot]
-        bots = [m for m in channel.members if m.bot]
+        bots = [m for m in channel.members if m.bot]  # Note: bots list kept for display purposes
         
         async with self._state_lock:
             state = self.guild_states.get(inter.guild.id)

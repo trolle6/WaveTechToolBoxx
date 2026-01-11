@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Generic, Optional, TypeVar
 
@@ -197,21 +197,22 @@ class LRUCache(Generic[T]):
     """
     LRU (Least Recently Used) Cache with TTL (Time-To-Live) support.
     
-    Automatically evicts least recently accessed entries when cache is full,
-    and expires entries older than TTL. Tracks hit/miss statistics.
+    Uses OrderedDict for O(1) LRU eviction. Automatically evicts least recently
+    accessed entries when cache is full, and expires entries older than TTL.
+    Tracks hit/miss statistics.
     
     Attributes:
         max_size: Maximum number of entries before eviction
         ttl: Time-to-live in seconds (entries older than this are expired)
-        _cache: Dict mapping keys to (value, creation_timestamp) tuples
-        _access_times: Dict mapping keys to last access timestamps (for LRU eviction)
+        _cache: OrderedDict mapping keys to (value, creation_timestamp) tuples
+            Order reflects access pattern: most recent at end, oldest at beginning
     """
 
     def __init__(self, max_size: int = 100, ttl: int = 3600):
         self.max_size = max_size
         self.ttl = ttl
-        self._cache: dict[str, tuple[T, float]] = {}  # key -> (value, creation_timestamp)
-        self._access_times: dict[str, float] = {}  # key -> last_access_timestamp
+        # OrderedDict: end = most recent, beginning = least recent (for O(1) eviction)
+        self._cache: OrderedDict[str, tuple[T, float]] = OrderedDict()
         self._hits = 0
         self._misses = 0
         self._lock = asyncio.Lock()
@@ -220,7 +221,7 @@ class LRUCache(Generic[T]):
         """
         Get value from cache.
         
-        Checks TTL expiration and updates access time for LRU tracking.
+        Checks TTL expiration and moves key to end (most recent) for LRU tracking.
         Returns None if key doesn't exist or is expired.
         
         Args:
@@ -235,13 +236,13 @@ class LRUCache(Generic[T]):
                 now = time.time()
                 # Check if entry is still within TTL
                 if now - timestamp < self.ttl:
-                    self._access_times[key] = now  # Update access time for LRU
+                    # Move to end (most recent) - O(1) operation
+                    self._cache.move_to_end(key)
                     self._hits += 1
                     return value
                 else:
                     # Entry expired - remove it
                     del self._cache[key]
-                    del self._access_times[key]
 
             self._misses += 1
             return None
@@ -250,24 +251,27 @@ class LRUCache(Generic[T]):
         """
         Set value in cache.
         
-        Evicts least recently used entry if cache is full and key is new.
-        Updates both cache and access times.
+        Evicts least recently used entry (beginning of OrderedDict) if cache is full.
+        If key exists, updates it and moves to end. Otherwise adds to end.
         
         Args:
             key: Cache key
             value: Value to cache
         """
         async with self._lock:
-            # Evict LRU entry if cache is full and this is a new key
-            if len(self._cache) >= self.max_size and key not in self._cache:
-                # Find least recently accessed key (oldest access time)
-                oldest_key = min(self._access_times, key=self._access_times.get)
-                del self._cache[oldest_key]
-                del self._access_times[oldest_key]
-
             now = time.time()
-            self._cache[key] = (value, now)
-            self._access_times[key] = now
+            
+            if key in self._cache:
+                # Update existing entry and move to end (most recent)
+                self._cache[key] = (value, now)
+                self._cache.move_to_end(key)
+            else:
+                # Evict LRU entry if cache is full - O(1) pop from beginning
+                if len(self._cache) >= self.max_size:
+                    self._cache.popitem(last=False)  # Remove oldest (least recent)
+                
+                # Add new entry at end (most recent)
+                self._cache[key] = (value, now)
 
     async def get_stats(self) -> dict:
         """Get cache statistics"""
@@ -294,10 +298,13 @@ class LRUCache(Generic[T]):
         """
         async with self._lock:
             now = time.time()
-            expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self.ttl]
+            # Iterate from beginning (oldest) for efficiency
+            expired_keys = [
+                k for k, (_, ts) in self._cache.items()
+                if now - ts >= self.ttl
+            ]
             for key in expired_keys:
                 del self._cache[key]
-                del self._access_times[key]
 
 
 class JsonFile:

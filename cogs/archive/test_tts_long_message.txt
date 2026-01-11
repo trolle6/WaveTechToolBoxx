@@ -1,0 +1,30 @@
+ðŸŽ¤ **TESTING TTS SYSTEM - MAXIMUM LENGTH DISCORD NITRO MESSAGE**
+
+This tests TTS system at exactly 2000 characters. Testing Discord Nitro maximum message length while evaluating how TTS handles long text, complex formatting, abbreviations like JKM, usernames like xXDarkLordXx, technical terms, emojis, and punctuation.
+
+**TECHNICAL TERMINOLOGY**
+The system processes cryptographic hashes, implements O(1) algorithms, uses OrderedDict for LRU cache, handles async operations with asyncio. Testing HTTP/HTTPS, API endpoints, JSON, WebSocket protocols.
+
+**USERNAMES AND GAMERTAGS**
+Usernames: Trolle, xXDarkLordXx, ProGamer99, EpicWin2024, MLGPro1337, NoobSlayer9000, EliteWarrior88. These trigger pronunciation improvement.
+
+**ACRONYMS**
+Common acronyms: API Application Programming Interface, TTS Text-to-Speech, LRU Least Recently Used, HTTP HyperText Transfer Protocol, JSON JavaScript Object Notation, UI User Interface, UX User Experience, AI Artificial Intelligence, ML Machine Learning, NLP Natural Language Processing.
+
+**MIXED CASE**
+Patterns: DiscordBot2024, OpenAIVoiceAPI, SecretSanta2025, WaveTechToolBox, Python3.12, FFmpeg4.2, OpusAudio64kbps mixing letters and numbers.
+
+**PUNCTUATION**
+Testing periods, exclamation marks, question marks, commas, semicolons, colons, dashes, parentheses, brackets, quotes! Does it handle multiple sentences? How about nested punctuation (like this)? Can it process quoted text?
+
+**NUMBERS AND DATES**
+Dates: December 30th 2025, January 1st 2024, year 2023, timestamps like 1735689600. Numbers from 0 to 999999, decimals like 3.14159, percentages like 99.9 percent.
+
+**SPECIAL CHARACTERS**
+Testing: @mentions, #hashtags, , %percentages, &ampersands, *asterisks, +plus, -minus, =equals, <less, >greater, |pipes, /slashes, ~tildes, ^carets, {braces}, [brackets].
+
+**MULTILINE CONTENT**
+Testing line breaks, paragraph separations, multiple newlines. Does it preserve pauses? Can it maintain readability across formatting styles?
+
+**LONG WORDS**
+Testing: 

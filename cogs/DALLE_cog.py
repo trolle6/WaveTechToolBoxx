@@ -18,6 +18,7 @@ COMMANDS:
 """
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -93,9 +94,9 @@ class DALLECog(commands.Cog):
         self.enabled = True
 
         # Components with configurable limits
-        rate_limit = getattr(bot.config, 'RATE_LIMIT_REQUESTS', 10)
-        rate_window = getattr(bot.config, 'RATE_LIMIT_WINDOW', 60)
-        max_queue = getattr(bot.config, 'MAX_QUEUE_SIZE', 50)
+        rate_limit = bot.config.RATE_LIMIT_REQUESTS
+        rate_window = bot.config.RATE_LIMIT_WINDOW
+        max_queue = bot.config.MAX_QUEUE_SIZE
         
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
         self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3600)
@@ -214,8 +215,9 @@ class DALLECog(commands.Cog):
 
     # ============ CACHE ============
     def _cache_key(self, prompt: str, size: str, quality: str) -> str:
-        """Generate cache key"""
-        return str(hash(f"{prompt}:{size}:{quality}"))
+        """Generate cache key using SHA256 to avoid collisions"""
+        key_str = f"{prompt}:{size}:{quality}"
+        return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     # ============ API HELPERS ============
     def _get_openai_headers(self) -> Dict[str, str]:
@@ -248,7 +250,6 @@ class DALLECog(commands.Cog):
         async with self._stats_lock:
             self.stats["total_requests"] += 1
 
-        # Retry with exponential backoff
         # DALL-E API can take 15-30 seconds for generation, so use a generous timeout
         REQUEST_TIMEOUT = 45  # seconds - enough for DALL-E generation
         

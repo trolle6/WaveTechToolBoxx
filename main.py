@@ -18,7 +18,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 import disnake
@@ -60,19 +60,16 @@ class Config:
     """
     
     def __init__(self):
-        self.data = {}
-        missing = []
-        
-        # Load required vars - must exist or bot cannot start
-        for key in REQUIRED_CONFIG_KEYS:
-            val = os.getenv(key)
-            if not val:
-                missing.append(key)
-                continue
-            self.data[key] = val.strip() if isinstance(val, str) else val
+        self.data: dict[str, Any] = {}
+        missing = [key for key in REQUIRED_CONFIG_KEYS if not os.getenv(key)]
         
         if missing:
             raise RuntimeError(f"Missing required config: {', '.join(missing)}")
+        
+        # Load required vars (already validated as non-empty)
+        for key in REQUIRED_CONFIG_KEYS:
+            val = os.getenv(key)
+            self.data[key] = val.strip() if isinstance(val, str) else val
         
         # Load optional vars with defaults and type conversion
         for key, default in CONFIG_DEFAULTS.items():
@@ -82,11 +79,15 @@ class Config:
             elif isinstance(default, bool):
                 self.data[key] = str(val).lower() == "true"
             elif isinstance(default, int):
-                self.data[key] = int(val)
+                try:
+                    self.data[key] = int(val)
+                except ValueError:
+                    logger.warning(f"Invalid integer for {key}, using default {default}")
+                    self.data[key] = default
             else:
                 self.data[key] = val
     
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         """Access config values via attribute (e.g., config.DISCORD_TOKEN)"""
         key = name.upper()
         if key in self.data:
@@ -121,6 +122,9 @@ class HttpManager:
         """
         Get or create HTTP session with connection pooling.
         
+        Note: Session timeout is set at creation, but individual requests
+        can override with request-level timeout (see DALL-E and TTS code).
+        
         Args:
             timeout: Request timeout in seconds (default: HTTP_DEFAULT_TIMEOUT)
         
@@ -133,7 +137,7 @@ class HttpManager:
                 limit_per_host=HTTP_CONNECTION_LIMIT_PER_HOST,
                 ttl_dns_cache=HTTP_DNS_CACHE_TTL,
                 enable_cleanup_closed=True,
-                force_close=True
+                force_close=False  # Keep connections alive for reuse
             )
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=timeout),
@@ -323,6 +327,7 @@ LOG_FILE_MAX_BYTES = 5_000_000  # 5MB - max log file size before rotation
 LOG_FILE_BACKUP_COUNT = 5  # Number of rotated log files to keep
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
+MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)
 
 try:
     config = Config()
@@ -487,7 +492,6 @@ async def on_disconnect():
     # Safety limit: prevent unbounded growth even in extreme edge cases
     # Keep only the most recent periods if list somehow exceeds reasonable size
     # (Should never happen with proper pruning, but protects against bugs/edge cases)
-    MAX_CONNECTION_PERIODS = 10000  # Max periods to track (e.g., ~416 disconnects/hour for 24h)
     if len(stats["connection_periods"]) > MAX_CONNECTION_PERIODS:
         # Sort by end time and keep only the most recent periods
         stats["connection_periods"].sort(key=lambda x: x[1])  # Sort by end time
