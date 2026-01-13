@@ -10,9 +10,9 @@ FEATURES:
 - 🔒 Archive protection (prevents accidental data loss)
 
 COMMANDS (Moderator):
-- /ss start [message_id] [role_id] - Start new event
+- /ss start [message_id] [role_id] [shuffle_date] [shuffle_time] [end_date] [end_time] - Start new event (optional auto-shuffle and auto-stop)
 - /ss shuffle - Make Secret Santa assignments
-- /ss stop - Stop event and archive data
+- /ss stop - Stop event and archive data (manual stop, cancels scheduled stop if set)
 - /ss participants - View current participants
 - /ss view_gifts - View submitted gifts
 - /ss view_comms - View communication threads
@@ -116,6 +116,33 @@ class SecretSantaCog(commands.Cog):
         self._unloaded = False  # Track if already unloaded
         
         self.logger.info("Secret Santa cog initialized with persistent reply buttons")
+    
+    async def _safe_defer(self, inter: disnake.ApplicationCommandInteraction, ephemeral: bool = True) -> bool:
+        """
+        Safely defer an interaction, handling expired interactions gracefully.
+        
+        Args:
+            inter: The interaction to defer
+            ephemeral: Whether the response should be ephemeral (default: True)
+        
+        Returns:
+            True if defer was successful, False if interaction expired
+        """
+        try:
+            await inter.response.defer(ephemeral=ephemeral)
+            return True
+        except disnake.errors.NotFound:
+            # Interaction expired (404 Not Found - Unknown interaction)
+            # This can happen if there's network latency or the bot is slow
+            self.logger.warning(f"Interaction expired before defer: {inter.id} (command: {inter.application_command.name})")
+            return False
+        except disnake.errors.InteractionResponded:
+            # Already responded to - this is fine, just return True
+            return True
+        except Exception as e:
+            # Other errors - log but don't crash
+            self.logger.error(f"Error deferring interaction: {e}", exc_info=True)
+            return False
     
     def _create_embed(self, title: str, description: str, color: disnake.Color, **fields) -> disnake.Embed:
         """
@@ -374,7 +401,7 @@ class SecretSantaCog(commands.Cog):
             pass
 
     async def _scheduled_shuffle_checker(self):
-        """Background task that checks for scheduled shuffles and executes them"""
+        """Background task that checks for scheduled shuffles and stops, and executes them"""
         try:
             while True:
                 await asyncio.sleep(60)  # Check every minute
@@ -383,14 +410,11 @@ class SecretSantaCog(commands.Cog):
                 if not event:
                     continue
                 
-                # Check if there's a scheduled shuffle
-                scheduled_time = event.get("scheduled_shuffle_time")
-                if not scheduled_time:
-                    continue
-                
-                # Check if it's time to execute
                 current_time = time.time()
-                if current_time >= scheduled_time:
+                
+                # Check if there's a scheduled shuffle
+                scheduled_shuffle_time = event.get("scheduled_shuffle_time")
+                if scheduled_shuffle_time and current_time >= scheduled_shuffle_time:
                     # Time to shuffle! Get scheduler ID before clearing
                     scheduler_id = event.get("scheduled_by_user_id")
                     
@@ -430,10 +454,58 @@ class SecretSantaCog(commands.Cog):
                             except Exception:
                                 pass
                 
+                # Check if there's a scheduled stop
+                scheduled_stop_time = event.get("scheduled_stop_time")
+                if scheduled_stop_time and current_time >= scheduled_stop_time:
+                    # Time to stop! Get stopper ID before clearing
+                    stopper_id = event.get("scheduled_stop_by_user_id")
+                    
+                    # Execute the stop (this will clear the scheduled_stop_time internally)
+                    try:
+                        success, saved_filename = await self._execute_stop_internal(stopper_id=stopper_id)
+                        if success:
+                            # Notify the stopper
+                            if stopper_id:
+                                try:
+                                    user = await self.bot.fetch_user(stopper_id)
+                                    await user.send(
+                                        f"🛑 **Auto-stop complete!** Your scheduled Secret Santa event just ended!\n\n"
+                                        f"Event has been archived to: `{saved_filename}`\n\n"
+                                        f"All participants have been notified via DM."
+                                    )
+                                except Exception as e:
+                                    self.logger.warning(f"Failed to notify stopper {stopper_id}: {e}")
+                        else:
+                            self.logger.error(f"Scheduled stop returned error: {saved_filename}")
+                            if stopper_id:
+                                try:
+                                    user = await self.bot.fetch_user(stopper_id)
+                                    await user.send(
+                                        f"❌ **Scheduled stop failed!**\n\n"
+                                        f"An error occurred while executing the scheduled stop:\n"
+                                        f"`{saved_filename}`\n\n"
+                                        f"Please run `/ss stop` manually."
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        self.logger.error(f"Error executing scheduled stop: {e}", exc_info=True)
+                        if stopper_id:
+                            try:
+                                user = await self.bot.fetch_user(stopper_id)
+                                await user.send(
+                                    f"❌ **Scheduled stop failed!**\n\n"
+                                    f"An error occurred while executing the scheduled stop:\n"
+                                    f"`{str(e)}`\n\n"
+                                    f"Please run `/ss stop` manually."
+                                )
+                            except Exception:
+                                pass
+                
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self.logger.error(f"Scheduled shuffle checker error: {e}", exc_info=True)
+            self.logger.error(f"Scheduled events checker error: {e}", exc_info=True)
 
     async def _send_dm(self, user_id: int, message: str, view: disnake.ui.View = None) -> bool:
         """Send DM to user with optional view"""
@@ -441,8 +513,22 @@ class SecretSantaCog(commands.Cog):
             user = await self.bot.fetch_user(user_id)
             await user.send(message, view=view)
             return True
+        except disnake.Forbidden as e:
+            # User has DMs disabled or blocked the bot (error code 50007)
+            # This is expected and common - only log at debug level
+            error_code = getattr(e, 'code', None)
+            if error_code == 50007:
+                self.logger.debug(f"User {user_id} has DMs disabled (50007) - skipping DM")
+            else:
+                self.logger.debug(f"User {user_id} blocked DM (Forbidden: {error_code})")
+            return False
+        except disnake.HTTPException as e:
+            # Other HTTP errors (rate limits, etc.) - log as warning
+            self.logger.warning(f"HTTP error sending DM to {user_id}: {e}")
+            return False
         except Exception as e:
-            self.logger.warning(f"Failed to DM {user_id}: {e}")
+            # Unexpected errors - log as warning
+            self.logger.warning(f"Unexpected error sending DM to {user_id}: {e}")
             return False
 
     async def _process_reply(self, inter: disnake.ModalInteraction, reply: str, santa_id: int, giftee_id: int):
@@ -576,11 +662,19 @@ class SecretSantaCog(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         announcement_message_id: str = commands.Param(description="Message ID for reactions"),
         role_id: Optional[str] = commands.Param(default=None, description="Optional: Role ID to assign participants"),
-        shuffle_date: Optional[str] = commands.Param(default=None, description="Optional: Date to auto-shuffle (e.g., '2025-12-25' or 'December 25, 2025')"),
-        shuffle_time: Optional[str] = commands.Param(default=None, description="Optional: Time to auto-shuffle (e.g., '14:30' or '2:30 PM')")
+        shuffle_date: Optional[str] = commands.Param(default=None, description="Optional: Date to auto-shuffle (REQUIRES shuffle_time if set)"),
+        shuffle_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if shuffle_date is set! Time to auto-shuffle (e.g., '14:30' or '2:30 PM')"),
+        end_date_preset: Optional[str] = commands.Param(
+            default=None,
+            choices=["December 24", "December 25", "December 31", "January 1", "Custom"],
+            description="Optional: Quick preset for end date (REQUIRES end_time below if set)"
+        ),
+        end_date: Optional[str] = commands.Param(default=None, description="Optional: Custom date to auto-stop (only if end_date_preset is 'Custom')"),
+        end_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if end_date_preset is set! Time to auto-stop (e.g., '23:59' or '11:59 PM')")
     ):
         """Start new Secret Santa event (optionally schedule automatic shuffle)"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate message ID
         try:
@@ -701,6 +795,92 @@ class SecretSantaCog(commands.Cog):
             )
             return
 
+        # Parse and validate stop schedule if provided
+        scheduled_stop_timestamp = None
+        
+        # Handle end date preset or custom
+        actual_end_date = None
+        if end_date_preset:
+            if end_date_preset == "Custom":
+                # Use custom date if provided
+                if end_date:
+                    actual_end_date = end_date
+                else:
+                    await inter.edit_original_response(
+                        content="❌ You selected 'Custom' for end_date_preset but didn't provide `end_date`.\n\n"
+                               "Either:\n"
+                               "• Choose a preset date (December 24, 25, 31, or January 1)\n"
+                               "• Or provide both `end_date` and `end_time` when using 'Custom'"
+                    )
+                    return
+            else:
+                # Use preset date - map to current year (reuse current_year from above)
+                preset_map = {
+                    "December 24": f"December 24, {current_year}",
+                    "December 25": f"December 25, {current_year}",
+                    "December 31": f"December 31, {current_year}",
+                    "January 1": f"January 1, {current_year + 1}"  # Next year for Jan 1
+                }
+                actual_end_date = preset_map.get(end_date_preset)
+        
+        # If no preset but custom date provided, use it
+        if not actual_end_date and end_date:
+            actual_end_date = end_date
+        
+        # Validate stop schedule
+        if actual_end_date and end_time:
+            scheduled_stop_timestamp = self._parse_datetime(actual_end_date, end_time)
+            if not scheduled_stop_timestamp:
+                await inter.edit_original_response(
+                    content="❌ Invalid end date or time format!\n\n"
+                           "**Date formats:**\n"
+                           "• `2025-12-31` (YYYY-MM-DD)\n"
+                           "• `12/31/2025` (MM/DD/YYYY)\n"
+                           "• `December 31, 2025`\n\n"
+                           "**Time formats:**\n"
+                           "• `23:59` (24-hour)\n"
+                           "• `11:59 PM` (12-hour)\n\n"
+                           "**Example:** `/ss start ... end_date_preset:December 31 end_time:11:59 PM`\n"
+                           "**Or:** `/ss start ... end_date_preset:Custom end_date:2025-12-31 end_time:11:59 PM`"
+                )
+                return
+            
+            # Check if scheduled stop time is in the future
+            current_time = time.time()
+            if scheduled_stop_timestamp <= current_time:
+                await inter.edit_original_response(
+                    content="❌ Scheduled stop time must be in the future!\n\n"
+                           f"Current time: <t:{int(current_time)}:F>\n"
+                           f"Your time: <t:{int(scheduled_stop_timestamp)}:F>"
+                )
+                return
+            
+            # Check if stop is after shuffle (if shuffle is scheduled)
+            if scheduled_timestamp and scheduled_stop_timestamp <= scheduled_timestamp:
+                await inter.edit_original_response(
+                    content="❌ Scheduled stop time must be after shuffle time!\n\n"
+                           f"Shuffle: <t:{int(scheduled_timestamp)}:F>\n"
+                           f"Stop: <t:{int(scheduled_stop_timestamp)}:F>"
+                )
+                return
+        elif (actual_end_date and not end_time) or (end_time and not actual_end_date):
+            # One provided but not the other
+            await inter.edit_original_response(
+                content="❌ Both end date (preset or custom) and `end_time` must be provided together, or leave both empty for manual stop.\n\n"
+                       "**Quick preset:** Use `end_date_preset` (e.g., 'December 25') + `end_time`\n"
+                       "**Custom date:** Use `end_date_preset:Custom` + `end_date` + `end_time`"
+            )
+            return
+        elif end_date_preset == "Custom" and not end_date:
+            # Custom selected but no custom date provided
+            await inter.edit_original_response(
+                content="❌ You selected 'Custom' for end_date_preset but didn't provide `end_date`.\n\n"
+                       "Either:\n"
+                       "• Choose a preset date (December 24, 25, 31, or January 1)\n"
+                       "• Or provide both `end_date` and `end_time` when using 'Custom'"
+            )
+            return
+
         # Create event (current_year already set above during safety check)
         new_event = {
             "active": True,
@@ -719,6 +899,11 @@ class SecretSantaCog(commands.Cog):
         if scheduled_timestamp:
             new_event["scheduled_shuffle_time"] = scheduled_timestamp
             new_event["scheduled_by_user_id"] = inter.author.id
+        
+        # Add scheduled stop if provided
+        if scheduled_stop_timestamp:
+            new_event["scheduled_stop_time"] = scheduled_stop_timestamp
+            new_event["scheduled_stop_by_user_id"] = inter.author.id
 
         async with self._lock:
             self.state["current_year"] = current_year
@@ -744,6 +929,13 @@ class SecretSantaCog(commands.Cog):
         if scheduled_timestamp:
             response_msg += f"\n\n📅 **Shuffle scheduled for:** <t:{int(scheduled_timestamp)}:F>\n"
             response_msg += f"🎉 You'll be notified when it happens!"
+        
+        if scheduled_stop_timestamp:
+            preset_info = ""
+            if end_date_preset and end_date_preset != "Custom":
+                preset_info = f" (preset: {end_date_preset})"
+            response_msg += f"\n\n🛑 **Event will auto-stop on:** <t:{int(scheduled_stop_timestamp)}:F>{preset_info}\n"
+            response_msg += f"✨ Event will archive automatically!"
         
         await inter.edit_original_response(response_msg)
         
@@ -898,6 +1090,48 @@ class SecretSantaCog(commands.Cog):
         
         return True, None
 
+    async def _execute_stop_internal(self, stopper_id: Optional[int] = None) -> tuple[bool, Optional[str]]:
+        """
+        Internal method to execute stop logic. Can be called from manual command or scheduled task.
+        
+        Returns:
+            Tuple of (success: bool, error_message: Optional[str])
+        """
+        event = self._get_current_event()
+        if not event:
+            return False, "❌ No active event"
+        
+        year = self.state["current_year"]
+        
+        # Send thank you message to all participants
+        participants = event.get("participants", {})
+        if participants:
+            end_msg = self._get_event_end_message(year)
+            dm_tasks = [self._send_dm(int(uid), end_msg) for uid in participants]
+            await asyncio.gather(*dm_tasks, return_exceptions=True)
+        
+        # Archive event (with automatic backup protection)
+        saved_filename = self._archive_event(event, year)
+        
+        async with self._lock:
+            # Clear scheduled stop before clearing event
+            event.pop("scheduled_stop_time", None)
+            event.pop("scheduled_stop_by_user_id", None)
+            self.state["current_event"] = None
+            self._save()
+        
+        # Notify Discord log channel
+        if hasattr(self.bot, 'send_to_discord_log'):
+            participants_count = len(event.get("participants", {}))
+            gifts_count = len(event.get("gift_submissions", {}))
+            executor_name = f"User {stopper_id}" if stopper_id else "Scheduled task"
+            await self.bot.send_to_discord_log(
+                f"Secret Santa {year} event stopped by {executor_name} - {participants_count} participants, {gifts_count} gifts submitted",
+                "INFO"
+            )
+        
+        return True, saved_filename
+
     def _parse_datetime(self, date_str: str, time_str: str) -> Optional[float]:
         """
         Parse date and time strings into a Unix timestamp.
@@ -964,16 +1198,18 @@ class SecretSantaCog(commands.Cog):
     @owner_check()
     async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
         """Make assignments manually (use /ss start with shuffle_date/shuffle_time for automatic execution)"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         # Check if there's a scheduled shuffle and cancel it
         event = self._get_current_event()
         if event and event.get("scheduled_shuffle_time"):
+            scheduled_time = event.get("scheduled_shuffle_time")
             async with self._lock:
                 event.pop("scheduled_shuffle_time", None)
                 event.pop("scheduled_by_user_id", None)
                 self._save()
-            self.logger.info(f"Manual shuffle cancelled scheduled shuffle (was scheduled for {event.get('scheduled_shuffle_time')})")
+            self.logger.info(f"Manual shuffle cancelled scheduled shuffle (was scheduled for <t:{int(scheduled_time)}:F>)")
         
         success, error = await self._execute_shuffle_internal(inter=inter)
         if not success and error:
@@ -984,64 +1220,70 @@ class SecretSantaCog(commands.Cog):
     @mod_check()
     async def ss_stop(self, inter: disnake.ApplicationCommandInteraction):
         """Stop event"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         event = self._get_current_event()
         if not event:
             await inter.edit_original_response(content="❌ No active event")
             return
 
-        year = self.state["current_year"]
+        # Check if there's a scheduled stop and cancel it
+        cancelled_scheduled = False
+        scheduled_time = None
+        if event.get("scheduled_stop_time"):
+            scheduled_time = event.get("scheduled_stop_time")
+            async with self._lock:
+                event.pop("scheduled_stop_time", None)
+                event.pop("scheduled_stop_by_user_id", None)
+                self._save()
+            cancelled_scheduled = True
+            self.logger.info(f"Manual stop cancelled scheduled stop (was scheduled for <t:{int(scheduled_time)}:F>)")
+
+        # Execute stop using the helper function
+        success, saved_filename = await self._execute_stop_internal(stopper_id=inter.author.id)
         
-        # Send thank you message to all participants
-        participants = event.get("participants", {})
-        if participants:
-            end_msg = self._get_event_end_message(year)
-            dm_tasks = [self._send_dm(int(uid), end_msg) for uid in participants]
-            await asyncio.gather(*dm_tasks, return_exceptions=True)
+        if not success:
+            await inter.edit_original_response(content=saved_filename or "❌ Failed to stop event")
+            return
 
-        # Archive event (with automatic backup protection)
-        saved_filename = self._archive_event(event, year)
-
-        async with self._lock:
-            self.state["current_event"] = None
-            self._save()
+        # Build response message
+        if cancelled_scheduled:
+            response_msg = f"⚠️ Scheduled stop cancelled and executed manually.\n"
+            response_msg += f"(Was scheduled for: <t:{int(scheduled_time)}:F>)\n\n"
+        else:
+            response_msg = ""
 
         # Show appropriate message based on what file was saved
         if "backup" in saved_filename:
             # Archive protection was triggered
             embed = disnake.Embed(
                 title="✅ Event Stopped & Protected",
-                description=f"Secret Santa {year} has been archived with data protection!",
+                description=(response_msg if response_msg else "") + f"Secret Santa {self.state['current_year']} has been archived with data protection!",
                 color=disnake.Color.orange()
             )
             embed.add_field(
                 name="🔒 Archive Protection",
-                value=f"**Original:** `{year}.json` (preserved)\n"
+                value=f"**Original:** `{self.state['current_year']}.json` (preserved)\n"
                       f"**This event:** `{saved_filename}`\n\n"
-                      f"⚠️ You ran multiple {year} events! Review archives folder manually.",
+                      f"⚠️ You ran multiple {self.state['current_year']} events! Review archives folder manually.",
                 inline=False
             )
             embed.set_footer(text="Your original archive was NOT overwritten!")
             await inter.edit_original_response(embed=embed)
         else:
             # Normal archive
-            await inter.edit_original_response(content=f"✅ Event stopped and archived → `{saved_filename}`")
-        
-        # Notify Discord log channel
-        if hasattr(self.bot, 'send_to_discord_log'):
-            participants_count = len(event.get("participants", {}))
-            gifts_count = len(event.get("gift_submissions", {}))
-            await self.bot.send_to_discord_log(
-                f"Secret Santa {self.state['current_year']} event stopped by {inter.author.display_name} - {participants_count} participants, {gifts_count} gifts submitted",
-                "INFO"
-            )
+            if response_msg:
+                await inter.edit_original_response(content=response_msg + f"✅ Event stopped and archived → `{saved_filename}`")
+            else:
+                await inter.edit_original_response(content=f"✅ Event stopped and archived → `{saved_filename}`")
 
     @ss_root.sub_command(name="participants", description="View participants")
     @mod_check()
     async def ss_participants(self, inter: disnake.ApplicationCommandInteraction):
         """Show participants"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         event = await self._require_event(inter)
         if not event:
@@ -1075,7 +1317,8 @@ class SecretSantaCog(commands.Cog):
         use_ai_rewrite: bool = commands.Param(default=False, description="Use AI to rewrite for extra anonymity")
     ):
         """Ask giftee anonymously with AI rewriting"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1128,7 +1371,8 @@ class SecretSantaCog(commands.Cog):
         reply: str = commands.Param(description="Your reply (sent anonymously)", max_length=2000)
     ):
         """Reply to Santa anonymously"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1178,7 +1422,8 @@ class SecretSantaCog(commands.Cog):
         gift_description: str = commands.Param(description="Describe what you gave", max_length=2000)
     ):
         """Submit gift description"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1249,7 +1494,8 @@ class SecretSantaCog(commands.Cog):
         gift_description: str = commands.Param(description="Updated gift description", max_length=2000)
     ):
         """Edit your own gift submission from an archived year"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         user_id = str(inter.author.id)
         
@@ -1409,7 +1655,8 @@ class SecretSantaCog(commands.Cog):
         item: str = commands.Param(description="Item to add to wishlist", max_length=500)
     ):
         """Add item to wishlist"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1455,7 +1702,8 @@ class SecretSantaCog(commands.Cog):
         item_number: int = commands.Param(description="Item number to remove (1-10)", ge=1, le=10)
     ):
         """Remove item from wishlist"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1497,7 +1745,8 @@ class SecretSantaCog(commands.Cog):
     @ss_wishlist.sub_command(name="view", description="View your wishlist")
     async def wishlist_view(self, inter: disnake.ApplicationCommandInteraction):
         """View your wishlist"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1530,7 +1779,8 @@ class SecretSantaCog(commands.Cog):
     @ss_wishlist.sub_command(name="clear", description="Clear your entire wishlist")
     async def wishlist_clear(self, inter: disnake.ApplicationCommandInteraction):
         """Clear wishlist"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1554,7 +1804,8 @@ class SecretSantaCog(commands.Cog):
     @ss_root.sub_command(name="giftee", description="View your giftee's wishlist")
     async def ss_view_giftee_wishlist(self, inter: disnake.ApplicationCommandInteraction):
         """View giftee's wishlist"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1595,7 +1846,8 @@ class SecretSantaCog(commands.Cog):
     @mod_check()
     async def ss_view_gifts(self, inter: disnake.ApplicationCommandInteraction):
         """Show gift submissions"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         event = await self._require_event(inter)
         if not event:
@@ -1644,7 +1896,8 @@ class SecretSantaCog(commands.Cog):
     @mod_check()
     async def ss_view_comms(self, inter: disnake.ApplicationCommandInteraction):
         """Show communication threads"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         event = await self._require_event(inter)
         if not event:
@@ -1696,7 +1949,8 @@ class SecretSantaCog(commands.Cog):
             year: int = commands.Param(default=None, description="Specific year to view")
     ):
         """Show event history"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
 
         # Load all archives (NOTE: Current active event is NOT shown - would reveal secrets!)
         archives = load_all_archives(logger=self.logger)
@@ -1901,7 +2155,8 @@ class SecretSantaCog(commands.Cog):
         user: disnake.User = commands.Param(description="User to look up")
     ):
         """Show specific user's participation across all years"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         user_id = str(user.id)
         
@@ -2044,7 +2299,8 @@ class SecretSantaCog(commands.Cog):
         user: disnake.User = commands.Param(description="User to check emoji consistency for")
     ):
         """Test that a user gets the same emoji across all years"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         user_id = str(user.id)
         
@@ -2121,7 +2377,8 @@ class SecretSantaCog(commands.Cog):
         year: int = commands.Param(description="Year to delete (e.g., 2025)")
     ):
         """Delete archive file for a specific year (admin only)"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         # Safety check - don't allow deleting very old years accidentally
         current_year = dt.date.today().year
@@ -2231,7 +2488,8 @@ class SecretSantaCog(commands.Cog):
         year: int = commands.Param(description="Year to restore (e.g., 2023)")
     ):
         """Restore archive file from backups folder (admin only)"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         backup_path = BACKUPS_DIR / f"{year}.json"
         archive_path = ARCHIVE_DIR / f"{year}.json"
@@ -2311,7 +2569,8 @@ class SecretSantaCog(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def ss_list_backups(self, inter: disnake.ApplicationCommandInteraction):
         """List all years in the backups folder (admin only)"""
-        await inter.response.defer(ephemeral=True)
+        if not await self._safe_defer(inter, ephemeral=True):
+            return  # Interaction expired, can't proceed
         
         # Scan backups folder for year files
         backup_files = sorted(BACKUPS_DIR.glob("[0-9][0-9][0-9][0-9].json"))
