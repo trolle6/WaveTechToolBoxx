@@ -68,6 +68,9 @@ SENTENCE_BOUNDARY_MIN_PERCENT = 0.8  # Minimum 80% of text must be kept when tru
 CACHE_TTL_AUDIO = 3600  # 1 hour - audio cache TTL
 CACHE_TTL_PRONUNCIATION = 7200  # 2 hours - pronunciation improvement cache TTL
 
+# Name Announcement Configuration
+NAME_ANNOUNCEMENT_COOLDOWN = 7200  # 2 hours - cooldown before announcing username again
+
 # Queue and State Configuration
 QUEUE_PROCESSOR_TIMEOUT = 300  # 5 minutes - timeout for queue processor wait
 GUILD_IDLE_TIMEOUT = 600  # 10 minutes - guild considered idle after this time
@@ -207,8 +210,8 @@ class VoiceProcessingCog(commands.Cog):
         self._processed_messages: Set[str] = set()
         self._processed_messages_lock = asyncio.Lock()
         
-        # Name announcement tracking
-        self._announced_users: Dict[int, Set[int]] = {}
+        # Name announcement tracking (guild_id -> {user_id: last_announcement_timestamp})
+        self._announced_users: Dict[int, Dict[int, float]] = {}
         self._announcement_lock = asyncio.Lock()
 
         # TTS config
@@ -221,7 +224,8 @@ class VoiceProcessingCog(commands.Cog):
         ]
         
         # Voice assignments (per-guild, session-based - cleared when user leaves voice)
-        self._voice_assignments: Dict[int, Dict[int, str]] = {}  # guild_id -> {user_id: voice}
+        # Structure: guild_id -> {user_id: {"voice": voice_name, "timestamp": timestamp}}
+        self._voice_assignments: Dict[int, Dict[int, Dict[str, any]]] = {}
         self._voice_lock = asyncio.Lock()
         
         # TTS role requirement (optional)
@@ -265,7 +269,7 @@ class VoiceProcessingCog(commands.Cog):
         - Session-based: Voice assignments are per-guild and cleared when user leaves voice channel
         - Deterministic: Uses user_id hash to consistently assign same voice within a session
         - All voices: Uses all 13 available voices for better variety
-        - No pronoun detection: Simplified to just hash-based assignment for consistency
+        - Timestamp tracking: Tracks when voice was assigned to help debug issues and ensure persistence
         
         Args:
             member: Discord member to get voice for
@@ -290,14 +294,54 @@ class VoiceProcessingCog(commands.Cog):
                 self._voice_assignments[guild_id] = {}
             
             guild_assignments = self._voice_assignments[guild_id]
+            current_time = time.time()
             
-            # Return existing assignment if present and valid
-            if user_id in guild_assignments and (voice := guild_assignments[user_id]) in self.available_voices:
-                return voice
+            # Check for existing assignment with proper validation
+            if user_id in guild_assignments:
+                assignment = guild_assignments[user_id]
+                
+                # Handle both old format (str) and new format (dict) for backward compatibility
+                if isinstance(assignment, str):
+                    voice = assignment
+                    # Upgrade old format to new format
+                    guild_assignments[user_id] = {
+                        "voice": voice,
+                        "timestamp": current_time
+                    }
+                elif isinstance(assignment, dict):
+                    voice = assignment.get("voice")
+                    # Update timestamp to track activity
+                    assignment["timestamp"] = current_time
+                else:
+                    voice = None
+                
+                # Validate voice is still available
+                if voice and voice in self.available_voices:
+                    self.logger.debug(f"Returning existing voice '{voice}' for user {user_id} (display_name: {member.display_name}) in guild {guild_id}")
+                    return voice
+                else:
+                    # Invalid assignment, will reassign below
+                    self.logger.warning(f"Invalid voice assignment for user {user_id}: {assignment}, reassigning")
+                    # Remove invalid assignment
+                    guild_assignments.pop(user_id, None)
             
             # Assign new voice for this session (deterministic based on user_id)
-            new_voice = self.available_voices[user_id % len(self.available_voices)]
-            guild_assignments[user_id] = new_voice
+            # Use hash to ensure consistent assignment per user
+            voice_index = user_id % len(self.available_voices)
+            new_voice = self.available_voices[voice_index]
+            
+            # Store assignment with timestamp
+            guild_assignments[user_id] = {
+                "voice": new_voice,
+                "timestamp": current_time
+            }
+            
+            self.logger.info(f"Assigned voice '{new_voice}' (index {voice_index}) to user {user_id} (display_name: {member.display_name}) in guild {guild_id} at {current_time}")
+            
+            # Log all current assignments for debugging
+            active_assignments = {uid: data.get("voice") if isinstance(data, dict) else data for uid, data in guild_assignments.items()}
+            self.logger.debug(f"Current voice assignments for guild {guild_id}: {active_assignments}")
+            
             return new_voice
 
     # ============ API HELPERS ============
@@ -1028,17 +1072,23 @@ class VoiceProcessingCog(commands.Cog):
         if not await self.rate_limiter.check(str(message.author.id)):
             return
 
-        # Name announcement (first message per session)
+        # Name announcement (with 2-hour cooldown)
         guild_id = message.guild.id
         user_id = message.author.id
+        current_time = time.time()
         
         async with self._announcement_lock:
             if guild_id not in self._announced_users:
-                self._announced_users[guild_id] = set()
+                self._announced_users[guild_id] = {}
             
-            is_first_message = user_id not in self._announced_users[guild_id]
+            last_announcement = self._announced_users[guild_id].get(user_id, 0)
+            time_since_announcement = current_time - last_announcement
+            
+            # Announce if never announced, or if 2 hours have passed since last announcement
+            is_first_message = (last_announcement == 0) or (time_since_announcement >= NAME_ANNOUNCEMENT_COOLDOWN)
+            
             if is_first_message:
-                self._announced_users[guild_id].add(user_id)
+                self._announced_users[guild_id][user_id] = current_time
 
         # Log original message length
         original_content_length = len(message.content)
@@ -1120,13 +1170,19 @@ class VoiceProcessingCog(commands.Cog):
         
         # User left voice channel
         if before.channel and not after.channel:
-            # Clear announcement status
+            # Clear announcement status so they get announced again when they rejoin
+            # The 2-hour cooldown only applies within the same VC session
             async with self._announcement_lock:
-                self._announced_users.get(guild.id, set()).discard(member.id)
+                if guild.id in self._announced_users:
+                    self._announced_users[guild.id].pop(member.id, None)
             
             # Clear voice assignment for this session (user left voice channel)
             async with self._voice_lock:
-                self._voice_assignments.get(guild.id, {}).pop(member.id, None)
+                if guild.id in self._voice_assignments:
+                    old_assignment = self._voice_assignments[guild.id].pop(member.id, None)
+                    if old_assignment:
+                        voice_name = old_assignment.get("voice") if isinstance(old_assignment, dict) else old_assignment
+                        self.logger.debug(f"Cleared voice assignment '{voice_name}' for user {member.id} (left VC)")
             
             # Check if should disconnect (wait 3s to avoid race conditions)
             if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel) and not vc.is_playing():

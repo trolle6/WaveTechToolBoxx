@@ -35,6 +35,13 @@ test_*.py
 # Local notes and reminders (not for version control)
 things todo and remember in the future.txt
 
+# DeepSeek prompt files (local development only)
+*DEEPSEEK*.md
+DEEPSEEK*.md
+
+# Secret Santa message documentation (local development only)
+SECRET_SANTA_MESSAGES.md
+
 # Deployment scripts (keep deploy.sh, remove others if not needed)
 deploy_cross_platform.py
 deploy_windows.ps1
