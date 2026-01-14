@@ -308,16 +308,20 @@ class VoiceProcessingCog(commands.Cog):
                         "voice": voice,
                         "timestamp": current_time
                     }
+                    self.logger.info(f"Upgraded old voice assignment format for user {user_id} (display_name: {member.display_name}) in guild {guild_id}: '{voice}'")
                 elif isinstance(assignment, dict):
                     voice = assignment.get("voice")
+                    old_timestamp = assignment.get("timestamp", 0)
                     # Update timestamp to track activity
                     assignment["timestamp"] = current_time
+                    self.logger.debug(f"Found existing voice assignment for user {user_id} (display_name: {member.display_name}): '{voice}' (assigned {current_time - old_timestamp:.1f}s ago)")
                 else:
                     voice = None
+                    self.logger.warning(f"Invalid assignment type for user {user_id}: {type(assignment)}")
                 
                 # Validate voice is still available
                 if voice and voice in self.available_voices:
-                    self.logger.debug(f"Returning existing voice '{voice}' for user {user_id} (display_name: {member.display_name}) in guild {guild_id}")
+                    self.logger.info(f"Returning existing voice '{voice}' for user {user_id} (display_name: {member.display_name}) in guild {guild_id}")
                     return voice
                 else:
                     # Invalid assignment, will reassign below
@@ -326,7 +330,7 @@ class VoiceProcessingCog(commands.Cog):
                     guild_assignments.pop(user_id, None)
             
             # Assign new voice for this session (deterministic based on user_id)
-            # Use hash to ensure consistent assignment per user
+            # Use modulo to ensure consistent assignment per user
             voice_index = user_id % len(self.available_voices)
             new_voice = self.available_voices[voice_index]
             
@@ -336,11 +340,19 @@ class VoiceProcessingCog(commands.Cog):
                 "timestamp": current_time
             }
             
-            self.logger.info(f"Assigned voice '{new_voice}' (index {voice_index}) to user {user_id} (display_name: {member.display_name}) in guild {guild_id} at {current_time}")
+            # Log assignment with detailed info for debugging
+            self.logger.info(
+                f"Assigned voice '{new_voice}' (index {voice_index} of {len(self.available_voices)}) "
+                f"to user {user_id} (display_name: {member.display_name}) in guild {guild_id} "
+                f"at timestamp {current_time}. Calculation: {user_id} % {len(self.available_voices)} = {voice_index}"
+            )
             
-            # Log all current assignments for debugging
-            active_assignments = {uid: data.get("voice") if isinstance(data, dict) else data for uid, data in guild_assignments.items()}
-            self.logger.debug(f"Current voice assignments for guild {guild_id}: {active_assignments}")
+            # Log all current assignments for debugging (at INFO level to help diagnose live server issues)
+            active_assignments = {
+                uid: data.get("voice") if isinstance(data, dict) else str(data) 
+                for uid, data in guild_assignments.items()
+            }
+            self.logger.info(f"Current voice assignments for guild {guild_id}: {active_assignments}")
             
             return new_voice
 
@@ -1177,12 +1189,18 @@ class VoiceProcessingCog(commands.Cog):
                     self._announced_users[guild.id].pop(member.id, None)
             
             # Clear voice assignment for this session (user left voice channel)
+            # This ensures they get a fresh assignment when they rejoin, similar to announcement reset
             async with self._voice_lock:
                 if guild.id in self._voice_assignments:
                     old_assignment = self._voice_assignments[guild.id].pop(member.id, None)
                     if old_assignment:
                         voice_name = old_assignment.get("voice") if isinstance(old_assignment, dict) else old_assignment
-                        self.logger.debug(f"Cleared voice assignment '{voice_name}' for user {member.id} (left VC)")
+                        timestamp = old_assignment.get("timestamp") if isinstance(old_assignment, dict) else None
+                        self.logger.info(
+                            f"Cleared voice assignment '{voice_name}' for user {member.id} "
+                            f"(display_name: {member.display_name}) in guild {guild.id} "
+                            f"(left VC, assignment was {time.time() - timestamp:.1f}s old)" if timestamp else f"(left VC)"
+                        )
             
             # Check if should disconnect (wait 3s to avoid race conditions)
             if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
