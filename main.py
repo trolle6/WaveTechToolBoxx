@@ -15,6 +15,7 @@ import logging
 import logging.handlers
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -336,6 +337,44 @@ except RuntimeError as e:
     sys.exit(1)
 
 logger, discord_handler = setup_logging(config)
+
+# ============ PIP UPGRADE ============
+def upgrade_pip(logger: logging.Logger) -> bool:
+    """
+    Upgrade pip to the latest version at startup.
+    
+    This ensures pip is always up-to-date regardless of how the container
+    or environment was set up. Runs silently and doesn't block startup.
+    
+    Args:
+        logger: Logger instance for messages
+        
+    Returns:
+        True if upgrade succeeded or was skipped, False on critical error
+    """
+    try:
+        logger.info("⬆️ Checking pip version and upgrading if needed...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            logger.info("✅ pip upgraded successfully")
+            return True
+        else:
+            logger.warning(f"⚠️ pip upgrade returned non-zero exit code: {result.stderr[:200]}")
+            return True  # Non-critical, continue startup
+    except subprocess.TimeoutExpired:
+        logger.warning("⚠️ pip upgrade timed out (non-critical, continuing)")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Could not upgrade pip (non-critical): {e}")
+        return True  # Non-critical, don't block startup
+
+# Upgrade pip at startup
+upgrade_pip(logger)
 
 # Initialize bot with all intents (needed for voice, members, etc.)
 intents = disnake.Intents.all()
