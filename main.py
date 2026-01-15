@@ -353,18 +353,41 @@ def upgrade_pip(logger: logging.Logger) -> bool:
         True if upgrade succeeded or was skipped, False on critical error
     """
     try:
-        logger.info("⬆️ Checking pip version and upgrading if needed...")
+        # Check current pip version first
+        version_result = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if version_result.returncode == 0:
+            current_version = version_result.stdout.strip()
+            logger.debug(f"Current pip version: {current_version}")
+        
+        logger.info("⬆️ Upgrading pip to latest version...")
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
             capture_output=True,
             text=True,
             timeout=30
         )
         if result.returncode == 0:
-            logger.info("✅ pip upgraded successfully")
+            # Verify the upgrade worked
+            verify_result = subprocess.run(
+                [sys.executable, "-m", "pip", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if verify_result.returncode == 0:
+                new_version = verify_result.stdout.strip()
+                logger.info(f"✅ pip upgraded successfully: {new_version}")
+            else:
+                logger.info("✅ pip upgrade completed")
             return True
         else:
-            logger.warning(f"⚠️ pip upgrade returned non-zero exit code: {result.stderr[:200]}")
+            error_msg = result.stderr[:200] if result.stderr else result.stdout[:200]
+            logger.warning(f"⚠️ pip upgrade returned non-zero exit code: {error_msg}")
             return True  # Non-critical, continue startup
     except subprocess.TimeoutExpired:
         logger.warning("⚠️ pip upgrade timed out (non-critical, continuing)")
