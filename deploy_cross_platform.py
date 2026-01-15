@@ -84,6 +84,15 @@ def install_dependencies():
         # Use the same Python executable that's running this script
         python_exe = sys.executable
         
+        # First, upgrade pip to the latest version
+        print(f"⬆️ Upgrading pip to latest version...")
+        try:
+            subprocess.run([python_exe, '-m', 'pip', 'install', '--upgrade', 'pip'], 
+                         check=True, capture_output=True, text=True)
+            print("✅ pip upgraded successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Could not upgrade pip (non-critical): {e}")
+        
         print(f"📦 Installing dependencies using {python_exe}...")
         
         # Install from requirements.txt if it exists

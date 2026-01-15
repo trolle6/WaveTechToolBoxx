@@ -50,6 +50,10 @@ for file in "${CRITICAL_FILES[@]}"; do
     fi
 done
 
+# Upgrade pip first
+echo "⬆️ Upgrading pip to latest version..."
+pip3 install --upgrade pip || echo "⚠️ Could not upgrade pip (non-critical)"
+
 # Install dependencies
 echo "📦 Installing dependencies..."
 if [ -f "requirements.txt" ]; then

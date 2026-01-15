@@ -112,6 +112,15 @@ def check_permissions():
 def install_dependencies():
     """Install dependencies from requirements.txt"""
     try:
+        # First, upgrade pip to the latest version
+        print("⬆️ Upgrading pip to latest version...")
+        try:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'], 
+                          check=True, capture_output=True, text=True)
+            print("✅ pip upgraded successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Could not upgrade pip (non-critical): {e}")
+        
         subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'], 
                       check=True, capture_output=True, text=True)
         print("✅ Dependencies installed successfully")
