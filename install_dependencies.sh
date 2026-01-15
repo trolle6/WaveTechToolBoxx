@@ -4,16 +4,14 @@
 
 set -e  # Exit on error
 
-# Suppress pip version check warnings
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-
 echo "⬆️ Upgrading pip to latest version..."
+echo "Current pip version:"
 pip --version
-pip install --upgrade pip --quiet
-echo "✅ pip upgraded:"
+pip install --upgrade pip
+echo "✅ pip upgraded to:"
 pip --version
 
 echo "📦 Installing dependencies from requirements.txt..."
-pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+pip install --no-cache-dir -r requirements.txt
 
 echo "✅ All dependencies installed successfully!"

@@ -366,7 +366,7 @@ def upgrade_pip(logger: logging.Logger) -> bool:
         
         logger.info("⬆️ Upgrading pip to latest version...")
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
             capture_output=True,
             text=True,
             timeout=30

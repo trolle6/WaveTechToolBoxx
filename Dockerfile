@@ -2,9 +2,6 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Suppress pip version check warnings
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-
 # Copy requirements and install script first for better caching
 COPY requirements.txt .
 COPY install_dependencies.sh .
