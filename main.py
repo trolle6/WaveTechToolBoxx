@@ -573,7 +573,9 @@ async def on_application_command_autocomplete(inter):
     Catches any errors in autocomplete functions and ensures we always return a list.
     """
     try:
-        logger.debug(f"Autocomplete called for command: {inter.data.name}, option: {inter.focused_option.name if inter.focused_option else 'unknown'}")
+        # Log autocomplete call - disnake will handle routing to the correct function
+        command_name = getattr(inter.data, 'name', 'unknown') if hasattr(inter, 'data') else 'unknown'
+        logger.debug(f"Autocomplete called for command: {command_name}")
         # Let disnake handle it normally - it will call the registered autocomplete function
     except Exception as e:
         logger.error(f"Error in on_application_command_autocomplete: {e}", exc_info=True)
