@@ -15,7 +15,6 @@ import logging
 import logging.handlers
 import os
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -338,67 +337,6 @@ except RuntimeError as e:
     sys.exit(1)
 
 logger, discord_handler = setup_logging(config)
-
-# ============ PIP UPGRADE ============
-def upgrade_pip(logger: logging.Logger) -> bool:
-    """
-    Upgrade pip to the latest version at startup.
-    
-    This ensures pip is always up-to-date regardless of how the container
-    or environment was set up. Runs silently and doesn't block startup.
-    
-    Args:
-        logger: Logger instance for messages
-        
-    Returns:
-        True if upgrade succeeded or was skipped, False on critical error
-    """
-    try:
-        # Check current pip version first
-        version_result = subprocess.run(
-            [sys.executable, "-m", "pip", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if version_result.returncode == 0:
-            current_version = version_result.stdout.strip()
-            logger.debug(f"Current pip version: {current_version}")
-        
-        logger.info("⬆️ Upgrading pip to latest version...")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if result.returncode == 0:
-            # Verify the upgrade worked
-            verify_result = subprocess.run(
-                [sys.executable, "-m", "pip", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if verify_result.returncode == 0:
-                new_version = verify_result.stdout.strip()
-                logger.info(f"✅ pip upgraded successfully: {new_version}")
-            else:
-                logger.info("✅ pip upgrade completed")
-            return True
-        else:
-            error_msg = result.stderr[:200] if result.stderr else result.stdout[:200]
-            logger.warning(f"⚠️ pip upgrade returned non-zero exit code: {error_msg}")
-            return True  # Non-critical, continue startup
-    except subprocess.TimeoutExpired:
-        logger.warning("⚠️ pip upgrade timed out (non-critical, continuing)")
-        return True
-    except Exception as e:
-        logger.warning(f"⚠️ Could not upgrade pip (non-critical): {e}")
-        return True  # Non-critical, don't block startup
-
-# Upgrade pip at startup
-upgrade_pip(logger)
 
 # Initialize bot with all intents (needed for voice, members, etc.)
 intents = disnake.Intents.all()

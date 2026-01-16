@@ -19,10 +19,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Upgrade pip first
-echo "⬆️ Upgrading pip to latest version..."
-pip3 install --upgrade pip || echo "⚠️ Could not upgrade pip (non-critical)"
-
 # Install dependencies
 echo "📦 Installing dependencies..."
 pip3 install -r requirements.txt

@@ -1,15 +1,8 @@
 #!/bin/bash
-# Dependency installation script with pip upgrade
-# This script upgrades pip first, then installs all dependencies
+# Dependency installation script
+# This script installs all dependencies from requirements.txt
 
 set -e  # Exit on error
-
-echo "⬆️ Upgrading pip to latest version..."
-echo "Current pip version:"
-pip --version
-pip install --upgrade pip
-echo "✅ pip upgraded to:"
-pip --version
 
 echo "📦 Installing dependencies from requirements.txt..."
 pip install --no-cache-dir -r requirements.txt
