@@ -572,9 +572,11 @@ async def on_application_command_autocomplete(inter):
     Global autocomplete error handler.
     Catches any errors in autocomplete functions and ensures we always return a list.
     """
-    # This event is called by disnake automatically - we don't need to do anything here
-    # The decorator wrappers on the autocomplete functions will handle ensuring lists are returned
-    pass
+    try:
+        logger.debug(f"Autocomplete called for command: {inter.data.name}, option: {inter.focused_option.name if inter.focused_option else 'unknown'}")
+        # Let disnake handle it normally - it will call the registered autocomplete function
+    except Exception as e:
+        logger.error(f"Error in on_application_command_autocomplete: {e}", exc_info=True)
 
 
 @bot.event
