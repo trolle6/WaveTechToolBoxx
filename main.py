@@ -566,20 +566,9 @@ async def on_resumed():
         logger.info("✅ Bot reconnected")
 
 
-@bot.event
-async def on_application_command_autocomplete(inter):
-    """
-    Global autocomplete error handler.
-    This event is called when Discord sends an autocomplete interaction.
-    Disnake will automatically route to the correct autocomplete function based on decorators.
-    """
-    try:
-        # Log that we received an autocomplete request
-        command_name = getattr(inter.data, 'name', 'unknown') if hasattr(inter, 'data') else 'unknown'
-        logger.info(f"🔍 Autocomplete interaction received for command: {command_name}")
-        # Let disnake handle routing - don't interfere
-    except Exception as e:
-        logger.error(f"Error in on_application_command_autocomplete: {e}", exc_info=True)
+# REMOVED: on_application_command_autocomplete event handler
+# Having a custom handler prevents disnake from automatically routing to decorator-based autocomplete functions.
+# Disnake handles autocomplete routing automatically when using @command.autocomplete() decorators.
 
 
 @bot.event
