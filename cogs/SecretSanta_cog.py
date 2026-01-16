@@ -179,6 +179,77 @@ class SecretSantaCog(commands.Cog):
         event = self.state.get("current_event")
         return event if event and event.get("active") else None
     
+    def _get_available_years(self) -> List[int]:
+        """Get list of available years from archive directory"""
+        years = []
+        for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
+            # Skip files in backups subdirectory
+            if "backups" in archive_file.parts:
+                continue
+            year_str = archive_file.stem
+            if year_str.isdigit() and len(year_str) == 4:
+                try:
+                    years.append(int(year_str))
+                except ValueError:
+                    continue
+        return sorted(years, reverse=True)  # Most recent first
+    
+    async def _autocomplete_year(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete function for year selection - shows available years"""
+        available_years = self._get_available_years()
+        if not available_years:
+            return ["No years available"]
+        
+        # Filter years that match the input string
+        string_lower = string.lower()
+        matching_years = [
+            str(year) for year in available_years 
+            if string_lower in str(year) or not string
+        ]
+        
+        # Return up to 25 options (Discord limit)
+        return matching_years[:25]
+    
+    # Autocomplete methods need to be referenced correctly - create wrapper methods
+    async def autocomplete_year_edit_gift(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for edit_gift year parameter"""
+        return await self._autocomplete_year(inter, string)
+    
+    async def autocomplete_year_history(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for history year parameter"""
+        return await self._autocomplete_year(inter, string)
+    
+    async def autocomplete_year_delete(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for delete_year year parameter"""
+        return await self._autocomplete_year(inter, string)
+    
+    async def autocomplete_year_restore(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for restore_year year parameter"""
+        return await self._autocomplete_year(inter, string)
+    
+    async def autocomplete_wishlist_item_number(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for wishlist remove item_number - shows valid item numbers from user's wishlist"""
+        # Validate participant first
+        result = await self._validate_participant(inter)
+        if not result:
+            return []
+        
+        event, user_id = result
+        wishlists = event.get("wishlists", {})
+        user_wishlist = wishlists.get(user_id, [])
+        
+        if not user_wishlist:
+            return []
+        
+        # Return item numbers (1-indexed) as strings
+        valid_numbers = [str(i + 1) for i in range(len(user_wishlist))]
+        
+        # Filter by input string
+        if string:
+            valid_numbers = [num for num in valid_numbers if string in num]
+        
+        return valid_numbers[:25]
+    
     async def _validate_participant(self, inter: disnake.ApplicationCommandInteraction) -> Optional[tuple]:
         """
         Validate user is participant in active event.
@@ -1632,7 +1703,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_edit_gift(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(description="Year of the Secret Santa event (e.g., 2025)"),
+        year: int = commands.Param(description="Year of the Secret Santa event", autocomplete="autocomplete_year_edit_gift"),
         gift_description: str = commands.Param(description="Updated gift description", max_length=2000)
     ):
         """Edit your own gift submission from an archived year"""
@@ -1864,7 +1935,7 @@ class SecretSantaCog(commands.Cog):
     async def wishlist_remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        item_number: int = commands.Param(description="Item number to remove (1-10)", ge=1, le=10)
+        item_number: int = commands.Param(description="Item number to remove (1-10)", ge=1, le=10, autocomplete="autocomplete_wishlist_item_number")
     ):
         """Remove item from wishlist"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2111,7 +2182,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_history(
             self,
             inter: disnake.ApplicationCommandInteraction,
-            year: int = commands.Param(default=None, description="Specific year to view")
+            year: int = commands.Param(default=None, description="Specific year to view", autocomplete="autocomplete_year_history")
     ):
         """Show event history"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2537,7 +2608,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_delete_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(description="Year to delete (e.g., 2025)")
+        year: int = commands.Param(description="Year to delete", autocomplete="autocomplete_year_delete")
     ):
         """Delete archive file for a specific year (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2648,7 +2719,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_restore_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(description="Year to restore (e.g., 2023)")
+        year: int = commands.Param(description="Year to restore", autocomplete="autocomplete_year_restore")
     ):
         """Restore archive file from backups folder (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):

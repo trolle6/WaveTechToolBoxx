@@ -91,6 +91,35 @@ class DistributeZipCog(commands.Cog):
                 return (fid, data)
         return None
     
+    def _get_available_files(self) -> List[str]:
+        """Get list of available file names"""
+        files = self.metadata.get("files", {})
+        return sorted([data.get("name", "") for data in files.values() if data.get("name")])
+    
+    async def _autocomplete_file_name(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete function for file_name selection"""
+        available_files = self._get_available_files()
+        if not available_files:
+            return []
+        
+        # Filter files that match the input string
+        string_lower = string.lower()
+        matching_files = [
+            file_name for file_name in available_files
+            if string_lower in file_name.lower() or not string
+        ]
+        
+        # Return up to 25 options (Discord limit)
+        return matching_files[:25]
+    
+    async def autocomplete_file_name_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for get file_name parameter"""
+        return await self._autocomplete_file_name(inter, string)
+    
+    async def autocomplete_file_name_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for remove file_name parameter"""
+        return await self._autocomplete_file_name(inter, string)
+    
     def _validate_file(self, attachment: disnake.Attachment) -> Optional[str]:
         """Validate file. Returns error message if invalid, None if valid"""
         if not attachment.filename.lower().endswith('.zip'):
@@ -410,7 +439,7 @@ class DistributeZipCog(commands.Cog):
     async def get_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)")
+        file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)", autocomplete="autocomplete_file_name_get")
     ):
         """Get/download a specific file"""
         await inter.response.defer()
@@ -448,7 +477,7 @@ class DistributeZipCog(commands.Cog):
     async def remove_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)")
+        file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)", autocomplete="autocomplete_file_name_remove")
     ):
         """Remove a file (moderator only)"""
         await inter.response.defer()

@@ -265,6 +265,53 @@ class CustomEventsCog(commands.Cog):
         """Get event by ID"""
         return self.events.get(event_id)
     
+    def _get_available_events(self, guild_id: int) -> List[Tuple[int, Event]]:
+        """Get list of available events for a guild"""
+        return [
+            (event_id, event) 
+            for event_id, event in self.events.items() 
+            if event.guild_id == guild_id
+        ]
+    
+    async def _autocomplete_event_id(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete function for event_id selection - returns event IDs as strings"""
+        if not inter.guild:
+            return []
+        
+        events = self._get_available_events(inter.guild.id)
+        if not events:
+            return []
+        
+        # Sort by event ID (most recent first)
+        events.sort(key=lambda x: x[0], reverse=True)
+        
+        # Filter events that match the input string (by ID or name)
+        string_lower = string.lower()
+        matching_ids = []
+        for event_id, event in events:
+            # Match by ID or name
+            if not string or string_lower in str(event_id) or string_lower in event.name.lower():
+                matching_ids.append(str(event_id))
+        
+        # Return up to 25 options (Discord limit)
+        return matching_ids[:25]
+    
+    async def autocomplete_event_id_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for join event_id parameter"""
+        return await self._autocomplete_event_id(inter, string)
+    
+    async def autocomplete_event_id_shuffle(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for shuffle event_id parameter"""
+        return await self._autocomplete_event_id(inter, string)
+    
+    async def autocomplete_event_id_view(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for view event_id parameter"""
+        return await self._autocomplete_event_id(inter, string)
+    
+    async def autocomplete_event_id_stop(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for stop event_id parameter"""
+        return await self._autocomplete_event_id(inter, string)
+    
     # ============ COMMANDS ============
     
     @commands.slash_command(name="event")
@@ -336,7 +383,7 @@ class CustomEventsCog(commands.Cog):
     async def event_join(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        event_id: int = commands.Param(description="Event ID"),
+        event_id: int = commands.Param(description="Event ID", autocomplete="autocomplete_event_id_join"),
         timezone: str = commands.Param(default="UTC+0", description="Your timezone (e.g., UTC+2, UTC-5)")
     ):
         """Join an event"""
@@ -381,7 +428,7 @@ class CustomEventsCog(commands.Cog):
     async def event_shuffle(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        event_id: int = commands.Param(description="Event ID")
+        event_id: int = commands.Param(description="Event ID", autocomplete="autocomplete_event_id_shuffle")
     ):
         """Run matching algorithm"""
         await inter.response.defer(ephemeral=True)
@@ -449,7 +496,7 @@ class CustomEventsCog(commands.Cog):
     async def event_view(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        event_id: int = commands.Param(description="Event ID")
+        event_id: int = commands.Param(description="Event ID", autocomplete="autocomplete_event_id_view")
     ):
         """View event results"""
         await inter.response.defer(ephemeral=True)
@@ -494,7 +541,7 @@ class CustomEventsCog(commands.Cog):
     async def event_stop(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        event_id: int = commands.Param(description="Event ID")
+        event_id: int = commands.Param(description="Event ID", autocomplete="autocomplete_event_id_stop")
     ):
         """Stop event"""
         await inter.response.defer(ephemeral=True)
