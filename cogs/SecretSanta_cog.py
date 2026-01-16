@@ -2522,6 +2522,11 @@ class SecretSantaCog(commands.Cog):
             embed.set_footer(
                 text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
             await inter.edit_original_response(embed=embed)
+    
+    @ss_history.autocomplete("year")
+    async def autocomplete_year_history_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete decorator for history year parameter"""
+        return await self.autocomplete_year_history(inter, string)
 
     @ss_root.sub_command(name="user_history", description="View a specific user's Secret Santa history across all years")
     async def ss_user_history(
@@ -2854,6 +2859,11 @@ class SecretSantaCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Failed to move archive to backups: {e}")
             await inter.edit_original_response(content=f"❌ Failed to move archive: {e}")
+    
+    @ss_delete_year.autocomplete("year")
+    async def autocomplete_year_delete_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete decorator for delete_year year parameter"""
+        return await self.autocomplete_year_delete(inter, string)
 
     @ss_root.sub_command(name="restore_year", description="♻️ Restore a year from backups")
     @commands.has_permissions(administrator=True)
