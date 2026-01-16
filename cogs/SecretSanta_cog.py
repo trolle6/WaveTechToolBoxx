@@ -95,6 +95,7 @@ SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 60  # 1 minute - how often to check for
 
 def autocomplete_safety_wrapper(func):
     """Decorator to ensure autocomplete functions always return a list"""
+    @functools.wraps(func)
     async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
         try:
             result = await func(self, inter, string)
@@ -131,6 +132,7 @@ if ARCHIVE_DIR.exists():
 
 def autocomplete_safety_wrapper(func):
     """Decorator to ensure autocomplete functions always return a list"""
+    @functools.wraps(func)
     async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
         try:
             result = await func(self, inter, string)
