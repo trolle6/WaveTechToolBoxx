@@ -98,19 +98,23 @@ class DistributeZipCog(commands.Cog):
     
     async def _autocomplete_file_name(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete function for file_name selection"""
-        available_files = self._get_available_files()
-        if not available_files:
-            return []
-        
-        # Filter files that match the input string
-        string_lower = string.lower()
-        matching_files = [
-            file_name for file_name in available_files
-            if string_lower in file_name.lower() or not string
-        ]
-        
-        # Return up to 25 options (Discord limit)
-        return matching_files[:25]
+        try:
+            available_files = self._get_available_files()
+            if not available_files:
+                return []
+            
+            # Filter files that match the input string
+            string_lower = string.lower() if string else ""
+            matching_files = [
+                file_name for file_name in available_files
+                if string_lower in file_name.lower() or not string
+            ]
+            
+            # Return up to 25 options (Discord limit)
+            return matching_files[:25]
+        except Exception as e:
+            self.logger.error(f"Error in file_name autocomplete: {e}", exc_info=True)
+            return []  # Always return a list, even on error
     
     async def autocomplete_file_name_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for get file_name parameter"""

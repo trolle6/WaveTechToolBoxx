@@ -196,19 +196,23 @@ class SecretSantaCog(commands.Cog):
     
     async def _autocomplete_year(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete function for year selection - shows available years"""
-        available_years = self._get_available_years()
-        if not available_years:
-            return ["No years available"]
-        
-        # Filter years that match the input string
-        string_lower = string.lower()
-        matching_years = [
-            str(year) for year in available_years 
-            if string_lower in str(year) or not string
-        ]
-        
-        # Return up to 25 options (Discord limit)
-        return matching_years[:25]
+        try:
+            available_years = self._get_available_years()
+            if not available_years:
+                return []  # Return empty list instead of error message for autocomplete
+            
+            # Filter years that match the input string
+            string_lower = string.lower() if string else ""
+            matching_years = [
+                str(year) for year in available_years 
+                if string_lower in str(year) or not string
+            ]
+            
+            # Return up to 25 options (Discord limit)
+            return matching_years[:25]
+        except Exception as e:
+            self.logger.error(f"Error in year autocomplete: {e}", exc_info=True)
+            return []  # Always return a list, even on error
     
     # Autocomplete methods need to be referenced correctly - create wrapper methods
     async def autocomplete_year_edit_gift(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -229,26 +233,34 @@ class SecretSantaCog(commands.Cog):
     
     async def autocomplete_wishlist_item_number(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for wishlist remove item_number - shows valid item numbers from user's wishlist"""
-        # Validate participant first
-        result = await self._validate_participant(inter)
-        if not result:
-            return []
-        
-        event, user_id = result
-        wishlists = event.get("wishlists", {})
-        user_wishlist = wishlists.get(user_id, [])
-        
-        if not user_wishlist:
-            return []
-        
-        # Return item numbers (1-indexed) as strings
-        valid_numbers = [str(i + 1) for i in range(len(user_wishlist))]
-        
-        # Filter by input string
-        if string:
-            valid_numbers = [num for num in valid_numbers if string in num]
-        
-        return valid_numbers[:25]
+        try:
+            # NOTE: Cannot use _validate_participant here as it sends responses, which breaks autocomplete
+            # Instead, silently check if user is participant without sending any response
+            event = self._get_current_event()
+            if not event or not event.get("active"):
+                return []
+            
+            user_id = str(inter.author.id)
+            if user_id not in event.get("participants", {}):
+                return []
+            
+            wishlists = event.get("wishlists", {})
+            user_wishlist = wishlists.get(user_id, [])
+            
+            if not user_wishlist:
+                return []
+            
+            # Return item numbers (1-indexed) as strings
+            valid_numbers = [str(i + 1) for i in range(len(user_wishlist))]
+            
+            # Filter by input string
+            if string:
+                valid_numbers = [num for num in valid_numbers if string in num]
+            
+            return valid_numbers[:25]
+        except Exception as e:
+            self.logger.error(f"Error in wishlist autocomplete: {e}", exc_info=True)
+            return []  # Always return a list, even on error
     
     async def _validate_participant(self, inter: disnake.ApplicationCommandInteraction) -> Optional[tuple]:
         """

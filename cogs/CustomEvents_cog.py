@@ -275,26 +275,30 @@ class CustomEventsCog(commands.Cog):
     
     async def _autocomplete_event_id(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete function for event_id selection - returns event IDs as strings"""
-        if not inter.guild:
-            return []
-        
-        events = self._get_available_events(inter.guild.id)
-        if not events:
-            return []
-        
-        # Sort by event ID (most recent first)
-        events.sort(key=lambda x: x[0], reverse=True)
-        
-        # Filter events that match the input string (by ID or name)
-        string_lower = string.lower()
-        matching_ids = []
-        for event_id, event in events:
-            # Match by ID or name
-            if not string or string_lower in str(event_id) or string_lower in event.name.lower():
-                matching_ids.append(str(event_id))
-        
-        # Return up to 25 options (Discord limit)
-        return matching_ids[:25]
+        try:
+            if not inter.guild:
+                return []
+            
+            events = self._get_available_events(inter.guild.id)
+            if not events:
+                return []
+            
+            # Sort by event ID (most recent first)
+            events.sort(key=lambda x: x[0], reverse=True)
+            
+            # Filter events that match the input string (by ID or name)
+            string_lower = string.lower() if string else ""
+            matching_ids = []
+            for event_id, event in events:
+                # Match by ID or name
+                if not string or string_lower in str(event_id) or string_lower in event.name.lower():
+                    matching_ids.append(str(event_id))
+            
+            # Return up to 25 options (Discord limit)
+            return matching_ids[:25]
+        except Exception as e:
+            self.logger.error(f"Error in event_id autocomplete: {e}", exc_info=True)
+            return []  # Always return a list, even on error
     
     async def autocomplete_event_id_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for join event_id parameter"""
