@@ -567,61 +567,19 @@ async def on_resumed():
 
 
 @bot.event
-async def on_application_command_autocomplete(inter: disnake.AutocompleteInteraction):
+async def on_application_command_autocomplete(inter):
     """
     Global autocomplete error handler.
     Catches any errors in autocomplete functions and ensures we always return a list.
     """
-    try:
-        # Let disnake handle it normally first
-        # This will call our autocomplete functions
-        pass
-    except TypeError as e:
-        # Catch the specific TypeError about choices being a string
-        if "choices argument should be a list/sequence or dict, not str" in str(e):
-            logger.error(
-                f"Autocomplete TypeError caught: command={inter.application_command.name if inter.application_command else 'unknown'}, "
-                f"focused_option={inter.focused_option.name if inter.focused_option else 'unknown'}, "
-                f"error={e}"
-            )
-            # Try to respond with empty list to prevent crash
-            try:
-                if not inter.response.is_done():
-                    await inter.response.autocomplete([])
-            except Exception:
-                pass
-        else:
-            raise
-    except Exception as e:
-        logger.error(f"Error in autocomplete handler: {e}", exc_info=True)
-        # Try to respond with empty list
-        try:
-            if not inter.response.is_done():
-                await inter.response.autocomplete([])
-        except Exception:
-            pass
+    # This event is called by disnake automatically - we don't need to do anything here
+    # The decorator wrappers on the autocomplete functions will handle ensuring lists are returned
+    pass
 
 
 @bot.event
 async def on_error(event, *args, **kwargs):
     """Global error handler"""
-    # Special handling for autocomplete errors
-    if event == "on_application_command_autocomplete":
-        if args and isinstance(args[0], disnake.AutocompleteInteraction):
-            inter = args[0]
-            logger.error(
-                f"Autocomplete error: command={inter.application_command.name if inter.application_command else 'unknown'}, "
-                f"focused_option={inter.focused_option.name if inter.focused_option else 'unknown'}",
-                exc_info=True
-            )
-            # Try to respond with empty list
-            try:
-                if not inter.response.is_done():
-                    await inter.response.autocomplete([])
-            except Exception:
-                pass
-            return
-    
     logger.error(f"Error in {event}", exc_info=True)
 
 
