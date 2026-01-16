@@ -347,42 +347,54 @@ class CustomEventsCog(commands.Cog):
             self.logger.error(f"Error in event_id autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
     
-    @autocomplete_safety_wrapper
     async def autocomplete_event_id_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for join event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            return self._ensure_list_result(result, "autocomplete_event_id_join")
+            final_result = self._ensure_list_result(result, "autocomplete_event_id_join")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_event_id_join: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_join: {e}", exc_info=True)
             return []
     
-    @autocomplete_safety_wrapper
     async def autocomplete_event_id_shuffle(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for shuffle event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            return self._ensure_list_result(result, "autocomplete_event_id_shuffle")
+            final_result = self._ensure_list_result(result, "autocomplete_event_id_shuffle")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_event_id_shuffle: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_shuffle: {e}", exc_info=True)
             return []
     
-    @autocomplete_safety_wrapper
     async def autocomplete_event_id_view(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for view event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            return self._ensure_list_result(result, "autocomplete_event_id_view")
+            final_result = self._ensure_list_result(result, "autocomplete_event_id_view")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_event_id_view: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_view: {e}", exc_info=True)
             return []
     
-    @autocomplete_safety_wrapper
     async def autocomplete_event_id_stop(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for stop event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            return self._ensure_list_result(result, "autocomplete_event_id_stop")
+            final_result = self._ensure_list_result(result, "autocomplete_event_id_stop")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_event_id_stop: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_stop: {e}", exc_info=True)
             return []

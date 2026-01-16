@@ -163,22 +163,28 @@ class DistributeZipCog(commands.Cog):
             self.logger.error(f"Error in file_name autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
     
-    @autocomplete_safety_wrapper
     async def autocomplete_file_name_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for get file_name parameter"""
         try:
             result = await self._autocomplete_file_name(inter, string)
-            return self._ensure_list_result(result, "autocomplete_file_name_get")
+            final_result = self._ensure_list_result(result, "autocomplete_file_name_get")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_file_name_get: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_file_name_get: {e}", exc_info=True)
             return []
     
-    @autocomplete_safety_wrapper
     async def autocomplete_file_name_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for remove file_name parameter"""
         try:
             result = await self._autocomplete_file_name(inter, string)
-            return self._ensure_list_result(result, "autocomplete_file_name_remove")
+            final_result = self._ensure_list_result(result, "autocomplete_file_name_remove")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_file_name_remove: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_file_name_remove: {e}", exc_info=True)
             return []
