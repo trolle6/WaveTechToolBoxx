@@ -31,6 +31,31 @@ EVENTS_DIR = ROOT / "custom_events"
 EVENTS_DIR.mkdir(exist_ok=True)
 
 
+def autocomplete_safety_wrapper(func):
+    """Decorator to ensure autocomplete functions always return a list"""
+    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
+        try:
+            result = await func(self, inter, string)
+            # Ensure result is always a list
+            if isinstance(result, list):
+                return [str(item) for item in result]  # Ensure all items are strings
+            elif result is None:
+                return []
+            elif isinstance(result, str):
+                self.logger.error(f"{func.__name__} returned string: '{result}'")
+                return []
+            else:
+                try:
+                    return [str(item) for item in list(result)]
+                except Exception:
+                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
+                    return []
+        except Exception as e:
+            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
+            return []
+    return wrapper
+
+
 # ============ BASE CLASSES ============
 
 class MatcherInterface(ABC):
@@ -320,6 +345,7 @@ class CustomEventsCog(commands.Cog):
             self.logger.error(f"Error in event_id autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
     
+    @autocomplete_safety_wrapper
     async def autocomplete_event_id_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for join event_id parameter"""
         try:
@@ -329,6 +355,7 @@ class CustomEventsCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_event_id_join: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_event_id_shuffle(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for shuffle event_id parameter"""
         try:
@@ -338,6 +365,7 @@ class CustomEventsCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_event_id_shuffle: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_event_id_view(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for view event_id parameter"""
         try:
@@ -347,6 +375,7 @@ class CustomEventsCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_event_id_view: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_event_id_stop(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for stop event_id parameter"""
         try:

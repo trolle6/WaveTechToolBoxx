@@ -91,6 +91,31 @@ from .secret_santa_checks import mod_check, participant_check
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
 SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 60  # 1 minute - how often to check for scheduled events
 
+
+def autocomplete_safety_wrapper(func):
+    """Decorator to ensure autocomplete functions always return a list"""
+    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
+        try:
+            result = await func(self, inter, string)
+            # Ensure result is always a list
+            if isinstance(result, list):
+                return [str(item) for item in result]  # Ensure all items are strings
+            elif result is None:
+                return []
+            elif isinstance(result, str):
+                self.logger.error(f"{func.__name__} returned string: '{result}'")
+                return []
+            else:
+                try:
+                    return [str(item) for item in list(result)]
+                except Exception:
+                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
+                    return []
+        except Exception as e:
+            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
+            return []
+    return wrapper
+
 # Log the paths for debugging
 import logging
 _init_logger = logging.getLogger("bot.santa.init")
@@ -101,6 +126,31 @@ if ARCHIVE_DIR.exists():
     files = list(ARCHIVE_DIR.glob("*.json"))
     _init_logger.info(f"Archive files found: {[f.name for f in files]}")
 
+
+
+def autocomplete_safety_wrapper(func):
+    """Decorator to ensure autocomplete functions always return a list"""
+    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
+        try:
+            result = await func(self, inter, string)
+            # Ensure result is always a list
+            if isinstance(result, list):
+                return [str(item) for item in result]  # Ensure all items are strings
+            elif result is None:
+                return []
+            elif isinstance(result, str):
+                self.logger.error(f"{func.__name__} returned string: '{result}'")
+                return []
+            else:
+                try:
+                    return [str(item) for item in list(result)]
+                except Exception:
+                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
+                    return []
+        except Exception as e:
+            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
+            return []
+    return wrapper
 
 
 class SecretSantaCog(commands.Cog):
@@ -242,6 +292,7 @@ class SecretSantaCog(commands.Cog):
     
     # Autocomplete methods need to be referenced correctly - create wrapper methods
     # These wrappers ensure the methods are properly callable by disnake
+    @autocomplete_safety_wrapper
     async def autocomplete_year_edit_gift(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for edit_gift year parameter"""
         try:
@@ -255,6 +306,7 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_year_edit_gift: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_year_history(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for history year parameter"""
         try:
@@ -264,6 +316,7 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_year_history: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_year_delete(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for delete_year year parameter"""
         try:
@@ -273,6 +326,7 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_year_delete: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_year_restore(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for restore_year year parameter"""
         try:
@@ -282,6 +336,7 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_year_restore: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_wishlist_item_number(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for wishlist remove item_number - shows valid item numbers from user's wishlist"""
         try:

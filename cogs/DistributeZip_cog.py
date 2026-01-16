@@ -45,6 +45,31 @@ MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB - Discord's limit for attachments
 MEGABYTE = 1024 * 1024  # Bytes in one megabyte (for size formatting)
 
 
+def autocomplete_safety_wrapper(func):
+    """Decorator to ensure autocomplete functions always return a list"""
+    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
+        try:
+            result = await func(self, inter, string)
+            # Ensure result is always a list
+            if isinstance(result, list):
+                return [str(item) for item in result]  # Ensure all items are strings
+            elif result is None:
+                return []
+            elif isinstance(result, str):
+                self.logger.error(f"{func.__name__} returned string: '{result}'")
+                return []
+            else:
+                try:
+                    return [str(item) for item in list(result)]
+                except Exception:
+                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
+                    return []
+        except Exception as e:
+            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
+            return []
+    return wrapper
+
+
 def load_metadata() -> Dict:
     """Load file metadata"""
     if METADATA_FILE.exists():
@@ -136,6 +161,7 @@ class DistributeZipCog(commands.Cog):
             self.logger.error(f"Error in file_name autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
     
+    @autocomplete_safety_wrapper
     async def autocomplete_file_name_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for get file_name parameter"""
         try:
@@ -145,6 +171,7 @@ class DistributeZipCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_file_name_get: {e}", exc_info=True)
             return []
     
+    @autocomplete_safety_wrapper
     async def autocomplete_file_name_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for remove file_name parameter"""
         try:
