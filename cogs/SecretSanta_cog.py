@@ -293,7 +293,98 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Error in year autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
     
-    # Autocomplete methods - will be registered via decorators after command definitions  # Always return a list, even on error
+    # Autocomplete methods - registered via string references in Param()
+    async def autocomplete_year_edit_gift(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for edit_gift year parameter"""
+        try:
+            self.logger.info(f"autocomplete_year_edit_gift CALLED with string='{string}'")
+            result = await self._autocomplete_year(inter, string)
+            self.logger.info(f"autocomplete_year_edit_gift got result: {result}")
+            final_result = self._ensure_list_result(result, "autocomplete_year_edit_gift")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_year_edit_gift: _ensure_list_result returned {type(final_result)}")
+                return []
+            self.logger.info(f"autocomplete_year_edit_gift returning: {final_result}")
+            return final_result
+        except Exception as e:
+            self.logger.error(f"Error in autocomplete_year_edit_gift: {e}", exc_info=True)
+            return []
+    
+    async def autocomplete_year_history(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for history year parameter"""
+        try:
+            self.logger.info(f"autocomplete_year_history CALLED with string='{string}'")
+            result = await self._autocomplete_year(inter, string)
+            final_result = self._ensure_list_result(result, "autocomplete_year_history")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_year_history: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
+        except Exception as e:
+            self.logger.error(f"Error in autocomplete_year_history: {e}", exc_info=True)
+            return []
+    
+    async def autocomplete_year_delete(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for delete_year year parameter"""
+        try:
+            self.logger.info(f"autocomplete_year_delete CALLED with string='{string}'")
+            result = await self._autocomplete_year(inter, string)
+            final_result = self._ensure_list_result(result, "autocomplete_year_delete")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_year_delete: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
+        except Exception as e:
+            self.logger.error(f"Error in autocomplete_year_delete: {e}", exc_info=True)
+            return []
+    
+    async def autocomplete_year_restore(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for restore_year year parameter"""
+        try:
+            self.logger.info(f"autocomplete_year_restore CALLED with string='{string}'")
+            result = await self._autocomplete_year(inter, string)
+            final_result = self._ensure_list_result(result, "autocomplete_year_restore")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_year_restore: _ensure_list_result returned {type(final_result)}")
+                return []
+            return final_result
+        except Exception as e:
+            self.logger.error(f"Error in autocomplete_year_restore: {e}", exc_info=True)
+            return []
+    
+    async def autocomplete_wishlist_item_number(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for wishlist remove item_number - shows valid item numbers from user's wishlist"""
+        try:
+            self.logger.info(f"autocomplete_wishlist_item_number CALLED with string='{string}'")
+            event = self._get_current_event()
+            if not event or not event.get("active"):
+                return []
+            
+            user_id = str(inter.author.id)
+            if user_id not in event.get("participants", {}):
+                return []
+            
+            wishlists = event.get("wishlists", {})
+            user_wishlist = wishlists.get(user_id, [])
+            
+            if not user_wishlist:
+                return []
+            
+            valid_numbers = [str(i + 1) for i in range(len(user_wishlist))]
+            
+            if string:
+                valid_numbers = [num for num in valid_numbers if string in num]
+            
+            result = valid_numbers[:25]
+            final_result = self._ensure_list_result(result, "autocomplete_wishlist_item_number")
+            if not isinstance(final_result, list):
+                self.logger.error(f"autocomplete_wishlist_item_number: _ensure_list_result returned {type(final_result)}")
+                return []
+            self.logger.info(f"autocomplete_wishlist_item_number returning: {final_result}")
+            return final_result
+        except Exception as e:
+            self.logger.error(f"Error in wishlist autocomplete: {e}", exc_info=True)
+            return []
     
     async def _validate_participant(self, inter: disnake.ApplicationCommandInteraction) -> Optional[tuple]:
         """
