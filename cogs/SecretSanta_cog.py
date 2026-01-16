@@ -253,25 +253,16 @@ class SecretSantaCog(commands.Cog):
     
     def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
         """Universal safety wrapper - ensures autocomplete always returns a list"""
-        self.logger.debug(f"_ensure_list_result called: function={function_name}, result_type={type(result)}, result={result}")
         if isinstance(result, list):
-            # Ensure all items are strings
-            final = [str(item) for item in result]
-            self.logger.debug(f"_ensure_list_result: converted list to strings, length={len(final)}")
-            return final
+            return [str(item) for item in result]  # Ensure all items are strings
         elif result is None:
-            self.logger.warning(f"{function_name} returned None, returning empty list")
             return []
         elif isinstance(result, str):
-            # If somehow a string was returned, log it and return empty list
             self.logger.error(f"{function_name} returned string instead of list: '{result}'")
             return []
         else:
-            # Try to convert to list, or return empty
             try:
-                converted = list(result) if result else []
-                self.logger.debug(f"{function_name} converted {type(result)} to list, length={len(converted)}")
-                return converted
+                return list(result) if result else []
             except Exception as e:
                 self.logger.error(f"{function_name} returned invalid type: {type(result)}, error={e}")
                 return []
@@ -301,15 +292,8 @@ class SecretSantaCog(commands.Cog):
     async def autocomplete_year_edit_gift(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for edit_gift year parameter"""
         try:
-            self.logger.info(f"autocomplete_year_edit_gift CALLED with string='{string}'")
             result = await self._autocomplete_year(inter, string)
-            self.logger.info(f"autocomplete_year_edit_gift got result: {result}")
-            final_result = self._ensure_list_result(result, "autocomplete_year_edit_gift")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_year_edit_gift: _ensure_list_result returned {type(final_result)}")
-                return []
-            self.logger.info(f"autocomplete_year_edit_gift returning: {final_result}")
-            return final_result
+            return self._ensure_list_result(result, "autocomplete_year_edit_gift")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_edit_gift: {e}", exc_info=True)
             return []
@@ -317,13 +301,8 @@ class SecretSantaCog(commands.Cog):
     async def autocomplete_year_history(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for history year parameter"""
         try:
-            self.logger.info(f"autocomplete_year_history CALLED with string='{string}'")
             result = await self._autocomplete_year(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_year_history")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_year_history: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
+            return self._ensure_list_result(result, "autocomplete_year_history")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_history: {e}", exc_info=True)
             return []
@@ -331,13 +310,8 @@ class SecretSantaCog(commands.Cog):
     async def autocomplete_year_delete(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for delete_year year parameter"""
         try:
-            self.logger.info(f"autocomplete_year_delete CALLED with string='{string}'")
             result = await self._autocomplete_year(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_year_delete")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_year_delete: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
+            return self._ensure_list_result(result, "autocomplete_year_delete")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_delete: {e}", exc_info=True)
             return []
@@ -345,13 +319,8 @@ class SecretSantaCog(commands.Cog):
     async def autocomplete_year_restore(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for restore_year year parameter"""
         try:
-            self.logger.info(f"autocomplete_year_restore CALLED with string='{string}'")
             result = await self._autocomplete_year(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_year_restore")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_year_restore: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
+            return self._ensure_list_result(result, "autocomplete_year_restore")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_restore: {e}", exc_info=True)
             return []
@@ -359,7 +328,6 @@ class SecretSantaCog(commands.Cog):
     async def autocomplete_wishlist_item_number(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for wishlist remove item_number - shows valid item numbers from user's wishlist"""
         try:
-            self.logger.info(f"autocomplete_wishlist_item_number CALLED with string='{string}'")
             event = self._get_current_event()
             if not event or not event.get("active"):
                 return []
@@ -380,12 +348,7 @@ class SecretSantaCog(commands.Cog):
                 valid_numbers = [num for num in valid_numbers if string in num]
             
             result = valid_numbers[:25]
-            final_result = self._ensure_list_result(result, "autocomplete_wishlist_item_number")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_wishlist_item_number: _ensure_list_result returned {type(final_result)}")
-                return []
-            self.logger.info(f"autocomplete_wishlist_item_number returning: {final_result}")
-            return final_result
+            return self._ensure_list_result(result, "autocomplete_wishlist_item_number")
         except Exception as e:
             self.logger.error(f"Error in wishlist autocomplete: {e}", exc_info=True)
             return []
@@ -2000,14 +1963,7 @@ class SecretSantaCog(commands.Cog):
     @ss_edit_gift.autocomplete("year")
     async def autocomplete_year_edit_gift_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete decorator for edit_gift year parameter"""
-        try:
-            self.logger.info(f"DECORATOR autocomplete_year_edit_gift_decorator CALLED with string='{string}'")
-            result = await self.autocomplete_year_edit_gift(inter, string)
-            self.logger.info(f"DECORATOR returning: {result}")
-            return result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_year_edit_gift_decorator: {e}", exc_info=True)
-            return []
+        return await self.autocomplete_year_edit_gift(inter, string)
 
     @ss_root.sub_command_group(name="wishlist", description="Manage your Secret Santa wishlist")
     async def ss_wishlist(self, inter: disnake.ApplicationCommandInteraction):
@@ -2133,14 +2089,7 @@ class SecretSantaCog(commands.Cog):
     @wishlist_remove.autocomplete("item_number")
     async def autocomplete_wishlist_item_number_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete decorator for wishlist remove item_number"""
-        try:
-            self.logger.info(f"DECORATOR autocomplete_wishlist_item_number_decorator CALLED with string='{string}'")
-            result = await self.autocomplete_wishlist_item_number(inter, string)
-            self.logger.info(f"DECORATOR returning: {result}")
-            return result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_wishlist_item_number_decorator: {e}", exc_info=True)
-            return []
+        return await self.autocomplete_wishlist_item_number(inter, string)
     
     @ss_wishlist.sub_command(name="view", description="View your wishlist")
     async def wishlist_view(self, inter: disnake.ApplicationCommandInteraction):
@@ -2549,14 +2498,7 @@ class SecretSantaCog(commands.Cog):
     @ss_history.autocomplete("year")
     async def autocomplete_year_history_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete decorator for history year parameter"""
-        try:
-            self.logger.info(f"DECORATOR autocomplete_year_history_decorator CALLED with string='{string}'")
-            result = await self.autocomplete_year_history(inter, string)
-            self.logger.info(f"DECORATOR returning: {result}")
-            return result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_year_history_decorator: {e}", exc_info=True)
-            return []
+        return await self.autocomplete_year_history(inter, string)
 
     @ss_root.sub_command(name="user_history", description="View a specific user's Secret Santa history across all years")
     async def ss_user_history(
@@ -2893,14 +2835,7 @@ class SecretSantaCog(commands.Cog):
     @ss_delete_year.autocomplete("year")
     async def autocomplete_year_delete_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete decorator for delete_year year parameter"""
-        try:
-            self.logger.info(f"DECORATOR autocomplete_year_delete_decorator CALLED with string='{string}'")
-            result = await self.autocomplete_year_delete(inter, string)
-            self.logger.info(f"DECORATOR returning: {result}")
-            return result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_year_delete_decorator: {e}", exc_info=True)
-            return []
+        return await self.autocomplete_year_delete(inter, string)
 
     @ss_root.sub_command(name="restore_year", description="♻️ Restore a year from backups")
     @commands.has_permissions(administrator=True)
@@ -2990,14 +2925,7 @@ class SecretSantaCog(commands.Cog):
     @ss_restore_year.autocomplete("year")
     async def autocomplete_year_restore_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete decorator for restore_year year parameter"""
-        try:
-            self.logger.info(f"DECORATOR autocomplete_year_restore_decorator CALLED with string='{string}'")
-            result = await self.autocomplete_year_restore(inter, string)
-            self.logger.info(f"DECORATOR returning: {result}")
-            return result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_year_restore_decorator: {e}", exc_info=True)
-            return []
+        return await self.autocomplete_year_restore(inter, string)
 
     @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
     @commands.has_permissions(administrator=True)
