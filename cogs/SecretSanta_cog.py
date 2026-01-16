@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import secrets
 import time
 from typing import Any, Dict, List, Optional

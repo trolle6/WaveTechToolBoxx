@@ -19,6 +19,7 @@ COMMANDS:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -47,6 +48,7 @@ MEGABYTE = 1024 * 1024  # Bytes in one megabyte (for size formatting)
 
 def autocomplete_safety_wrapper(func):
     """Decorator to ensure autocomplete functions always return a list"""
+    @functools.wraps(func)
     async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
         try:
             result = await func(self, inter, string)

@@ -13,6 +13,7 @@ This handles everything else.
 """
 
 import asyncio
+import functools
 import json
 import secrets
 import time
@@ -33,6 +34,7 @@ EVENTS_DIR.mkdir(exist_ok=True)
 
 def autocomplete_safety_wrapper(func):
     """Decorator to ensure autocomplete functions always return a list"""
+    @functools.wraps(func)
     async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
         try:
             result = await func(self, inter, string)
