@@ -1996,6 +1996,11 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(
                 content=f"❌ An error occurred while updating your gift: {e}"
             )
+    
+    @ss_edit_gift.autocomplete("year")
+    async def autocomplete_year_edit_gift_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete decorator for edit_gift year parameter"""
+        return await self.autocomplete_year_edit_gift(inter, string)
 
     @ss_root.sub_command_group(name="wishlist", description="Manage your Secret Santa wishlist")
     async def ss_wishlist(self, inter: disnake.ApplicationCommandInteraction):
