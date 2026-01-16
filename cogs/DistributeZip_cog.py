@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import disnake
 from disnake.ext import commands
@@ -96,6 +96,25 @@ class DistributeZipCog(commands.Cog):
         files = self.metadata.get("files", {})
         return sorted([data.get("name", "") for data in files.values() if data.get("name")])
     
+    def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
+        """Universal safety wrapper - ensures autocomplete always returns a list"""
+        if isinstance(result, list):
+            # Ensure all items are strings
+            return [str(item) for item in result]
+        elif result is None:
+            return []
+        elif isinstance(result, str):
+            # If somehow a string was returned, log it and return empty list
+            self.logger.error(f"{function_name} returned string instead of list: {result}")
+            return []
+        else:
+            # Try to convert to list, or return empty
+            try:
+                return list(result) if result else []
+            except Exception:
+                self.logger.error(f"{function_name} returned invalid type: {type(result)}")
+                return []
+    
     async def _autocomplete_file_name(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete function for file_name selection"""
         try:
@@ -111,7 +130,8 @@ class DistributeZipCog(commands.Cog):
             ]
             
             # Return up to 25 options (Discord limit)
-            return matching_files[:25]
+            result = matching_files[:25]
+            return self._ensure_list_result(result, "_autocomplete_file_name")
         except Exception as e:
             self.logger.error(f"Error in file_name autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
@@ -120,10 +140,7 @@ class DistributeZipCog(commands.Cog):
         """Autocomplete for get file_name parameter"""
         try:
             result = await self._autocomplete_file_name(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_file_name_get returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_file_name_get")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_file_name_get: {e}", exc_info=True)
             return []
@@ -132,10 +149,7 @@ class DistributeZipCog(commands.Cog):
         """Autocomplete for remove file_name parameter"""
         try:
             result = await self._autocomplete_file_name(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_file_name_remove returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_file_name_remove")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_file_name_remove: {e}", exc_info=True)
             return []

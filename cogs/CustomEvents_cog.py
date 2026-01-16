@@ -273,6 +273,25 @@ class CustomEventsCog(commands.Cog):
             if event.guild_id == guild_id
         ]
     
+    def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
+        """Universal safety wrapper - ensures autocomplete always returns a list"""
+        if isinstance(result, list):
+            # Ensure all items are strings
+            return [str(item) for item in result]
+        elif result is None:
+            return []
+        elif isinstance(result, str):
+            # If somehow a string was returned, log it and return empty list
+            self.logger.error(f"{function_name} returned string instead of list: {result}")
+            return []
+        else:
+            # Try to convert to list, or return empty
+            try:
+                return list(result) if result else []
+            except Exception:
+                self.logger.error(f"{function_name} returned invalid type: {type(result)}")
+                return []
+    
     async def _autocomplete_event_id(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete function for event_id selection - returns event IDs as strings"""
         try:
@@ -295,7 +314,8 @@ class CustomEventsCog(commands.Cog):
                     matching_ids.append(str(event_id))
             
             # Return up to 25 options (Discord limit)
-            return matching_ids[:25]
+            result = matching_ids[:25]
+            return self._ensure_list_result(result, "_autocomplete_event_id")
         except Exception as e:
             self.logger.error(f"Error in event_id autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
@@ -304,10 +324,7 @@ class CustomEventsCog(commands.Cog):
         """Autocomplete for join event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_event_id_join returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_event_id_join")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_join: {e}", exc_info=True)
             return []
@@ -316,10 +333,7 @@ class CustomEventsCog(commands.Cog):
         """Autocomplete for shuffle event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_event_id_shuffle returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_event_id_shuffle")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_shuffle: {e}", exc_info=True)
             return []
@@ -328,10 +342,7 @@ class CustomEventsCog(commands.Cog):
         """Autocomplete for view event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_event_id_view returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_event_id_view")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_view: {e}", exc_info=True)
             return []
@@ -340,10 +351,7 @@ class CustomEventsCog(commands.Cog):
         """Autocomplete for stop event_id parameter"""
         try:
             result = await self._autocomplete_event_id(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_event_id_stop returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_event_id_stop")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_event_id_stop: {e}", exc_info=True)
             return []

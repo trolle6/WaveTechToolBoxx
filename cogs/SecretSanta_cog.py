@@ -194,6 +194,25 @@ class SecretSantaCog(commands.Cog):
                     continue
         return sorted(years, reverse=True)  # Most recent first
     
+    def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
+        """Universal safety wrapper - ensures autocomplete always returns a list"""
+        if isinstance(result, list):
+            # Ensure all items are strings
+            return [str(item) for item in result]
+        elif result is None:
+            return []
+        elif isinstance(result, str):
+            # If somehow a string was returned, log it and return empty list
+            self.logger.error(f"{function_name} returned string instead of list: {result}")
+            return []
+        else:
+            # Try to convert to list, or return empty
+            try:
+                return list(result) if result else []
+            except Exception:
+                self.logger.error(f"{function_name} returned invalid type: {type(result)}")
+                return []
+    
     async def _autocomplete_year(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete function for year selection - shows available years"""
         try:
@@ -209,7 +228,8 @@ class SecretSantaCog(commands.Cog):
             ]
             
             # Return up to 25 options (Discord limit)
-            return matching_years[:25]
+            result = matching_years[:25]
+            return self._ensure_list_result(result, "_autocomplete_year")
         except Exception as e:
             self.logger.error(f"Error in year autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
@@ -220,11 +240,7 @@ class SecretSantaCog(commands.Cog):
         """Autocomplete for edit_gift year parameter"""
         try:
             result = await self._autocomplete_year(inter, string)
-            # Ensure we always return a list
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_year_edit_gift returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_year_edit_gift")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_edit_gift: {e}", exc_info=True)
             return []
@@ -233,10 +249,7 @@ class SecretSantaCog(commands.Cog):
         """Autocomplete for history year parameter"""
         try:
             result = await self._autocomplete_year(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_year_history returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_year_history")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_history: {e}", exc_info=True)
             return []
@@ -245,10 +258,7 @@ class SecretSantaCog(commands.Cog):
         """Autocomplete for delete_year year parameter"""
         try:
             result = await self._autocomplete_year(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_year_delete returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_year_delete")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_delete: {e}", exc_info=True)
             return []
@@ -257,10 +267,7 @@ class SecretSantaCog(commands.Cog):
         """Autocomplete for restore_year year parameter"""
         try:
             result = await self._autocomplete_year(inter, string)
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_year_restore returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_year_restore")
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_restore: {e}", exc_info=True)
             return []
@@ -292,11 +299,7 @@ class SecretSantaCog(commands.Cog):
                 valid_numbers = [num for num in valid_numbers if string in num]
             
             result = valid_numbers[:25]
-            # Ensure we always return a list
-            if not isinstance(result, list):
-                self.logger.error(f"autocomplete_wishlist_item_number returned non-list: {type(result)}")
-                return []
-            return result
+            return self._ensure_list_result(result, "autocomplete_wishlist_item_number")
         except Exception as e:
             self.logger.error(f"Error in wishlist autocomplete: {e}", exc_info=True)
             return []  # Always return a list, even on error
