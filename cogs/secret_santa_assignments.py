@@ -133,7 +133,7 @@ def validate_assignment_possibility(participants: List[int], history: Dict[str, 
         unacceptable = history.get(str(giver), [])
         available = [p for p in participants if p not in unacceptable and p != giver]
         
-                if not available:
+        if not available:
             # CRITICAL: Zero options - truly impossible
             problematic_users.append(str(giver))
         elif len(available) == 1:
