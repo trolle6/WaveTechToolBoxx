@@ -118,11 +118,27 @@ class DistributeZipCog(commands.Cog):
     
     async def autocomplete_file_name_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for get file_name parameter"""
-        return await self._autocomplete_file_name(inter, string)
+        try:
+            result = await self._autocomplete_file_name(inter, string)
+            if not isinstance(result, list):
+                self.logger.error(f"autocomplete_file_name_get returned non-list: {type(result)}")
+                return []
+            return result
+        except Exception as e:
+            self.logger.error(f"Error in autocomplete_file_name_get: {e}", exc_info=True)
+            return []
     
     async def autocomplete_file_name_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for remove file_name parameter"""
-        return await self._autocomplete_file_name(inter, string)
+        try:
+            result = await self._autocomplete_file_name(inter, string)
+            if not isinstance(result, list):
+                self.logger.error(f"autocomplete_file_name_remove returned non-list: {type(result)}")
+                return []
+            return result
+        except Exception as e:
+            self.logger.error(f"Error in autocomplete_file_name_remove: {e}", exc_info=True)
+            return []
     
     def _validate_file(self, attachment: disnake.Attachment) -> Optional[str]:
         """Validate file. Returns error message if invalid, None if valid"""
