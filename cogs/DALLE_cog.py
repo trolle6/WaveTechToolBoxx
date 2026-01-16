@@ -295,7 +295,8 @@ class DALLECog(commands.Cog):
                     elif resp.status == 400:
                         try:
                             error_data = await resp.json()
-                            error_msg = error_data.get("error", {}).get("message", "Bad request")
+                            error_obj = error_data.get("error", {})
+                            error_msg = error_obj.get("message", "Bad request") if isinstance(error_obj, dict) else "Bad request"
                         except Exception:
                             error_msg = "Bad request (could not parse error message)"
                         

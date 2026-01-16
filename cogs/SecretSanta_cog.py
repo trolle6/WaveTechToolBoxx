@@ -87,6 +87,10 @@ from .secret_santa_views import (
 )
 from .secret_santa_checks import mod_check, participant_check
 
+# Constants
+BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
+SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 60  # 1 minute - how often to check for scheduled events
+
 # Log the paths for debugging
 import logging
 _init_logger = logging.getLogger("bot.santa.init")
@@ -153,12 +157,15 @@ class SecretSantaCog(commands.Cog):
             title: Embed title
             description: Embed description
             color: Embed color
-            **fields: Optional named fields to add (name=value pairs)
+            **fields: Optional named fields to add (name=value pairs), special 'footer' key sets footer
         
         Returns:
             Configured embed
         """
         embed = disnake.Embed(title=title, description=description, color=color)
+        footer = fields.pop('footer', None)
+        if footer:
+            embed.set_footer(text=footer)
         for field_name, field_value in fields.items():
             if isinstance(field_value, tuple):
                 # Support (value, inline) tuples
@@ -176,6 +183,7 @@ class SecretSantaCog(commands.Cog):
         """
         Validate user is participant in active event.
         Returns (event, user_id) if valid, None otherwise (sends error response).
+        COMBINED: Gets event + checks participants in one pass.
         """
         event = self._get_current_event()
         if not event:
@@ -183,29 +191,58 @@ class SecretSantaCog(commands.Cog):
             return None
         
         user_id = str(inter.author.id)
+        # COMBINED CHECK: Get participants once and check membership
         if user_id not in event.get("participants", {}):
             await inter.edit_original_response(content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
             return None
         
         return (event, user_id)
     
+    async def _validate_participant_with_assignment(self, inter: disnake.ApplicationCommandInteraction) -> Optional[tuple]:
+        """
+        COMBINED VALIDATION: Validate participant AND check assignment in one pass.
+        Returns (event, user_id, receiver_id, participants, assignments) if valid, None otherwise.
+        This combines 3 separate checks into 1 for efficiency.
+        """
+        event = self._get_current_event()
+        if not event:
+            await inter.edit_original_response(content="There's no Secret Santa event running right now. Maybe soon!")
+            return None
+        
+        user_id = str(inter.author.id)
+        participants = event.get("participants", {})
+        assignments = event.get("assignments", {})
+        
+        # Check participant status
+        if user_id not in participants:
+            await inter.edit_original_response(content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
+            return None
+        
+        # Check assignment status
+        receiver_id = assignments.get(user_id)
+        if not receiver_id:
+            embed = self._error_embed(
+                title="🎅 Hold your reindeer!",
+                description="You don't have a giftee yet! The organizer still needs to run the shuffle. Good things come to those who wait!"
+            )
+            await inter.edit_original_response(embed=embed)
+            return None
+        
+        return (event, user_id, receiver_id, participants, assignments)
+    
     def _error_embed(self, title: str, description: str, footer: Optional[str] = None) -> disnake.Embed:
         """Create a standard error embed"""
-        embed = disnake.Embed(title=title, description=description, color=disnake.Color.red())
-        if footer:
-            embed.set_footer(text=footer)
-        return embed
+        return self._create_embed(title, description, disnake.Color.red(), **({"footer": footer} if footer else {}))
     
     def _success_embed(self, title: str, description: str, footer: Optional[str] = None) -> disnake.Embed:
         """Create a standard success embed"""
-        embed = disnake.Embed(title=title, description=description, color=disnake.Color.green())
-        if footer:
-            embed.set_footer(text=footer)
-        return embed
+        return self._create_embed(title, description, disnake.Color.green(), **({"footer": footer} if footer else {}))
     
     def _truncate_text(self, text: Optional[str], max_length: int = 100) -> str:
         """Truncate text with ellipsis if needed. Handles None values."""
-        return f"{text[:max_length]}..." if text and len(text) > max_length else (text or "")
+        if not text:
+            return ""
+        return f"{text[:max_length]}..." if len(text) > max_length else text
     
     async def _require_event(self, inter: disnake.ApplicationCommandInteraction, custom_message: Optional[str] = None) -> Optional[dict]:
         """Require active event. Returns event if active, None otherwise (sends error response)"""
@@ -494,7 +531,7 @@ class SecretSantaCog(commands.Cog):
         """Periodic backup"""
         try:
             while True:
-                await asyncio.sleep(3600)  # Every hour
+                await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
                 async with self._lock:
                     self._save()
         except asyncio.CancelledError:
@@ -504,7 +541,7 @@ class SecretSantaCog(commands.Cog):
         """Background task that checks for scheduled shuffles and stops, and executes them"""
         try:
             while True:
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS)
                 
                 event = self._get_current_event()
                 if not event:
@@ -1089,8 +1126,9 @@ class SecretSantaCog(commands.Cog):
         assignments = None
         fallback_used = False
         
+        # Try with all years first, then progressively exclude oldest years
         for attempt in range(len(available_years) + 1):
-            if attempt > 0:
+            if attempt:
                 exclude_years = available_years[:attempt]
                 fallback_used = True
                 self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
@@ -1303,10 +1341,10 @@ class SecretSantaCog(commands.Cog):
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
         
-        # Check if there's a scheduled shuffle and cancel it
+        # COMBINED: Get event and check/cancel scheduled shuffle in one pass
         event = self._get_current_event()
-        if event and event.get("scheduled_shuffle_time"):
-            scheduled_time = event.get("scheduled_shuffle_time")
+        scheduled_time = event.get("scheduled_shuffle_time") if event else None
+        if scheduled_time:
             async with self._lock:
                 event.pop("scheduled_shuffle_time", None)
                 event.pop("scheduled_by_user_id", None)
@@ -1325,6 +1363,7 @@ class SecretSantaCog(commands.Cog):
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
 
+        # COMBINED: Get event and check/cancel scheduled stop in one pass
         event = self._get_current_event()
         if not event:
             await inter.edit_original_response(content="❌ No active event")
@@ -1332,9 +1371,8 @@ class SecretSantaCog(commands.Cog):
 
         # Check if there's a scheduled stop and cancel it
         cancelled_scheduled = False
-        scheduled_time = None
-        if event.get("scheduled_stop_time"):
-            scheduled_time = event.get("scheduled_stop_time")
+        scheduled_time = event.get("scheduled_stop_time")
+        if scheduled_time:
             async with self._lock:
                 event.pop("scheduled_stop_time", None)
                 event.pop("scheduled_stop_by_user_id", None)
@@ -1422,16 +1460,11 @@ class SecretSantaCog(commands.Cog):
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
 
-        # Validate participant
-        result = await self._validate_participant(inter)
+        # COMBINED VALIDATION: Participant + assignment check in one pass
+        result = await self._validate_participant_with_assignment(inter)
         if not result:
             return
-        event, user_id = result
-
-        # Check if user has assignment
-        receiver_id = await self._check_assignment(inter, event, user_id)
-        if not receiver_id:
-            return
+        event, user_id, receiver_id, _, _ = result
 
         # Rewrite question for anonymity (only if requested)
         if use_ai_rewrite:
@@ -1527,20 +1560,16 @@ class SecretSantaCog(commands.Cog):
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
 
-        # Validate participant
-        result = await self._validate_participant(inter)
+        # COMBINED VALIDATION: Participant + assignment check in one pass
+        result = await self._validate_participant_with_assignment(inter)
         if not result:
             return
-        event, user_id = result
-
-        # Check if user has assignment
-        receiver_id = await self._check_assignment(inter, event, user_id)
-        if not receiver_id:
-            return
-        receiver_name = event["participants"].get(str(receiver_id), f"User {receiver_id}")
+        event, user_id, receiver_id, participants, _ = result
+        receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
 
         # Check if this is updating an existing submission
-        existing_submission = event.get("gift_submissions", {}).get(user_id)
+        gift_submissions = event.get("gift_submissions", {})
+        existing_submission = gift_submissions.get(user_id)
         is_update = existing_submission is not None
 
         # Save gift (overwrites if already exists - simple approach!)
@@ -1635,6 +1664,7 @@ class SecretSantaCog(commands.Cog):
                 assignments = archive_data["assignments"]
             elif "event" in archive_data and "assignments" in archive_data["event"]:
                 # Unified format - convert to list for editing
+                # COMBINED: Cache all event data in one pass to avoid repeated .get() calls
                 is_unified_format = True
                 event = archive_data["event"]
                 participants = event.get("participants", {})
@@ -2246,14 +2276,12 @@ class SecretSantaCog(commands.Cog):
                     )
 
             # Calculate all-time statistics
-            total_participants = sum(
-                len(archives[y].get("event", {}).get("participants", {}))
-                for y in sorted_years
-            )
-            total_gifts = sum(
-                len(archives[y].get("event", {}).get("gift_submissions", {}))
-                for y in sorted_years
-            )
+            # Cache event lookups to avoid repeated .get() chains
+            total_participants = total_gifts = 0
+            for y in sorted_years:
+                event_data = archives[y].get("event", {})
+                total_participants += len(event_data.get("participants", {}))
+                total_gifts += len(event_data.get("gift_submissions", {}))
             avg_participants = total_participants / len(sorted_years) if sorted_years else 0
             avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
 
@@ -2761,20 +2789,16 @@ class SecretSantaCog(commands.Cog):
         if payload.user_id == self.bot.user.id:
             return
 
+        # COMBINED CHECK: Get event and validate all conditions in one pass
         event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        if not event or not event.get("active") or event.get("join_closed") or payload.message_id != event.get("announcement_message_id"):
             return
-
-        if event.get("join_closed"):
-            return
-
-        if payload.message_id != event.get("announcement_message_id"):
-            return
-
+        
         user_id = str(payload.user_id)
-
+        participants = event.get("participants", {})
+        
         # Already joined
-        if user_id in event.get("participants", {}):
+        if user_id in participants:
             return
 
         # Get user name
@@ -2789,8 +2813,10 @@ class SecretSantaCog(commands.Cog):
             except Exception:
                 pass
 
-        # Add participant
+        # Add participant (ensure participants dict exists in event, then modify it)
         async with self._lock:
+            if "participants" not in event:
+                event["participants"] = {}
             event["participants"][user_id] = name
             self._save()
 
@@ -2804,20 +2830,16 @@ class SecretSantaCog(commands.Cog):
         if payload.user_id == self.bot.user.id:
             return
 
+        # COMBINED CHECK: Get event and validate all conditions in one pass
         event = self.state.get("current_event")
-        if not event or not event.get("active"):
+        if not event or not event.get("active") or event.get("join_closed") or payload.message_id != event.get("announcement_message_id"):
             return
-
-        if event.get("join_closed"):
-            return
-
-        if payload.message_id != event.get("announcement_message_id"):
-            return
-
+        
         user_id = str(payload.user_id)
-
+        participants = event.get("participants", {})
+        
         # Not a participant
-        if user_id not in event.get("participants", {}):
+        if user_id not in participants:
             return
 
         # Check if user has other reactions on the message
@@ -2838,10 +2860,11 @@ class SecretSantaCog(commands.Cog):
                 if has_reaction:
                     break
 
-            # Remove if no reactions
+            # Remove if no reactions (modify event's participants dict)
             if not has_reaction:
                 async with self._lock:
-                    event["participants"].pop(user_id, None)
+                    if "participants" in event:
+                        event["participants"].pop(user_id, None)
                     self._save()
 
                 leave_msg = self._get_leave_message(self.state['current_year'])

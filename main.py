@@ -83,7 +83,8 @@ class Config:
                 try:
                     self.data[key] = int(val)
                 except ValueError:
-                    logger.warning(f"Invalid integer for {key}, using default {default}")
+                    # Logger not available yet, use print for early config errors
+                    print(f"Warning: Invalid integer for {key}, using default {default}")
                     self.data[key] = default
             else:
                 self.data[key] = val
@@ -678,7 +679,7 @@ async def graceful_shutdown():
 
 
 def handle_signal(signum, frame):
-    """Handle shutdown signals"""
+    """Handle shutdown signals - schedules graceful shutdown"""
     logger.info(f"Received signal {signum} - shutting down")
     try:
         loop = asyncio.get_event_loop()
@@ -687,6 +688,7 @@ def handle_signal(signum, frame):
         else:
             asyncio.run(graceful_shutdown())
     except RuntimeError:
+        # Fallback if event loop is in invalid state
         asyncio.run(graceful_shutdown())
 
 
@@ -754,10 +756,6 @@ if __name__ == "__main__":
         sys.exit(1)
     
     logger.info(f"Successfully loaded {num_loaded} cogs")
-    
-    # Setup signal handlers
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, handle_signal)
     
     # Retry configuration for infinite retry with exponential backoff
     MAX_RETRY_WAIT = 60  # Maximum wait time between retries (seconds)

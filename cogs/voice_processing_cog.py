@@ -349,7 +349,7 @@ class VoiceProcessingCog(commands.Cog):
             
             # Log all current assignments for debugging (at INFO level to help diagnose live server issues)
             active_assignments = {
-                uid: data.get("voice") if isinstance(data, dict) else str(data) 
+                uid: (data.get("voice") if isinstance(data, dict) else data)
                 for uid, data in guild_assignments.items()
             }
             self.logger.info(f"Current voice assignments for guild {guild_id}: {active_assignments}")

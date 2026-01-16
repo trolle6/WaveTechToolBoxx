@@ -14,6 +14,7 @@ ISOLATION:
 """
 
 import secrets
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -132,7 +133,7 @@ def validate_assignment_possibility(participants: List[int], history: Dict[str, 
         unacceptable = history.get(str(giver), [])
         available = [p for p in participants if p not in unacceptable and p != giver]
         
-        if len(available) == 0:
+                if not available:
             # CRITICAL: Zero options - truly impossible
             problematic_users.append(str(giver))
         elif len(available) == 1:
@@ -187,7 +188,7 @@ def _validate_assignment_integrity(assignments: Dict[int, int], participants: Li
         extra_givers = givers - expected_givers
         raise ValueError(f"Giver mismatch: missing {missing_givers}, extra {extra_givers}")
     
-    # Check 2: Every participant is a receiver exactly once
+    # Check 2 & 3: Every participant is a receiver exactly once (no duplicates)
     receivers = list(assignments.values())
     expected_receivers = set(participants)
     actual_receivers = set(receivers)
@@ -197,26 +198,20 @@ def _validate_assignment_integrity(assignments: Dict[int, int], participants: Li
         extra_receivers = actual_receivers - expected_receivers
         raise ValueError(f"Receiver mismatch: missing {missing_receivers}, extra {extra_receivers}")
     
-    # Check 3: No duplicate receivers (critical bug prevention)
-    if len(receivers) != len(set(receivers)):
-        # Find duplicates
-        receiver_counts = {}
-        for receiver in receivers:
-            receiver_counts[receiver] = receiver_counts.get(receiver, 0) + 1
-        
-        duplicates = {r: count for r, count in receiver_counts.items() if count > 1}
+    # Check 3: No duplicate receivers (critical bug prevention) - optimized check
+    if len(receivers) != len(actual_receivers):
+        # Find duplicates using Counter for efficiency
+        duplicates = {r: count for r, count in Counter(receivers).items() if count > 1}
         raise ValueError(f"DUPLICATE RECEIVERS DETECTED: {duplicates} - This is the bug we're preventing!")
     
-    # Check 4: No self-assignments
+    # Check 4 & 5: No self-assignments and all IDs are valid participants (combined loop)
+    participant_set = set(participants)
     for giver, receiver in assignments.items():
         if giver == receiver:
             raise ValueError(f"Self-assignment detected: {giver} → {receiver}")
-    
-    # Check 5: All assignments are valid participant IDs
-    for giver, receiver in assignments.items():
-        if giver not in participants:
+        if giver not in participant_set:
             raise ValueError(f"Invalid giver: {giver} not in participants")
-        if receiver not in participants:
+        if receiver not in participant_set:
             raise ValueError(f"Invalid receiver: {receiver} not in participants")
 
 
@@ -309,19 +304,16 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
             for giver in shuffled_participants:
                 # HISTORY CHECK: Get list of people this giver has had before
                 # Example: huntoon's unacceptable = [trolle_2023, trolle_2024]
-                unacceptable: List[int] = temp_history.get(str(giver), [])
+                # Use set for O(1) lookups instead of O(n) list membership
+                unacceptable: set[int] = set(temp_history.get(str(giver), []))
                 
-                # CYCLE PREVENTION: Add current assignments where someone else is giving to this giver
-                # This prevents cycles like: A→B, B→C, C→A (which would fail)
-                # For 3+ people, we want a clean chain, not a loop
+                # COMBINED LOOP: Cycle prevention + duplicate prevention in one pass
+                # CYCLE PREVENTION: Add givers who are already assigned to this giver as receiver
+                # DUPLICATE PREVENTION: Add all receivers already assigned
                 for g, r in result.items():
-                    if r == giver:
-                        unacceptable.append(g)
-                
-                # DUPLICATE PREVENTION: Add people who are already assigned as receivers
-                # This prevents multiple people from giving to the same receiver
-                for g, r in result.items():
-                    unacceptable.append(r)
+                    if r == giver:  # Cycle prevention: someone giving to this giver
+                        unacceptable.add(g)
+                    unacceptable.add(r)  # Duplicate prevention: all assigned receivers
                 
                 # AVAILABLE POOL: Find who this person CAN receive
                 # Excludes: history + cycles + duplicates + self
