@@ -633,14 +633,11 @@ def handle_signal(signum, frame):
     """Handle shutdown signals - schedules graceful shutdown"""
     logger.info(f"Received signal {signum} - shutting down")
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(graceful_shutdown())
-        else:
-            asyncio.run(graceful_shutdown())
+        loop = asyncio.get_running_loop()
+        loop.create_task(graceful_shutdown())
     except RuntimeError:
-        # Fallback if event loop is in invalid state
-        asyncio.run(graceful_shutdown())
+        # No running loop - bot.run() will handle shutdown
+        pass
 
 
 # ============ COG LOADING ============
@@ -752,11 +749,14 @@ if __name__ == "__main__":
         if shutdown_flag[0]:
             logger.info("Performing graceful shutdown...")
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(graceful_shutdown())
-                else:
-                    asyncio.run(graceful_shutdown())
+                # Try to get running loop - if bot.run() is still active, it will handle shutdown
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop.is_running():
+                        loop.create_task(graceful_shutdown())
+                except RuntimeError:
+                    # No running loop - bot.run() already stopped, cleanup already done
+                    pass
             except Exception as e:
                 logger.error(f"Cleanup failed: {e}")
             finally:

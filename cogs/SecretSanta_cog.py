@@ -1839,7 +1839,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_edit_gift(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(description="Year of the Secret Santa event", autocomplete="autocomplete_year_edit_gift"),
+        year: int = commands.Param(description="Year of the Secret Santa event"),
         gift_description: str = commands.Param(description="Updated gift description", max_length=2000)
     ):
         """Edit your own gift submission from an archived year"""
@@ -2071,7 +2071,7 @@ class SecretSantaCog(commands.Cog):
     async def wishlist_remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        item_number: int = commands.Param(description="Item number to remove (1-10)", ge=1, le=10, autocomplete="autocomplete_wishlist_item_number")
+        item_number: int = commands.Param(description="Item number to remove (1-10)", ge=1, le=10)
     ):
         """Remove item from wishlist"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2112,7 +2112,12 @@ class SecretSantaCog(commands.Cog):
                 value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
                 inline=False
             )
-        await inter.edit_original_response(embed=embed)
+            await inter.edit_original_response(embed=embed)
+    
+    @wishlist_remove.autocomplete("item_number")
+    async def autocomplete_wishlist_item_number_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete decorator for wishlist remove item_number"""
+        return await self.autocomplete_wishlist_item_number(inter, string)
     
     @ss_wishlist.sub_command(name="view", description="View your wishlist")
     async def wishlist_view(self, inter: disnake.ApplicationCommandInteraction):
@@ -2318,7 +2323,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_history(
             self,
             inter: disnake.ApplicationCommandInteraction,
-            year: int = commands.Param(default=None, description="Specific year to view", autocomplete="autocomplete_year_history")
+            year: int = commands.Param(default=None, description="Specific year to view")
     ):
         """Show event history"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2744,7 +2749,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_delete_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(description="Year to delete", autocomplete="autocomplete_year_delete")
+        year: int = commands.Param(description="Year to delete")
     ):
         """Delete archive file for a specific year (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2855,7 +2860,7 @@ class SecretSantaCog(commands.Cog):
     async def ss_restore_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        year: int = commands.Param(description="Year to restore", autocomplete="autocomplete_year_restore")
+        year: int = commands.Param(description="Year to restore")
     ):
         """Restore archive file from backups folder (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2935,6 +2940,10 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Failed to restore archive from backups: {e}")
             await inter.edit_original_response(content=f"❌ Failed to restore archive: {e}")
     
+    @ss_restore_year.autocomplete("year")
+    async def autocomplete_year_restore_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete decorator for restore_year year parameter"""
+        return await self.autocomplete_year_restore(inter, string)
 
     @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
     @commands.has_permissions(administrator=True)
