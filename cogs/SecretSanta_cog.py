@@ -196,21 +196,27 @@ class SecretSantaCog(commands.Cog):
     
     def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
         """Universal safety wrapper - ensures autocomplete always returns a list"""
+        self.logger.debug(f"_ensure_list_result called: function={function_name}, result_type={type(result)}, result={result}")
         if isinstance(result, list):
             # Ensure all items are strings
-            return [str(item) for item in result]
+            final = [str(item) for item in result]
+            self.logger.debug(f"_ensure_list_result: converted list to strings, length={len(final)}")
+            return final
         elif result is None:
+            self.logger.warning(f"{function_name} returned None, returning empty list")
             return []
         elif isinstance(result, str):
             # If somehow a string was returned, log it and return empty list
-            self.logger.error(f"{function_name} returned string instead of list: {result}")
+            self.logger.error(f"{function_name} returned string instead of list: '{result}'")
             return []
         else:
             # Try to convert to list, or return empty
             try:
-                return list(result) if result else []
-            except Exception:
-                self.logger.error(f"{function_name} returned invalid type: {type(result)}")
+                converted = list(result) if result else []
+                self.logger.debug(f"{function_name} converted {type(result)} to list, length={len(converted)}")
+                return converted
+            except Exception as e:
+                self.logger.error(f"{function_name} returned invalid type: {type(result)}, error={e}")
                 return []
     
     async def _autocomplete_year(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -239,8 +245,12 @@ class SecretSantaCog(commands.Cog):
     async def autocomplete_year_edit_gift(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for edit_gift year parameter"""
         try:
+            self.logger.debug(f"autocomplete_year_edit_gift called with string='{string}'")
             result = await self._autocomplete_year(inter, string)
-            return self._ensure_list_result(result, "autocomplete_year_edit_gift")
+            self.logger.debug(f"autocomplete_year_edit_gift got result type={type(result)}, value={result}")
+            final_result = self._ensure_list_result(result, "autocomplete_year_edit_gift")
+            self.logger.debug(f"autocomplete_year_edit_gift returning type={type(final_result)}, length={len(final_result)}")
+            return final_result
         except Exception as e:
             self.logger.error(f"Error in autocomplete_year_edit_gift: {e}", exc_info=True)
             return []
