@@ -233,13 +233,17 @@ class SecretSantaCog(commands.Cog):
         return event if event and event.get("active") else None
     
     def _get_available_years(self) -> List[int]:
-        """Get list of available years from archive directory"""
+        """Get list of available years from archive directory - excludes backup files"""
         years = []
         for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
             # Skip files in backups subdirectory
             if "backups" in archive_file.parts:
                 continue
+            # Skip backup files (files with "_backup_" in the name)
+            if "_backup_" in archive_file.name.lower():
+                continue
             year_str = archive_file.stem
+            # Only include files that are exactly 4 digits (year format)
             if year_str.isdigit() and len(year_str) == 4:
                 try:
                     years.append(int(year_str))

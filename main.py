@@ -570,15 +570,12 @@ async def on_resumed():
 async def on_application_command_autocomplete(inter):
     """
     Global autocomplete error handler.
-    Catches any errors in autocomplete functions and ensures we always return a list.
+    NOTE: This event is called BEFORE disnake routes to the autocomplete function.
+    We should NOT interfere - just let disnake handle it.
     """
-    try:
-        # Log autocomplete call - disnake will handle routing to the correct function
-        command_name = getattr(inter.data, 'name', 'unknown') if hasattr(inter, 'data') else 'unknown'
-        logger.debug(f"Autocomplete called for command: {command_name}")
-        # Let disnake handle it normally - it will call the registered autocomplete function
-    except Exception as e:
-        logger.error(f"Error in on_application_command_autocomplete: {e}", exc_info=True)
+    # Don't do anything here - disnake will route to the correct autocomplete function
+    # If we try to handle it here, we'll prevent disnake from calling the actual autocomplete functions
+    pass
 
 
 @bot.event
