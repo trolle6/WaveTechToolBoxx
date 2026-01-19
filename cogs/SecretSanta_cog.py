@@ -10,7 +10,7 @@ FEATURES:
 - 🔒 Archive protection (prevents accidental data loss)
 
 COMMANDS (Moderator):
-- /ss start [message_id] [role_id] [shuffle_date] [shuffle_time] [end_date] [end_time] - Start new event (optional auto-shuffle and auto-stop)
+- /ss start [message] [role] [shuffle_date] [shuffle_time] [end_date] [end_time] - Start new event (optional auto-shuffle and auto-stop)
 - /ss shuffle - Make Secret Santa assignments
 - /ss stop - Stop event and archive data (manual stop, cancels scheduled stop if set)
 - /ss participants - View current participants
@@ -67,6 +67,7 @@ import datetime as dt
 import functools
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import disnake
@@ -84,7 +85,8 @@ from .secret_santa_assignments import (
     load_history_from_archives, validate_assignment_possibility, make_assignments
 )
 from .secret_santa_views import (
-    SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator
+    SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
+    CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
 )
 from .secret_santa_checks import mod_check, participant_check
 
@@ -129,33 +131,6 @@ if ARCHIVE_DIR.exists():
     _init_logger.info(f"Archive files found: {[f.name for f in files]}")
 
 
-
-def autocomplete_safety_wrapper(func):
-    """Decorator to ensure autocomplete functions always return a list"""
-    @functools.wraps(func)
-    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
-        try:
-            result = await func(self, inter, string)
-            # Ensure result is always a list
-            if isinstance(result, list):
-                return [str(item) for item in result]  # Ensure all items are strings
-            elif result is None:
-                return []
-            elif isinstance(result, str):
-                self.logger.error(f"{func.__name__} returned string: '{result}'")
-                return []
-            else:
-                try:
-                    return [str(item) for item in list(result)]
-                except Exception:
-                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
-                    return []
-        except Exception as e:
-            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
-            return []
-    return wrapper
-
-
 class SecretSantaCog(commands.Cog):
     """Secret Santa event management"""
 
@@ -165,12 +140,14 @@ class SecretSantaCog(commands.Cog):
 
         # Load state with multi-layer fallback and validation
         # 1. Try main state file → 2. Try backup → 3. Use defaults
+        # Run in executor to avoid blocking event loop during initialization
         self.state = load_state_with_fallback(logger=self.logger)
 
         self._lock = asyncio.Lock()
         self._backup_task: Optional[asyncio.Task] = None
         self._scheduled_shuffle_task: Optional[asyncio.Task] = None
         self._unloaded = False  # Track if already unloaded
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="santa-io")
         
         self.logger.info("Secret Santa cog initialized with persistent reply buttons")
     
@@ -233,7 +210,7 @@ class SecretSantaCog(commands.Cog):
         return event if event and event.get("active") else None
     
     def _get_available_years(self) -> List[int]:
-        """Get list of available years from archive directory - excludes backup files"""
+        """Get list of available years from archive directory - excludes backup files (synchronous)"""
         years = []
         for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
             # Skip files in backups subdirectory
@@ -250,6 +227,11 @@ class SecretSantaCog(commands.Cog):
                 except ValueError:
                     continue
         return sorted(years, reverse=True)  # Most recent first
+    
+    async def _get_available_years_async(self) -> List[int]:
+        """Get list of available years asynchronously (non-blocking)"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, self._get_available_years)
     
     def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
         """Universal safety wrapper - ensures autocomplete always returns a list"""
@@ -268,9 +250,10 @@ class SecretSantaCog(commands.Cog):
                 return []
     
     async def _autocomplete_year(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete function for year selection - shows available years"""
+        """Autocomplete function for year selection - shows available years (non-blocking)"""
         try:
-            available_years = self._get_available_years()
+            # Use async version to avoid blocking event loop on file system operations
+            available_years = await self._get_available_years_async()
             if not available_years:
                 return []  # Return empty list instead of error message for autocomplete
             
@@ -454,7 +437,7 @@ class SecretSantaCog(commands.Cog):
                 "rewritten": rewritten,
                 "timestamp": time.time()
             })
-            self._save()
+            await self._save_async()
     
     def _format_dm_question(self, rewritten_question: str, year: int) -> str:
         """Format a question for DM"""
@@ -693,21 +676,32 @@ class SecretSantaCog(commands.Cog):
                 except asyncio.CancelledError:
                     pass
             
+            # Shutdown executor to prevent resource leaks
+            if hasattr(self, '_executor'):
+                self._executor.shutdown(wait=True, timeout=5)
+                self.logger.info("ThreadPoolExecutor shut down")
+            
             self.logger.info("Secret Santa cog unloaded")
         except Exception as e:
             self.logger.error(f"Async unload error: {e}")
 
     def _save(self):
-        """Save state to disk with error handling and backup"""
+        """Save state to disk with error handling and backup (synchronous - call from executor)"""
         return save_state(self.state, logger=self.logger)
+    
+    async def _save_async(self):
+        """Save state to disk asynchronously (non-blocking)"""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(self._executor, self._save)
 
     async def _backup_loop(self):
-        """Periodic backup"""
+        """Periodic backup - runs file I/O in executor to avoid blocking"""
         try:
             while True:
                 await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
                 async with self._lock:
-                    self._save()
+                    # Run file I/O in executor to avoid blocking event loop
+                    await self._save_async()
         except asyncio.CancelledError:
             pass
 
@@ -733,7 +727,7 @@ class SecretSantaCog(commands.Cog):
                     async with self._lock:
                         event.pop("scheduled_shuffle_time", None)
                         event.pop("scheduled_by_user_id", None)
-                        self._save()
+                        await self._save_async()
                     
                     # Execute the shuffle (without interaction, so we pass None for inter)
                     try:
@@ -973,8 +967,8 @@ class SecretSantaCog(commands.Cog):
     async def ss_start(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        announcement_message_id: str = commands.Param(description="Message ID for reactions"),
-        role_id: Optional[str] = commands.Param(default=None, description="Optional: Role ID to assign participants"),
+        message: disnake.Message = commands.Param(description="Message to track reactions on"),
+        role: Optional[disnake.Role] = commands.Param(default=None, description="Optional: Role to assign participants"),
         shuffle_date: Optional[str] = commands.Param(default=None, description="Optional: Date to auto-shuffle (REQUIRES shuffle_time if set)"),
         shuffle_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if shuffle_date is set! Time to auto-shuffle (e.g., '14:30' or '2:30 PM')"),
         end_date_preset: Optional[str] = commands.Param(
@@ -989,21 +983,15 @@ class SecretSantaCog(commands.Cog):
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
 
-        # Validate message ID
-        try:
-            msg_id = int(announcement_message_id)
-        except ValueError:
-            await inter.edit_original_response(content="❌ Invalid message ID")
+        # Get message ID and validate it's in this guild
+        msg_id = message.id
+        
+        if message.guild and message.guild.id != inter.guild.id:
+            await inter.edit_original_response(content="❌ Message must be from this server")
             return
 
-        # Validate role ID if provided
-        role_id_int = None
-        if role_id:
-            try:
-                role_id_int = int(role_id)
-            except ValueError:
-                await inter.edit_original_response(content="❌ Invalid role ID")
-                return
+        # Get role ID if provided
+        role_id_int = role.id if role else None
 
         # Check if event already active
         event = self.state.get("current_event")
@@ -1043,36 +1031,23 @@ class SecretSantaCog(commands.Cog):
                     "WARNING"
                 )
             
-            # Wait 5 seconds so user can read the warning, then continue
-            await asyncio.sleep(5)
+            # Don't block - let user continue immediately, warning is already shown
+            # The warning embed is sufficient, no need to force a delay
 
-        # Find message and collect participants
+        # Collect participants from the message reactions
         participants = {}
-        found = False
 
-        for channel in inter.guild.text_channels:
-            try:
-                message = await channel.fetch_message(msg_id)
-                found = True
+        # Collect users who reacted
+        for reaction in message.reactions:
+            async for user in reaction.users():
+                if user.bot:
+                    continue
 
-                # Collect users who reacted
-                for reaction in message.reactions:
-                    async for user in reaction.users():
-                        if user.bot:
-                            continue
-
-                        if str(user.id) not in participants:
-                            member = inter.guild.get_member(user.id)
-                            name = member.display_name if member else user.name
-                            participants[str(user.id)] = name
-
-                break
-            except (disnake.NotFound, disnake.Forbidden):
-                continue
-
-        if not found:
-            await inter.edit_original_response(content="❌ Message not found")
-            return
+                user_id_str = str(user.id)
+                if user_id_str not in participants:
+                    member = inter.guild.get_member(user.id)
+                    name = member.display_name if member else user.name
+                    participants[user_id_str] = name
 
         # Parse and validate shuffle schedule if provided
         scheduled_timestamp = None
@@ -1221,7 +1196,7 @@ class SecretSantaCog(commands.Cog):
         async with self._lock:
             self.state["current_year"] = current_year
             self.state["current_event"] = new_event
-            self._save()
+            await self._save_async()
 
         # Send confirmation DMs
         join_msg = self._get_join_message(current_year)
@@ -1236,8 +1211,8 @@ class SecretSantaCog(commands.Cog):
             f"• Participants: {len(participants)}\n"
             f"• DMs sent: {successful}/{len(participants)}"
         )
-        if role_id_int:
-            response_msg += f"\n• Role ID: {role_id_int}"
+        if role:
+            response_msg += f"\n• Role: {role.mention}"
         
         if scheduled_timestamp:
             response_msg += f"\n\n📅 **Shuffle scheduled for:** <t:{int(scheduled_timestamp)}:F>\n"
@@ -1359,14 +1334,20 @@ class SecretSantaCog(commands.Cog):
                         member = guild.get_member(user_id)
                         if member and role not in member.roles:
                             await member.add_roles(role, reason="Secret Santa participant")
-                    except Exception:
-                        pass
+                    except disnake.Forbidden:
+                        self.logger.warning(f"Missing permissions to add role to user {user_id}")
+                    except disnake.HTTPException as e:
+                        self.logger.error(f"Failed to add role to user {user_id}: {e}")
+                    except Exception as e:
+                        self.logger.error(f"Unexpected error adding role to user {user_id}: {e}", exc_info=True)
 
         # Send assignment DMs
         dm_tasks = []
+        participants_dict = event["participants"]
+        current_year = self.state['current_year']
         for giver, receiver in assignments.items():
-            receiver_name = event["participants"].get(str(receiver), f"User {receiver}")
-            msg = self._get_assignment_message(self.state['current_year'], receiver, receiver_name)
+            receiver_name = participants_dict.get(str(receiver), f"User {receiver}")
+            msg = self._get_assignment_message(current_year, receiver, receiver_name)
             dm_tasks.append(self._send_dm(giver, msg))
 
         await asyncio.gather(*dm_tasks)
@@ -1378,7 +1359,7 @@ class SecretSantaCog(commands.Cog):
             # Clear any scheduled shuffle since we just executed
             event.pop("scheduled_shuffle_time", None)
             event.pop("scheduled_by_user_id", None)
-            self._save()
+            await self._save_async()
 
         # Build success message
         response_msg = f"✅ Assignments complete!\n"
@@ -1432,7 +1413,7 @@ class SecretSantaCog(commands.Cog):
             event.pop("scheduled_stop_time", None)
             event.pop("scheduled_stop_by_user_id", None)
             self.state["current_event"] = None
-            self._save()
+            await self._save_async()
         
         # Notify Discord log channel
         if hasattr(self.bot, 'send_to_discord_log'):
@@ -1522,7 +1503,7 @@ class SecretSantaCog(commands.Cog):
             async with self._lock:
                 event.pop("scheduled_shuffle_time", None)
                 event.pop("scheduled_by_user_id", None)
-                self._save()
+                await self._save_async()
             self.logger.info(f"Manual shuffle cancelled scheduled shuffle (was scheduled for <t:{int(scheduled_time)}:F>)")
         
         success, error = await self._execute_shuffle_internal(inter=inter)
@@ -1755,7 +1736,7 @@ class SecretSantaCog(commands.Cog):
                 "submitted_at": time.time(),
                 "timestamp": dt.datetime.now().isoformat()
             }
-            self._save()
+            await self._save_async()
 
         # Create beautiful success embed with variations
         year = self.state['current_year']
@@ -2003,7 +1984,7 @@ class SecretSantaCog(commands.Cog):
             
             # Add item
             user_wishlist.append(item)
-            self._save()
+            await self._save_async()
 
         year = self.state['current_year']
         wishlist_templates = [
@@ -2070,7 +2051,7 @@ class SecretSantaCog(commands.Cog):
         removed_item = user_wishlist.pop(item_number - 1)
 
         async with self._lock:
-            self._save()
+            await self._save_async()
 
         embed = self._success_embed(
             title="✅ Item Removed!",
@@ -2146,7 +2127,7 @@ class SecretSantaCog(commands.Cog):
         # Clear wishlist
         async with self._lock:
             wishlists[user_id] = []
-            self._save()
+            await self._save_async()
 
         await inter.edit_original_response(content="✅ Wishlist cleared!")
 
@@ -2257,39 +2238,44 @@ class SecretSantaCog(commands.Cog):
             await inter.edit_original_response(content="❌ No communications yet")
             return
 
-        embed = disnake.Embed(
-            title=f"💬 Communications ({len(comms)})",
-            color=disnake.Color.blue()
-        )
-
         # Create consistent emoji mapping for all participants this year
         emoji_mapping = self._get_year_emoji_mapping(event["participants"])
         
-        for santa_id, data in list(comms.items())[:5]:
-            santa_name = event["participants"].get(santa_id, f"User {santa_id}")
-            giftee_id = data.get("giftee_id")
-            giftee_name = event["participants"].get(str(giftee_id), "Unknown")
-
-            # Get consistent emojis for each person this year
-            santa_emoji = emoji_mapping.get(santa_id, "🎅")
-            giftee_emoji = emoji_mapping.get(str(giftee_id), "🎄")
-
-            thread = data.get("thread", [])
-            thread_text = "\n".join([
-                f"{santa_emoji if msg['type'] == 'question' else giftee_emoji} {msg['message'][:50]}..."
-                for msg in thread[:3]
-            ])
-
-            embed.add_field(
-                name=f"💬 {santa_name} → {giftee_name} ({len(thread)} messages)",
-                value=thread_text or "No messages",
-                inline=False
-            )
-
+        # Use paginator if more than 5 threads, otherwise show all
         if len(comms) > 5:
-            embed.set_footer(text=f"Showing 5 of {len(comms)} threads")
+            paginator = CommunicationsPaginator(comms, event["participants"], emoji_mapping, timeout=300)
+            embed = paginator.get_embed()
+            await inter.edit_original_response(embed=embed, view=paginator)
+        else:
+            # Show all threads on one page (no pagination needed)
+            embed = disnake.Embed(
+                title=f"💬 Communications ({len(comms)})",
+                color=disnake.Color.blue()
+            )
+            
+            for santa_id, data in comms.items():
+                santa_name = event["participants"].get(santa_id, f"User {santa_id}")
+                giftee_id = data.get("giftee_id")
+                giftee_name = event["participants"].get(str(giftee_id), "Unknown")
 
-        await inter.edit_original_response(embed=embed)
+                # Get consistent emojis for each person this year
+                santa_emoji = emoji_mapping.get(santa_id, "🎅")
+                giftee_emoji = emoji_mapping.get(str(giftee_id), "🎄")
+
+                thread = data.get("thread", [])
+                thread_text = "\n".join([
+                    f"{santa_emoji if msg['type'] == 'question' else giftee_emoji} {msg['message'][:50]}..."
+                    for msg in thread[:3]
+                ])
+
+                embed.add_field(
+                    name=f"💬 {santa_name} → {giftee_name} ({len(thread)} messages)",
+                    value=thread_text or "No messages",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"Total: {len(comms)} thread(s)")
+            await inter.edit_original_response(embed=embed)
 
     @ss_root.sub_command(name="history", description="View past Secret Santa events")
     async def ss_history(
@@ -2402,98 +2388,83 @@ class SecretSantaCog(commands.Cog):
                 await inter.edit_original_response(embed=embed)
 
         else:
-            # Show all years overview with better layout
-            embed = disnake.Embed(
-                title="🎄 Secret Santa Archive",
-                description="Complete history of all Secret Santa events",
-                color=disnake.Color.blue(),
-                timestamp=dt.datetime.now()
-            )
-
-            # Create year timeline
-            timeline_text = []
-            for year_val in sorted_years:
-                archive = archives[year_val]
-                event_data = archive.get("event", {})
-                participants = event_data.get("participants", {})
-                gifts = event_data.get("gift_submissions", {})
-
-                completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
-
-                # Status indicator
-                if completion_rate >= 90:
-                    status = "✅"
-                elif completion_rate >= 70:
-                    status = "🟨"
-                elif completion_rate > 0:
-                    status = "🟧"
-                else:
-                    status = "⏳"
-
-                timeline_text.append(
-                    f"**{year_val}** {status} — {len(participants)} participants, {len(gifts)} gifts ({completion_rate:.0f}%)"
+            # Show all years overview with pagination
+            # Use paginator if more than 10 years, otherwise show all
+            if len(sorted_years) > 10:
+                paginator = YearTimelinePaginator(archives, sorted_years, timeout=300)
+                embed = paginator.get_embed()
+                await inter.edit_original_response(embed=embed, view=paginator)
+            else:
+                # Show all years on one page (no pagination needed)
+                embed = disnake.Embed(
+                    title="🎄 Secret Santa Archive",
+                    description="Complete history of all Secret Santa events",
+                    color=disnake.Color.blue(),
+                    timestamp=dt.datetime.now()
                 )
 
-            # Split timeline into chunks if needed
-            if len(timeline_text) <= 10:
+                # Create year timeline
+                timeline_text = []
+                for year_val in sorted_years:
+                    archive = archives[year_val]
+                    event_data = archive.get("event", {})
+                    participants = event_data.get("participants", {})
+                    gifts = event_data.get("gift_submissions", {})
+
+                    completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
+
+                    # Status indicator
+                    if completion_rate >= 90:
+                        status = "✅"
+                    elif completion_rate >= 70:
+                        status = "🟨"
+                    elif completion_rate > 0:
+                        status = "🟧"
+                    else:
+                        status = "⏳"
+
+                    timeline_text.append(
+                        f"**{year_val}** {status} — {len(participants)} participants, {len(gifts)} gifts ({completion_rate:.0f}%)"
+                    )
+
                 embed.add_field(
                     name="📅 Event Timeline",
                     value="\n".join(timeline_text),
                     inline=False
                 )
-            else:
+
+                # Calculate all-time statistics
+                total_participants = total_gifts = 0
+                for y in sorted_years:
+                    event_data = archives[y].get("event", {})
+                    total_participants += len(event_data.get("participants", {}))
+                    total_gifts += len(event_data.get("gift_submissions", {}))
+                avg_participants = total_participants / len(sorted_years) if sorted_years else 0
+                avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
+
+                stats_text = [
+                    f"**Total Events:** {len(sorted_years)}",
+                    f"**Total Participants:** {total_participants}",
+                    f"**Total Gifts Given:** {total_gifts}",
+                    f"**Average per Year:** {avg_participants:.0f} participants",
+                    f"**Overall Completion:** {avg_completion:.0f}%"
+                ]
+
                 embed.add_field(
-                    name="📅 Recent Events",
-                    value="\n".join(timeline_text[:5]),
+                    name="📊 All-Time Statistics",
+                    value="\n".join(stats_text),
                     inline=False
                 )
+
                 embed.add_field(
-                    name="📅 Earlier Events",
-                    value="\n".join(timeline_text[5:10]),
+                    name="📖 Status Legend",
+                    value="✅ 90%+ complete | 🟨 70-89% | 🟧 Under 70% | ⏳ No gifts recorded",
                     inline=False
                 )
-                if len(timeline_text) > 10:
-                    embed.add_field(
-                        name="​",
-                        value=f"*... and {len(timeline_text) - 10} more years*",
-                        inline=False
-                    )
 
-            # Calculate all-time statistics
-            # Cache event lookups to avoid repeated .get() chains
-            total_participants = total_gifts = 0
-            for y in sorted_years:
-                event_data = archives[y].get("event", {})
-                total_participants += len(event_data.get("participants", {}))
-                total_gifts += len(event_data.get("gift_submissions", {}))
-            avg_participants = total_participants / len(sorted_years) if sorted_years else 0
-            avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
-
-            # Add statistics with better formatting
-            stats_text = [
-                f"**Total Events:** {len(sorted_years)}",
-                f"**Total Participants:** {total_participants}",
-                f"**Total Gifts Given:** {total_gifts}",
-                f"**Average per Year:** {avg_participants:.0f} participants",
-                f"**Overall Completion:** {avg_completion:.0f}%"
-            ]
-
-            embed.add_field(
-                name="📊 All-Time Statistics",
-                value="\n".join(stats_text),
-                inline=False
-            )
-
-            # Add legend
-            embed.add_field(
-                name="📖 Status Legend",
-                value="✅ 90%+ complete | 🟨 70-89% | 🟧 Under 70% | ⏳ No gifts recorded",
-                inline=False
-            )
-
-            embed.set_footer(
-                text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
-            await inter.edit_original_response(embed=embed)
+                embed.set_footer(
+                    text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
+                await inter.edit_original_response(embed=embed)
     
     @ss_history.autocomplete("year")
     async def autocomplete_year_history_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2954,33 +2925,35 @@ class SecretSantaCog(commands.Cog):
             size_kb = backup_file.stat().st_size / 1024
             backup_list.append(f"**{year}** - {size_kb:.1f} KB")
         
-        embed = disnake.Embed(
-            title="📋 Backed-Up Years",
-            description=f"Found **{len(backup_files)}** year(s) in backups folder:",
-            color=disnake.Color.blue()
-        )
-        
-        # Split into chunks if too many
-        chunk_size = 15
-        for i in range(0, len(backup_list), chunk_size):
-            chunk = backup_list[i:i+chunk_size]
-            field_name = "Years" if i == 0 else f"Years (continued)"
+        # Use paginator if more than 15 backups, otherwise show all
+        if len(backup_list) > 15:
+            paginator = BackupListPaginator(backup_list, timeout=300)
+            embed = paginator.get_embed()
+            await inter.edit_original_response(embed=embed, view=paginator)
+        else:
+            # Show all backups on one page (no pagination needed)
+            embed = disnake.Embed(
+                title="📋 Backed-Up Years",
+                description=f"Found **{len(backup_files)}** year(s) in backups folder:",
+                color=disnake.Color.blue()
+            )
+            
             embed.add_field(
-                name=field_name,
-                value="\n".join(chunk),
+                name="Years",
+                value="\n".join(backup_list),
                 inline=False
             )
-        
-        embed.add_field(
-            name="🔧 Actions",
-            value=f"• Restore a year: `/ss restore_year [year]`\n"
-                  f"• View all active years: `/ss history`\n"
-                  f"• Bot ignores backups folder automatically",
-            inline=False
-        )
-        
-        embed.set_footer(text=f"Location: archive/backups/")
-        await inter.edit_original_response(embed=embed)
+            
+            embed.add_field(
+                name="🔧 Actions",
+                value=f"• Restore a year: `/ss restore_year [year]`\n"
+                      f"• View all active years: `/ss history`\n"
+                      f"• Bot ignores backups folder automatically",
+                inline=False
+            )
+            
+            embed.set_footer(text=f"Location: archive/backups/")
+            await inter.edit_original_response(embed=embed)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
@@ -3017,7 +2990,7 @@ class SecretSantaCog(commands.Cog):
             if "participants" not in event:
                 event["participants"] = {}
             event["participants"][user_id] = name
-            self._save()
+            await self._save_async()
 
         # Send confirmation (same message as /ss start)
         join_msg = self._get_join_message(self.state['current_year'])
@@ -3064,7 +3037,7 @@ class SecretSantaCog(commands.Cog):
                 async with self._lock:
                     if "participants" in event:
                         event["participants"].pop(user_id, None)
-                    self._save()
+                    await self._save_async()
 
                 leave_msg = self._get_leave_message(self.state['current_year'])
                 await self._send_dm(payload.user_id, leave_msg)

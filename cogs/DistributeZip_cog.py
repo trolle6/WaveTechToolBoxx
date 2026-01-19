@@ -32,6 +32,7 @@ from disnake.ext import commands
 from .owner_utils import owner_check, get_owner_mention, is_owner
 from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
+from .secret_santa_views import FileListPaginator
 
 # Paths
 ROOT = Path(__file__).parent
@@ -465,29 +466,34 @@ class DistributeZipCog(commands.Cog):
             reverse=True
         )
         
-        embed = disnake.Embed(title="📦 Uploaded Files", color=disnake.Color.blue())
-        
-        for file_id, file_data in sorted_files[:10]:
-            file_name = file_data.get("name", "Unknown")
-            uploaded_at = file_data.get("uploaded_at", 0)
-            size = file_data.get("size", 0)
-            download_count = file_data.get("download_count", 0)
-            
-            embed.add_field(
-                name=f"📦 {file_name}",
-                value=(
-                    f"Required by: 🎅 A Secret Santa\n"
-                    f"Size: {size / 1024 / 1024:.2f} MB\n"
-                    f"Sent to: {download_count} members\n"
-                    f"Uploaded: <t:{int(uploaded_at)}:R>"
-                ),
-                inline=False
-            )
-        
+        # Use paginator if more than 10 files, otherwise show all
         if len(sorted_files) > 10:
-            embed.set_footer(text=f"Showing 10 of {len(sorted_files)} files")
-        
-        await inter.edit_original_response(embed=embed)
+            paginator = FileListPaginator(sorted_files, timeout=300)
+            embed = paginator.get_embed()
+            await inter.edit_original_response(embed=embed, view=paginator)
+        else:
+            # Show all files on one page (no pagination needed)
+            embed = disnake.Embed(title="📦 Uploaded Files", color=disnake.Color.blue())
+            
+            for file_id, file_data in sorted_files:
+                file_name = file_data.get("name", "Unknown")
+                uploaded_at = file_data.get("uploaded_at", 0)
+                size = file_data.get("size", 0)
+                download_count = file_data.get("download_count", 0)
+                
+                embed.add_field(
+                    name=f"📦 {file_name}",
+                    value=(
+                        f"Required by: 🎅 A Secret Santa\n"
+                        f"Size: {size / 1024 / 1024:.2f} MB\n"
+                        f"Sent to: {download_count} members\n"
+                        f"Uploaded: <t:{int(uploaded_at)}:R>"
+                    ),
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"Total: {len(sorted_files)} file(s)")
+            await inter.edit_original_response(embed=embed)
     
     @distributezip.sub_command(name="browse", description="Browse and select files using an interactive file browser")
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):

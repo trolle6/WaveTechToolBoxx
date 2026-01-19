@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
+from .secret_santa_views import EventListPaginator
+
 
 # Paths
 ROOT = Path(__file__).parent
@@ -399,6 +401,38 @@ class CustomEventsCog(commands.Cog):
             self.logger.error(f"Error in autocomplete_event_id_stop: {e}", exc_info=True)
             return []
     
+    async def autocomplete_timezone_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for join timezone parameter - suggests common timezones"""
+        try:
+            # Common timezones (UTC offsets from -12 to +14)
+            common_timezones = [
+                "UTC-12", "UTC-11", "UTC-10", "UTC-9", "UTC-8", "UTC-7", "UTC-6", "UTC-5",
+                "UTC-4", "UTC-3", "UTC-2", "UTC-1", "UTC+0", "UTC+1", "UTC+2", "UTC+3",
+                "UTC+4", "UTC+5", "UTC+6", "UTC+7", "UTC+8", "UTC+9", "UTC+10", "UTC+11",
+                "UTC+12", "UTC+13", "UTC+14"
+            ]
+            
+            # Also include some common named timezones
+            named_timezones = [
+                "UTC", "EST", "PST", "CST", "MST", "GMT", "CET", "JST", "AEST"
+            ]
+            
+            all_timezones = common_timezones + named_timezones
+            
+            # Filter timezones that match the input string
+            string_lower = string.lower() if string else ""
+            matching_timezones = [
+                tz for tz in all_timezones
+                if string_lower in tz.lower() or not string
+            ]
+            
+            # Return up to 25 options (Discord limit)
+            result = matching_timezones[:25]
+            return self._ensure_list_result(result, "autocomplete_timezone_join")
+        except Exception as e:
+            self.logger.error(f"Error in timezone autocomplete: {e}", exc_info=True)
+            return []  # Always return a list, even on error
+    
     # ============ COMMANDS ============
     
     @commands.slash_command(name="event")
@@ -471,7 +505,7 @@ class CustomEventsCog(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         event_id: int = commands.Param(description="Event ID", autocomplete="autocomplete_event_id_join"),
-        timezone: str = commands.Param(default="UTC+0", description="Your timezone (e.g., UTC+2, UTC-5)")
+        timezone: str = commands.Param(default="UTC+0", description="Your timezone (e.g., UTC+2, UTC-5)", autocomplete="autocomplete_timezone_join")
     ):
         """Join an event"""
         await inter.response.defer(ephemeral=True)
@@ -509,6 +543,11 @@ class CustomEventsCog(commands.Cog):
         embed.set_footer(text="Wait for the organizer to shuffle teams!")
         
         await inter.edit_original_response(embed=embed)
+    
+    @event_join.autocomplete("timezone")
+    async def autocomplete_timezone_join_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete decorator for join timezone parameter"""
+        return await self.autocomplete_timezone_join(inter, string)
     
     @event_root.sub_command(name="shuffle", description="Run the matching algorithm")
     @commands.has_permissions(manage_guild=True)
@@ -662,24 +701,34 @@ class CustomEventsCog(commands.Cog):
             await inter.edit_original_response(content="❌ No active events")
             return
         
-        embed = disnake.Embed(
-            title="🎲 Active Events",
-            description=f"{len(self.events)} event(s)",
-            color=disnake.Color.blue()
-        )
+        events_list = list(self.events.values())
         
-        for event in list(self.events.values())[:10]:
-            status_emoji = {"setup": "⏳", "active": "✅", "completed": "🏁"}.get(event.status, "❓")
-            
-            embed.add_field(
-                name=f"{status_emoji} {event.name} (ID: {event.event_id})",
-                value=f"Algorithm: {event.matcher_type}\n"
-                      f"Participants: {len(event.participants)}\n"
-                      f"Status: {event.status}",
-                inline=False
+        # Use paginator if more than 10 events, otherwise show all
+        if len(events_list) > 10:
+            paginator = EventListPaginator(events_list, timeout=300)
+            embed = paginator.get_embed()
+            await inter.edit_original_response(embed=embed, view=paginator)
+        else:
+            # Show all events on one page (no pagination needed)
+            embed = disnake.Embed(
+                title="🎲 Active Events",
+                description=f"{len(events_list)} event(s)",
+                color=disnake.Color.blue()
             )
-        
-        await inter.edit_original_response(embed=embed)
+            
+            for event in events_list:
+                status_emoji = {"setup": "⏳", "active": "✅", "completed": "🏁"}.get(event.status, "❓")
+                
+                embed.add_field(
+                    name=f"{status_emoji} {event.name} (ID: {event.event_id})",
+                    value=f"Algorithm: {event.matcher_type}\n"
+                          f"Participants: {len(event.participants)}\n"
+                          f"Status: {event.status}",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"Total: {len(events_list)} event(s)")
+            await inter.edit_original_response(embed=embed)
 
 
 def setup(bot):
