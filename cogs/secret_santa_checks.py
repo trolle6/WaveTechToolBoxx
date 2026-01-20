@@ -15,14 +15,29 @@ from disnake.ext import commands
 def mod_check():
     """Check if user is mod or admin"""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        if inter.author.guild_permissions.administrator:
+        # Mod checks only work in guilds (not DMs)
+        if not inter.guild:
+            return False
+        
+        # In DMs, inter.author is a User, not a Member
+        # We need to get the Member from the guild
+        if isinstance(inter.author, disnake.Member):
+            member = inter.author
+        else:
+            # Try to get member from guild
+            member = inter.guild.get_member(inter.author.id)
+            if not member:
+                return False
+        
+        # Check administrator permission
+        if member.guild_permissions.administrator:
             return True
 
         # Check config for mod role
         try:
             if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
                 mod_role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
-                if mod_role_id and any(r.id == mod_role_id for r in inter.author.roles):
+                if mod_role_id and any(r.id == mod_role_id for r in member.roles):
                     return True
         except (AttributeError, TypeError):
             pass
