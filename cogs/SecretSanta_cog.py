@@ -1601,7 +1601,12 @@ class SecretSantaCog(commands.Cog):
             if not event:
                 return False, "❌ No active event"
             
-            year = self.state["current_year"]
+            # Use current year (not stale state) - update state if needed
+            current_year = dt.date.today().year
+            if self.state.get("current_year") != current_year:
+                self.state["current_year"] = current_year
+            
+            year = current_year
             
             # Archive event (with automatic backup protection)
             saved_filename = self._archive_event(event, year)

@@ -396,7 +396,7 @@ class DistributeZipCog(commands.Cog):
     
     async def _send_uploader_summary(
         self,
-        uploader: disnake.Member,
+        uploader: disnake.User,
         file_name: str,
         successful_recipients: List[disnake.Member],
         successful_count: int,
@@ -459,16 +459,26 @@ class DistributeZipCog(commands.Cog):
             
             summary_embed.set_footer(text=f"Distributed to {distribution_type}")
             
-            # Try to send DM to uploader
+            # Try to send DM to uploader (works with both User and Member)
             try:
-                await uploader.send(embed=summary_embed)
-                self.logger.debug(f"Sent distribution summary DM to uploader {uploader.id} ({uploader.display_name})")
+                # Get user object - User.send() works directly, Member needs .user
+                if isinstance(uploader, disnake.Member):
+                    uploader_user = uploader.user
+                    display_name = uploader.display_name
+                else:
+                    uploader_user = uploader
+                    display_name = uploader.name
+                
+                await uploader_user.send(embed=summary_embed)
+                self.logger.debug(f"Sent distribution summary DM to uploader {uploader.id} ({display_name})")
             except disnake.Forbidden:
                 # Uploader has DMs disabled - log but don't fail
-                self.logger.debug(f"Could not send summary DM to uploader {uploader.id} ({uploader.display_name}) - DMs disabled")
+                display_name = uploader.display_name if isinstance(uploader, disnake.Member) else uploader.name
+                self.logger.debug(f"Could not send summary DM to uploader {uploader.id} ({display_name}) - DMs disabled")
             except Exception as e:
                 # Other errors - log but don't fail
-                self.logger.warning(f"Error sending summary DM to uploader {uploader.id} ({uploader.display_name}): {e}")
+                display_name = uploader.display_name if isinstance(uploader, disnake.Member) else uploader.name
+                self.logger.warning(f"Error sending summary DM to uploader {uploader.id} ({display_name}): {e}")
         
         except Exception as e:
             # Don't fail distribution if summary DM fails
@@ -541,10 +551,11 @@ class DistributeZipCog(commands.Cog):
         file_id: str,
         file_name: str,
         file_path: Path,
-        required_by: disnake.Member
+        required_by: disnake.User
     ):
         """
         Distribute file to Secret Santa participants (if active) or all server members.
+        Works in both server and DM contexts.
         
         Features:
         - Non-blocking file I/O for metadata updates
@@ -553,9 +564,39 @@ class DistributeZipCog(commands.Cog):
         - Progress updates for large distributions
         """
         guild = inter.guild
+        
+        # If in DM, try to find a guild from the bot (use first available guild)
         if not guild:
-            await self._safe_followup_send(inter, content="❌ Error: Command must be used in a server")
-            return
+            # In DM context - find a guild to distribute to
+            bot_guilds = [g for g in self.bot.guilds if g]
+            if not bot_guilds:
+                await self._safe_followup_send(inter, 
+                    content="❌ **Cannot distribute in DM**\n\n"
+                           "✅ File has been uploaded and saved.\n"
+                           "📤 To distribute: Use `/distributezip upload` in a server channel.\n\n"
+                           "💡 **Tip:** Files uploaded in DMs are stored and can be distributed later from a server.",
+                    ephemeral=True
+                )
+                return
+            
+            # Use first available guild (or could let user choose, but simpler to use first)
+            guild = bot_guilds[0]
+            self.logger.info(f"DM upload detected, using guild {guild.id} ({guild.name}) for distribution")
+        
+        # Get requester as Member if possible (for DM context, use guild.get_member)
+        # required_by is a User object (from upload_file), try to get Member from guild
+        requester_member = None
+        if isinstance(required_by, disnake.Member):
+            requester_member = required_by
+        elif guild:
+            # Try to get member from guild
+            requester_member = guild.get_member(required_by.id)
+        
+        # Fallback: use author as requester
+        if not requester_member and guild:
+            requester_member = guild.get_member(inter.author.id)
+        
+        # If still no member (DM with no guild), use None (we'll handle in embed)
         
         members, distribution_type = await self._get_distribution_targets(guild)
         
@@ -763,7 +804,7 @@ class DistributeZipCog(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         attachment: disnake.Attachment = commands.Param(default=None, description="File to upload (can attach multiple in Discord)"),
-        required_by: disnake.Member = None
+        required_by: Optional[disnake.Member] = commands.Param(default=None, description="Optional: Who requires this file (works in DMs too)")
     ):
         """
         Upload one or more files (any type) and send them to Secret Santa participants (if active) or all server members.
@@ -771,7 +812,8 @@ class DistributeZipCog(commands.Cog):
         Supports any file type (ZIP, JAR, RAR, etc.) up to Discord's 25MB limit.
         You can attach multiple files in Discord - the bot will process all of them!
         """
-        await inter.response.defer()
+        # Defer with ephemeral for privacy (only uploader sees the response)
+        await inter.response.defer(ephemeral=True)
         
         # Permission check
         if not is_owner(inter):
@@ -825,8 +867,9 @@ class DistributeZipCog(commands.Cog):
             )
             return
         
-        # Determine requester
-        requester = required_by or inter.author
+        # Determine requester (handle DM context)
+        # In DMs, required_by will be None, so use inter.author
+        requester_user = required_by if required_by else inter.author
         
         # Process each file
         successful_uploads = []
@@ -869,7 +912,7 @@ class DistributeZipCog(commands.Cog):
                     "name": file_name,
                     "filename": file_path.name,  # Use actual saved filename
                     "uploaded_by": inter.author.id,
-                    "required_by": requester.id,
+                    "required_by": requester_user.id,
                     "uploaded_at": time.time(),
                     "size": att.size,
                     "download_count": 0
@@ -879,7 +922,7 @@ class DistributeZipCog(commands.Cog):
                     "file_id": file_id,
                     "file_name": file_name,
                     "uploaded_by": inter.author.id,
-                    "required_by": requester.id,
+                    "required_by": requester_user.id,
                     "uploaded_at": time.time()
                 })
                 
@@ -911,7 +954,7 @@ class DistributeZipCog(commands.Cog):
                 await self._safe_edit_response(inter,
                     content=f"✅ File '{file_info['file_name']}' uploaded successfully!\n📤 Starting distribution..."
                 )
-                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester)
+                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
             else:
                 # Multiple files - show summary then distribute all
                 summary = f"✅ **{len(successful_uploads)} files uploaded successfully!**\n\n"
@@ -922,7 +965,7 @@ class DistributeZipCog(commands.Cog):
                 
                 # Distribute each file
                 for file_info in successful_uploads:
-                    await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester)
+                    await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
                     # Small delay between distributions to avoid overwhelming
                     await asyncio.sleep(1)
         
@@ -946,7 +989,7 @@ class DistributeZipCog(commands.Cog):
             
             # Distribute successful files
             for file_info in successful_uploads:
-                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester)
+                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
                 await asyncio.sleep(1)
         
         else:
@@ -959,7 +1002,7 @@ class DistributeZipCog(commands.Cog):
     @distributezip.sub_command(name="list", description="List all uploaded files")
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
         """List all uploaded files"""
-        await inter.response.defer()
+        await inter.response.defer(ephemeral=True)
         
         files = self.metadata.get("files", {})
         
@@ -1006,7 +1049,7 @@ class DistributeZipCog(commands.Cog):
     @distributezip.sub_command(name="browse", description="Browse and select files using an interactive file browser")
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):
         """Browse files using an interactive file browser"""
-        await inter.response.defer()
+        await inter.response.defer(ephemeral=True)
         
         async def handler(interaction, file_id, file_data, file_path):
             embed = disnake.Embed(title=f"📦 {file_data.get('name')}", color=disnake.Color.blue())
@@ -1025,7 +1068,7 @@ class DistributeZipCog(commands.Cog):
         file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)", autocomplete="autocomplete_file_name_get")
     ):
         """Get/download a specific file"""
-        await inter.response.defer()
+        await inter.response.defer(ephemeral=True)
         
         if not file_name:
             async def handler(interaction, file_id, file_data, file_path):
@@ -1063,7 +1106,7 @@ class DistributeZipCog(commands.Cog):
         file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)", autocomplete="autocomplete_file_name_remove")
     ):
         """Remove a file (moderator only)"""
-        await inter.response.defer()
+        await inter.response.defer(ephemeral=True)
         
         async def remove_handler(interaction, file_id, file_data, file_path):
             try:
