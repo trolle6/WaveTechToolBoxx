@@ -446,9 +446,9 @@ class DistributeZipCog(commands.Cog):
             # Add list of recipients (limit to first 20 to avoid embed size limits)
             if successful_recipients:
                 if len(successful_recipients) <= 20:
-                    recipient_list = "\n".join([f"• {member.display_name} ({member.name})" for member in successful_recipients])
+                    recipient_list = "\n".join([f"• {member.mention}" for member in successful_recipients])
                 else:
-                    recipient_list = "\n".join([f"• {member.display_name} ({member.name})" for member in successful_recipients[:20]])
+                    recipient_list = "\n".join([f"• {member.mention}" for member in successful_recipients[:20]])
                     recipient_list += f"\n\n... and {len(successful_recipients) - 20} more"
                 
                 summary_embed.add_field(
