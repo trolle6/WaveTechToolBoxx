@@ -782,8 +782,8 @@ class DistributeZipCog(commands.Cog):
         notes = []
         if forbidden_count > 0:
             notes.append(f"{forbidden_count} member(s) have DMs disabled")
-        if failed_count > 0:
-            notes.append(f"{failed_count} member(s) failed to receive (file may be too large for Discord DMs)")
+        if failed > 0:
+            notes.append(f"{failed} member(s) failed to receive (file may be too large for Discord DMs)")
         
         if notes:
             summary_embed.add_field(
