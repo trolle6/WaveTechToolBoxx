@@ -215,7 +215,7 @@ def _validate_assignment_integrity(assignments: Dict[int, int], participants: Li
             raise ValueError(f"Invalid receiver: {receiver} not in participants")
 
 
-def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> Dict[int, int]:
+def make_assignments(participants: List[int], history: Dict[str, List[int]], logger=None) -> Dict[int, int]:
     """
     Create Secret Santa assignments avoiding repeats from history.
     
@@ -291,6 +291,20 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]]) -> 
     # Large events (≥ 10 people): Attempts = participant count (scales with complexity)
     # Example: 5 people → 10 attempts, 20 people → 20 attempts
     max_attempts = max(10, len(participants))
+    
+    # DEBUG: Log available options for each participant (before any assignments)
+    if logger:
+        logger.info("=== ASSIGNMENT DEBUG: Available options for each participant ===")
+        for giver in participants:
+            unacceptable = set(history.get(str(giver), []))
+            available = [p for p in participants if p not in unacceptable and p != giver]
+            unacceptable_list = list(unacceptable)
+            logger.info(f"  Participant {giver}: {len(available)} available options")
+            logger.info(f"    Available: {available}")
+            logger.info(f"    Excluded from history: {unacceptable_list}")
+            if len(available) == 1:
+                logger.warning(f"    ⚠️ WARNING: Only 1 option available - will always get {available[0]}")
+        logger.info("=== END ASSIGNMENT DEBUG ===")
     
     for attempt in range(max_attempts):
         try:

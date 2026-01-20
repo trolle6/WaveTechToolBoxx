@@ -1505,7 +1505,7 @@ class SecretSantaCog(commands.Cog):
                     continue
                 
                 try:
-                    assignments = make_assignments(participants, history)
+                    assignments = make_assignments(participants, history, logger=self.logger)
                     break
                 except ValueError as e:
                     if attempt == len(available_years):
