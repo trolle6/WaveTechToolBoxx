@@ -778,12 +778,19 @@ class DistributeZipCog(commands.Cog):
         summary_embed.add_field(name="❌ Failed", value=str(failed), inline=True)
         summary_embed.add_field(name="📦 Total Recipients", value=str(total_members), inline=True)
         
-        if forbidden_count > 0:
-            summary_embed.add_field(
-                name="ℹ️ Note",
-                value=f"{forbidden_count} member(s) have DMs disabled",
-                inline=False
-            )
+            # Add notes about failures
+            notes = []
+            if forbidden_count > 0:
+                notes.append(f"{forbidden_count} member(s) have DMs disabled")
+            if failed_count > 0:
+                notes.append(f"{failed_count} member(s) failed to receive (file may be too large for Discord DMs)")
+            
+            if notes:
+                summary_embed.add_field(
+                    name="ℹ️ Note",
+                    value="\n".join(notes),
+                    inline=False
+                )
         
         if distribution_type == "Secret Santa participants":
             summary_embed.set_footer(text="Distributed to Secret Santa participants")
