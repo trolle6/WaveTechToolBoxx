@@ -459,17 +459,11 @@ class DistributeZipCog(commands.Cog):
             
             summary_embed.set_footer(text=f"Distributed to {distribution_type}")
             
-            # Try to send DM to uploader (works with both User and Member)
+            # Try to send DM to uploader (works with both User and Member - both have .send())
             try:
-                # Get user object - User.send() works directly, Member needs .user
-                if isinstance(uploader, disnake.Member):
-                    uploader_user = uploader.user
-                    display_name = uploader.display_name
-                else:
-                    uploader_user = uploader
-                    display_name = uploader.name
-                
-                await uploader_user.send(embed=summary_embed)
+                # Both User and Member objects support .send() directly in disnake
+                display_name = uploader.display_name if isinstance(uploader, disnake.Member) else uploader.name
+                await uploader.send(embed=summary_embed)
                 self.logger.debug(f"Sent distribution summary DM to uploader {uploader.id} ({display_name})")
             except disnake.Forbidden:
                 # Uploader has DMs disabled - log but don't fail
