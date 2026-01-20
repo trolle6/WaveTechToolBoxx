@@ -394,6 +394,86 @@ class DistributeZipCog(commands.Cog):
         
         return None
     
+    async def _send_uploader_summary(
+        self,
+        uploader: disnake.Member,
+        file_name: str,
+        successful_recipients: List[disnake.Member],
+        successful_count: int,
+        failed_count: int,
+        forbidden_count: int,
+        total_count: int,
+        distribution_type: str
+    ):
+        """
+        Send a summary DM to the uploader with details about who received the file.
+        Handles cases where uploader has DMs disabled gracefully.
+        """
+        try:
+            # Create summary embed
+            summary_embed = disnake.Embed(
+                title="📦 File Distribution Summary",
+                description=f"Your file **{file_name}** has been distributed!",
+                color=disnake.Color.green()
+            )
+            
+            summary_embed.add_field(
+                name="✅ Successfully Sent",
+                value=f"{successful_count} member(s)",
+                inline=True
+            )
+            
+            if failed_count > 0:
+                summary_embed.add_field(
+                    name="❌ Failed",
+                    value=f"{failed_count} member(s)",
+                    inline=True
+                )
+            
+            summary_embed.add_field(
+                name="📊 Total Recipients",
+                value=f"{total_count} member(s)",
+                inline=True
+            )
+            
+            if forbidden_count > 0:
+                summary_embed.add_field(
+                    name="ℹ️ Note",
+                    value=f"{forbidden_count} member(s) have DMs disabled",
+                    inline=False
+                )
+            
+            # Add list of recipients (limit to first 20 to avoid embed size limits)
+            if successful_recipients:
+                if len(successful_recipients) <= 20:
+                    recipient_list = "\n".join([f"• {member.display_name} ({member.name})" for member in successful_recipients])
+                else:
+                    recipient_list = "\n".join([f"• {member.display_name} ({member.name})" for member in successful_recipients[:20]])
+                    recipient_list += f"\n\n... and {len(successful_recipients) - 20} more"
+                
+                summary_embed.add_field(
+                    name="👥 Recipients",
+                    value=recipient_list or "None",
+                    inline=False
+                )
+            
+            summary_embed.set_footer(text=f"Distributed to {distribution_type}")
+            
+            # Try to send DM to uploader
+            try:
+                await uploader.send(embed=summary_embed)
+                self.logger.debug(f"Sent distribution summary DM to uploader {uploader.id} ({uploader.display_name})")
+            except disnake.Forbidden:
+                # Uploader has DMs disabled - log but don't fail
+                self.logger.debug(f"Could not send summary DM to uploader {uploader.id} ({uploader.display_name}) - DMs disabled")
+            except Exception as e:
+                # Other errors - log but don't fail
+                self.logger.warning(f"Error sending summary DM to uploader {uploader.id} ({uploader.display_name}): {e}")
+        
+        except Exception as e:
+            # Don't fail distribution if summary DM fails
+            self.logger.error(f"Error creating/sending uploader summary: {e}", exc_info=True)
+    
     def _create_file_embed(self, file_data: dict, color: disnake.Color = disnake.Color.green()) -> disnake.Embed:
         """Create a standard file embed"""
         embed = disnake.Embed(title=f"📦 {file_data.get('name')}", color=color)
@@ -493,27 +573,21 @@ class DistributeZipCog(commands.Cog):
         required_by_text = "🎅 A Secret Santa requires this file" if distribution_type == "Secret Santa participants" else "📋 A server member requires this file"
         embed.add_field(name="Required By", value=required_by_text, inline=False)
         embed.add_field(name="Uploaded At", value=f"<t:{int(time.time())}:F>", inline=False)
-        embed.add_field(
-            name="💻 Cross-Platform Compatible",
-            value="✅ This ZIP file works on **Windows, Linux, and macOS**\n"
-                  "The ZIP format is standardized and supported on all platforms.",
-            inline=False
-        )
         embed.set_footer(text=f"This file is required for {distribution_type}")
         
         # Send to all members with improved error handling and rate limiting
         successful = 0
         failed = 0
         forbidden_count = 0  # Users with DMs disabled
+        successful_recipients = []  # Track who successfully received the file
         total_members = len(members)
         show_progress = total_members > 20  # Show progress for large distributions
         
         async with self._sending_lock:
             for i, member in enumerate(members, 1):
                 try:
-                    # Skip uploader
+                    # Skip uploader (they'll get a summary DM instead)
                     if member.id == inter.author.id:
-                        successful += 1
                         continue
                     
                     # Create file object for each member
@@ -529,6 +603,7 @@ class DistributeZipCog(commands.Cog):
                                 timeout=FILE_SEND_TIMEOUT
                             )
                             successful += 1
+                            successful_recipients.append(member)  # Track successful recipient
                             send_success = True
                             break  # Success, exit retry loop
                             
@@ -664,6 +739,18 @@ class DistributeZipCog(commands.Cog):
             summary_embed.set_footer(text="Distributed to all server members")
         
         await self._safe_followup_send(inter, embed=summary_embed)
+        
+        # Send summary DM to uploader
+        await self._send_uploader_summary(
+            uploader=inter.author,
+            file_name=file_name,
+            successful_recipients=successful_recipients,
+            successful_count=successful,
+            failed_count=failed,
+            forbidden_count=forbidden_count,
+            total_count=total_members,
+            distribution_type=distribution_type
+        )
 
     # ============ COMMANDS ============
     @commands.slash_command(name="distributezip", description="Zip file distribution management")
