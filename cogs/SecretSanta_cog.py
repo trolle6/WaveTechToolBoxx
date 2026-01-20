@@ -210,8 +210,20 @@ class SecretSantaCog(commands.Cog):
         """
         for attempt in range(max_retries):
             try:
+                # Build kwargs - only include parameters that are not None
+                # (disnake doesn't handle None files/content well in some cases)
+                kwargs = {}
+                if content is not None:
+                    kwargs['content'] = content
+                if embed is not None:
+                    kwargs['embed'] = embed
+                if view is not None:
+                    kwargs['view'] = view
+                if file is not None:
+                    kwargs['file'] = file
+                
                 await asyncio.wait_for(
-                    inter.edit_original_response(content=content, embed=embed, view=view, file=file),
+                    inter.edit_original_response(**kwargs),
                     timeout=10.0  # 10 second timeout per attempt
                 )
                 return True
@@ -292,8 +304,20 @@ class SecretSantaCog(commands.Cog):
         """
         for attempt in range(max_retries):
             try:
+                # Build kwargs - only include parameters that are not None
+                # (disnake doesn't handle None files/content well in some cases)
+                kwargs = {'ephemeral': ephemeral}
+                if content is not None:
+                    kwargs['content'] = content
+                if embed is not None:
+                    kwargs['embed'] = embed
+                if view is not None:
+                    kwargs['view'] = view
+                if file is not None:
+                    kwargs['file'] = file
+                
                 msg = await asyncio.wait_for(
-                    inter.followup.send(content=content, embed=embed, view=view, file=file, ephemeral=ephemeral),
+                    inter.followup.send(**kwargs),
                     timeout=10.0  # 10 second timeout per attempt
                 )
                 return msg
