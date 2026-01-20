@@ -436,10 +436,17 @@ class DistributeZipCog(commands.Cog):
                 inline=True
             )
             
+            # Add notes about failures
+            notes = []
             if forbidden_count > 0:
+                notes.append(f"{forbidden_count} member(s) have DMs disabled")
+            if failed_count > 0:
+                notes.append(f"{failed_count} member(s) failed to receive (file may be too large or other error)")
+            
+            if notes:
                 summary_embed.add_field(
                     name="ℹ️ Note",
-                    value=f"{forbidden_count} member(s) have DMs disabled",
+                    value="\n".join(notes),
                     inline=False
                 )
             
@@ -675,6 +682,16 @@ class DistributeZipCog(commands.Cog):
                         except disnake.HTTPException as e:
                             # HTTP errors - check if retryable (5xx server errors, 429 rate limits)
                             status = getattr(e, 'status', None)
+                            
+                            # 413 Payload Too Large - file is too big for Discord DMs (don't retry)
+                            if status == 413:
+                                self.logger.warning(
+                                    f"File too large to send via DM to {member.id} ({member.display_name}): "
+                                    f"Discord rejected file (413 Payload Too Large). File size: {file_path.stat().st_size / (1024*1024):.2f} MB"
+                                )
+                                failed += 1
+                                break
+                            
                             is_retryable = status and (status >= 500 or status == 429)
                             
                             if is_retryable and retry_attempt < MAX_RETRIES:
