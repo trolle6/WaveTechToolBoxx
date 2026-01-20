@@ -760,7 +760,7 @@ class DistributeZipCog(commands.Cog):
                     failed += 1
                     self.logger.error(f"Unexpected error processing member {member.id} ({member.display_name}): {e}", exc_info=True)
         
-        # Update download count asynchronously
+        # Update download count asynchronously (outside the lock)
         if file_id in self.metadata["files"]:
             self.metadata["files"][file_id]["download_count"] = successful
             try:
