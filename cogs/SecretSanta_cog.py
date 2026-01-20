@@ -178,6 +178,166 @@ class SecretSantaCog(commands.Cog):
             self.logger.error(f"Error deferring interaction: {e}", exc_info=True)
             return False
     
+    async def _safe_edit_response(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        content: Optional[str] = None,
+        embed: Optional[disnake.Embed] = None,
+        view: Optional[disnake.ui.View] = None,
+        file: Optional[disnake.File] = None,
+        max_retries: int = 3
+    ) -> bool:
+        """
+        Safely edit interaction response with retry logic for Discord connection issues.
+        
+        Handles:
+        - Connection errors (retries with exponential backoff)
+        - Rate limits (429 - respects retry_after)
+        - Server errors (5xx - retries)
+        - Expired interactions (404 - returns False)
+        - Already responded (returns True)
+        
+        Args:
+            inter: The interaction to edit
+            content: Optional message content
+            embed: Optional embed
+            view: Optional view
+            file: Optional file
+            max_retries: Maximum retry attempts (default: 3)
+        
+        Returns:
+            True if successful, False if failed permanently
+        """
+        for attempt in range(max_retries):
+            try:
+                await asyncio.wait_for(
+                    inter.edit_original_response(content=content, embed=embed, view=view, file=file),
+                    timeout=10.0  # 10 second timeout per attempt
+                )
+                return True
+            except disnake.errors.NotFound:
+                # Interaction expired - can't recover
+                self.logger.warning(f"Interaction expired before edit: {inter.id}")
+                return False
+            except disnake.errors.InteractionResponded:
+                # Already responded - this is fine
+                return True
+            except disnake.HTTPException as e:
+                status = getattr(e, 'status', None)
+                # Rate limit - respect retry_after
+                if status == 429:
+                    retry_after = getattr(e, 'retry_after', 1.0)
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Rate limited on edit_response, waiting {retry_after}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_after)
+                        continue
+                # Server errors (5xx) - retry
+                elif status and status >= 500:
+                    if attempt < max_retries - 1:
+                        wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
+                        self.logger.warning(f"Discord server error {status} on edit_response, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                # Client errors (4xx except 429) - don't retry
+                else:
+                    self.logger.error(f"HTTP error {status} on edit_response: {e}")
+                    return False
+            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+                # Network/connection issues - retry
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
+                    self.logger.warning(f"Connection error on edit_response, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries}): {e}")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    self.logger.error(f"Connection error on edit_response after {max_retries} attempts: {e}")
+                    return False
+            except Exception as e:
+                # Unexpected errors - log and don't retry
+                self.logger.error(f"Unexpected error on edit_response: {e}", exc_info=True)
+                return False
+        
+        return False
+    
+    async def _safe_followup_send(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        content: Optional[str] = None,
+        embed: Optional[disnake.Embed] = None,
+        view: Optional[disnake.ui.View] = None,
+        file: Optional[disnake.File] = None,
+        ephemeral: bool = False,
+        max_retries: int = 3
+    ) -> Optional[disnake.WebhookMessage]:
+        """
+        Safely send followup message with retry logic for Discord connection issues.
+        
+        Handles:
+        - Connection errors (retries with exponential backoff)
+        - Rate limits (429 - respects retry_after)
+        - Server errors (5xx - retries)
+        - Expired interactions (404 - returns None)
+        
+        Args:
+            inter: The interaction to send followup for
+            content: Optional message content
+            embed: Optional embed
+            view: Optional view
+            file: Optional file
+            ephemeral: Whether message should be ephemeral
+            max_retries: Maximum retry attempts (default: 3)
+        
+        Returns:
+            WebhookMessage if successful, None if failed
+        """
+        for attempt in range(max_retries):
+            try:
+                msg = await asyncio.wait_for(
+                    inter.followup.send(content=content, embed=embed, view=view, file=file, ephemeral=ephemeral),
+                    timeout=10.0  # 10 second timeout per attempt
+                )
+                return msg
+            except disnake.errors.NotFound:
+                # Interaction expired - can't recover
+                self.logger.warning(f"Interaction expired before followup: {inter.id}")
+                return None
+            except disnake.HTTPException as e:
+                status = getattr(e, 'status', None)
+                # Rate limit - respect retry_after
+                if status == 429:
+                    retry_after = getattr(e, 'retry_after', 1.0)
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Rate limited on followup_send, waiting {retry_after}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_after)
+                        continue
+                # Server errors (5xx) - retry
+                elif status and status >= 500:
+                    if attempt < max_retries - 1:
+                        wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
+                        self.logger.warning(f"Discord server error {status} on followup_send, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                # Client errors (4xx except 429) - don't retry
+                else:
+                    self.logger.error(f"HTTP error {status} on followup_send: {e}")
+                    return None
+            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+                # Network/connection issues - retry
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
+                    self.logger.warning(f"Connection error on followup_send, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries}): {e}")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    self.logger.error(f"Connection error on followup_send after {max_retries} attempts: {e}")
+                    return None
+            except Exception as e:
+                # Unexpected errors - log and don't retry
+                self.logger.error(f"Unexpected error on followup_send: {e}", exc_info=True)
+                return None
+        
+        return None
+    
     def _create_embed(self, title: str, description: str, color: disnake.Color, **fields) -> disnake.Embed:
         """
         Helper to create embeds with consistent formatting.
@@ -344,13 +504,13 @@ class SecretSantaCog(commands.Cog):
         """
         event = self._get_current_event()
         if not event:
-            await inter.edit_original_response(content="There's no Secret Santa event running right now. Maybe soon!")
+            await self._safe_edit_response(inter, content="There's no Secret Santa event running right now. Maybe soon!")
             return None
         
         user_id = str(inter.author.id)
         # COMBINED CHECK: Get participants once and check membership
         if user_id not in event.get("participants", {}):
-            await inter.edit_original_response(content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
+            await self._safe_edit_response(inter, content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
             return None
         
         return (event, user_id)
@@ -363,7 +523,7 @@ class SecretSantaCog(commands.Cog):
         """
         event = self._get_current_event()
         if not event:
-            await inter.edit_original_response(content="There's no Secret Santa event running right now. Maybe soon!")
+            await self._safe_edit_response(inter, content="There's no Secret Santa event running right now. Maybe soon!")
             return None
         
         user_id = str(inter.author.id)
@@ -372,7 +532,7 @@ class SecretSantaCog(commands.Cog):
         
         # Check participant status
         if user_id not in participants:
-            await inter.edit_original_response(content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
+            await self._safe_edit_response(inter, content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
             return None
         
         # Check assignment status
@@ -382,7 +542,7 @@ class SecretSantaCog(commands.Cog):
                 title="🎅 Hold your reindeer!",
                 description="You don't have a giftee yet! The organizer still needs to run the shuffle. Good things come to those who wait!"
             )
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return None
         
         return (event, user_id, receiver_id, participants, assignments)
@@ -406,7 +566,7 @@ class SecretSantaCog(commands.Cog):
         event = self._get_current_event()
         if not event:
             msg = custom_message or "❌ No active event"
-            await inter.edit_original_response(content=msg)
+            await self._safe_edit_response(inter, content=msg)
             return None
         return event
     
@@ -417,7 +577,7 @@ class SecretSantaCog(commands.Cog):
                 title="🎅 Hold your reindeer!",
                 description="You don't have a giftee yet! The organizer still needs to run the shuffle. Good things come to those who wait!"
             )
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return None
         return event["assignments"][user_id]
     
@@ -858,17 +1018,17 @@ class SecretSantaCog(commands.Cog):
                     footer=""
                 )
                 embed.add_field(name="What you sent", value=f"*{self._truncate_text(reply)}*", inline=False)
-                await inter.followup.send(embed=embed, ephemeral=True)
+                await self._safe_followup_send(inter, embed=embed, ephemeral=True)
             else:
                 embed = self._error_embed(
                     title="❌ Message couldn't be delivered",
                     description="Looks like we couldn't send your reply. Your Secret Santa might have their DMs closed."
                 )
-                await inter.followup.send(embed=embed, ephemeral=True)
+                await self._safe_followup_send(inter, embed=embed, ephemeral=True)
                 
         except Exception as e:
             self.logger.error(f"Error processing reply: {e}")
-            await inter.followup.send(content="Yikes – something went wrong while sending your message. Could you try again?", ephemeral=True)
+            await self._safe_followup_send(inter, content="Yikes – something went wrong while sending your message. Could you try again?", ephemeral=True)
 
     def _get_year_emoji_mapping(self, participants: Dict[str, str]) -> Dict[str, str]:
         """
@@ -987,7 +1147,7 @@ class SecretSantaCog(commands.Cog):
         msg_id = message.id
         
         if message.guild and message.guild.id != inter.guild.id:
-            await inter.edit_original_response(content="❌ Message must be from this server")
+            await self._safe_edit_response(inter, content="❌ Message must be from this server")
             return
 
         # Get role ID if provided
@@ -996,7 +1156,7 @@ class SecretSantaCog(commands.Cog):
         # Check if event already active
         event = self.state.get("current_event")
         if event and event.get("active"):
-            await inter.edit_original_response(content="❌ Event already active")
+            await self._safe_edit_response(inter, content="❌ Event already active")
             return
 
         # SAFETY WARNING: Check if current year is already archived
@@ -1021,7 +1181,7 @@ class SecretSantaCog(commands.Cog):
                 inline=False
             )
             embed.set_footer(text="✅ Your existing archive is safe and won't be overwritten!")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             
             # Log this warning
             self.logger.warning(f"Starting new event for {current_year} but archive already exists!")
@@ -1245,7 +1405,7 @@ class SecretSantaCog(commands.Cog):
         if not event:
             error_msg = "❌ No active event - use `/ss start` to create one first"
             if inter:
-                await inter.edit_original_response(content=error_msg)
+                await self._safe_edit_response(inter, content=error_msg)
             return False, error_msg
 
         # Convert participant IDs to integers
@@ -1254,7 +1414,7 @@ class SecretSantaCog(commands.Cog):
         if len(participants) < 2:
             error_msg = "❌ Need at least 2 participants"
             if inter:
-                await inter.edit_original_response(content=error_msg)
+                await self._safe_edit_response(inter, content=error_msg)
             return False, error_msg
 
         # Get guild for role assignment (if inter provided, use it; otherwise try to get from event)
@@ -1294,7 +1454,7 @@ class SecretSantaCog(commands.Cog):
                 if attempt == len(available_years):
                     error_msg = f"❌ {validation_error}"
                     if inter:
-                        await inter.edit_original_response(content=error_msg)
+                        await self._safe_edit_response(inter, content=error_msg)
                     if hasattr(self.bot, 'send_to_discord_log'):
                         await self.bot.send_to_discord_log(
                             f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
@@ -1310,7 +1470,7 @@ class SecretSantaCog(commands.Cog):
                 if attempt == len(available_years):
                     error_msg = f"❌ Assignment failed: {e}"
                     if inter:
-                        await inter.edit_original_response(content=error_msg)
+                        await self._safe_edit_response(inter, content=error_msg)
                     if hasattr(self.bot, 'send_to_discord_log'):
                         await self.bot.send_to_discord_log(
                             f"Secret Santa assignment failed even with all fallbacks - {e}",
@@ -1322,7 +1482,7 @@ class SecretSantaCog(commands.Cog):
         if not assignments:
             error_msg = "❌ Assignment failed unexpectedly"
             if inter:
-                await inter.edit_original_response(content=error_msg)
+                await self._safe_edit_response(inter, content=error_msg)
             return False, error_msg
 
         # Assign role to participants (if role_id was provided)
@@ -1373,7 +1533,7 @@ class SecretSantaCog(commands.Cog):
             response_msg += f"💡 Consider having Secret Santa more frequently to avoid this!"
         
         if inter:
-            await inter.edit_original_response(content=response_msg)
+            await self._safe_edit_response(inter, content=response_msg)
         
         # Notify Discord log channel
         executor_name = inter.author.display_name if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
@@ -1521,7 +1681,7 @@ class SecretSantaCog(commands.Cog):
         # COMBINED: Get event and check/cancel scheduled stop in one pass
         event = self._get_current_event()
         if not event:
-            await inter.edit_original_response(content="❌ No active event")
+            await self._safe_edit_response(inter, content="❌ No active event")
             return
 
         # Check if there's a scheduled stop and cancel it
@@ -1539,7 +1699,7 @@ class SecretSantaCog(commands.Cog):
         success, saved_filename = await self._execute_stop_internal(stopper_id=inter.author.id)
         
         if not success:
-            await inter.edit_original_response(content=saved_filename or "❌ Failed to stop event")
+            await self._safe_edit_response(inter, content=saved_filename or "❌ Failed to stop event")
             return
 
         # Build response message
@@ -1565,13 +1725,13 @@ class SecretSantaCog(commands.Cog):
                 inline=False
             )
             embed.set_footer(text="Your original archive was NOT overwritten!")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
         else:
             # Normal archive
             if response_msg:
-                await inter.edit_original_response(content=response_msg + f"✅ Event stopped and archived → `{saved_filename}`")
+                await self._safe_edit_response(inter, content=response_msg + f"✅ Event stopped and archived → `{saved_filename}`")
             else:
-                await inter.edit_original_response(content=f"✅ Event stopped and archived → `{saved_filename}`")
+                await self._safe_edit_response(inter, content=f"✅ Event stopped and archived → `{saved_filename}`")
 
     @ss_root.sub_command(name="participants", description="View participants")
     @mod_check()
@@ -1586,7 +1746,7 @@ class SecretSantaCog(commands.Cog):
 
         participants = event.get("participants", {})
         if not participants:
-            await inter.edit_original_response(content="❌ No participants yet")
+            await self._safe_edit_response(inter, content="❌ No participants yet")
             return
 
         embed = disnake.Embed(
@@ -1602,7 +1762,7 @@ class SecretSantaCog(commands.Cog):
 
         embed.description = "\n".join(lines)
 
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question (sent anonymously)")
     async def ss_ask(
@@ -1623,7 +1783,7 @@ class SecretSantaCog(commands.Cog):
 
         # Rewrite question for anonymity (only if requested)
         if use_ai_rewrite:
-            await inter.edit_original_response(content="🤖 Rewriting your question for extra anonymity...")
+            await self._safe_edit_response(inter, content="🤖 Rewriting your question for extra anonymity...")
             rewritten_question = await self._anonymize_text(question, "question")
         else:
             rewritten_question = question
@@ -1646,13 +1806,13 @@ class SecretSantaCog(commands.Cog):
             embed.add_field(name="📝 Original", value=f"*{self._truncate_text(question)}*", inline=False)
             if use_ai_rewrite and rewritten_question != question:
                 embed.add_field(name="🤖 Rewritten", value=f"*{self._truncate_text(rewritten_question)}*", inline=False)
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
         else:
             embed = self._error_embed(
                 title="❌ Delivery Failed",
                 description="Couldn't send your question. Your giftee may have DMs disabled."
             )
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="reply_santa", description="Reply to your Secret Santa (sent anonymously)")
     async def ss_reply(
@@ -1678,7 +1838,7 @@ class SecretSantaCog(commands.Cog):
                 description="No one has asked you a question yet, or you haven't been assigned a Secret Santa!",
                 footer="💡 Wait for your Secret Santa to ask you something first!"
             )
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return
 
         # Send reply (no AI rewriting needed - anonymity already protected)
@@ -1696,50 +1856,144 @@ class SecretSantaCog(commands.Cog):
                 footer="🎄 Your Secret Santa will be so happy to hear from you!"
             )
             embed.add_field(name="📝 Original", value=f"*{self._truncate_text(reply)}*", inline=False)
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
         else:
             embed = self._error_embed(
                 title="❌ Delivery Failed",
                 description="Couldn't send your reply. Your Secret Santa may have DMs disabled."
             )
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
 
 
-    @ss_root.sub_command(name="submit_gift", description="Submit your gift for records")
+    @ss_root.sub_command(name="submit_gift", description="Submit your gift for records (works for active events and current year archives)")
     async def ss_submit(
         self,
         inter: disnake.ApplicationCommandInteraction,
         gift_description: str = commands.Param(description="Describe what you gave", max_length=2000)
     ):
-        """Submit gift description"""
+        """Submit gift description - works for active events or archived current year"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
 
-        # COMBINED VALIDATION: Participant + assignment check in one pass
-        result = await self._validate_participant_with_assignment(inter)
-        if not result:
-            return
-        event, user_id, receiver_id, participants, _ = result
-        receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
+        user_id = str(inter.author.id)
+        current_year = self.state.get('current_year', dt.date.today().year)
+        
+        # OPTIMIZATION: Check if there's an active event first
+        event = self._get_current_event()
+        is_archived = False
+        
+        if event:
+            # Active event - use normal flow
+            result = await self._validate_participant_with_assignment(inter)
+            if not result:
+                return
+            event, user_id, receiver_id, participants, _ = result
+            receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
+        else:
+            # No active event - check if archive exists for current year
+            archive_path = ARCHIVE_DIR / f"{current_year}.json"
+            if not archive_path.exists():
+                await inter.edit_original_response(
+                    content=f"❌ No active Secret Santa event, and no archive found for {current_year}.\n\n"
+                           f"💡 If you want to edit a gift from a past year, use `/ss edit_gift [year]`"
+                )
+                return
+            
+            # Load archive and check if user participated
+            archive_data = load_json(archive_path)
+            if not archive_data:
+                await self._safe_edit_response(inter, content=f"❌ Failed to load archive for {current_year}")
+                return
+            
+            # Handle both formats
+            if "event" in archive_data:
+                event_data = archive_data["event"]
+                participants = event_data.get("participants", {})
+                assignments = event_data.get("assignments", {})
+                gift_submissions = event_data.get("gift_submissions", {})
+            else:
+                # Legacy format
+                await inter.edit_original_response(
+                    content=f"❌ Archive for {current_year} is in legacy format. Use `/ss edit_gift {current_year}` instead."
+                )
+                return
+            
+            # Check if user participated
+            if user_id not in participants:
+                await inter.edit_original_response(
+                    content=f"❌ You didn't participate in Secret Santa {current_year}."
+                )
+                return
+            
+            # Check if user has assignment
+            receiver_id = assignments.get(user_id)
+            if not receiver_id:
+                await inter.edit_original_response(
+                    content=f"❌ No assignment found for you in {current_year} archive."
+                )
+                return
+            
+            receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
+            event = event_data  # Use event_data for consistency
+            is_archived = True
 
         # Check if this is updating an existing submission
         gift_submissions = event.get("gift_submissions", {})
         existing_submission = gift_submissions.get(user_id)
         is_update = existing_submission is not None
 
-        # Save gift (overwrites if already exists - simple approach!)
-        async with self._lock:
-            event.setdefault("gift_submissions", {})[user_id] = {
-                "gift": gift_description,
-                "receiver_id": receiver_id,
-                "receiver_name": receiver_name,
-                "submitted_at": time.time(),
-                "timestamp": dt.datetime.now().isoformat()
-            }
-            await self._save_async()
+        if is_archived:
+            # Update archive file
+            archive_path = ARCHIVE_DIR / f"{current_year}.json"
+            archive_data = load_json(archive_path)
+            
+            if "event" in archive_data:
+                event_data = archive_data["event"]
+                if "gift_submissions" not in event_data:
+                    event_data["gift_submissions"] = {}
+                
+                event_data["gift_submissions"][user_id] = {
+                    "gift": gift_description,
+                    "receiver_id": receiver_id,
+                    "receiver_name": receiver_name,
+                    "submitted_at": time.time(),
+                    "timestamp": dt.datetime.now().isoformat()
+                }
+                
+                # Recalculate statistics
+                total_participants = len(event_data.get("assignments", {}))
+                gifts_exchanged = sum(1 for g in event_data["gift_submissions"].values() if g.get("gift"))
+                completion_percentage = int((gifts_exchanged / total_participants) * 100) if total_participants > 0 else 0
+                
+                if "statistics" not in archive_data:
+                    archive_data["statistics"] = {}
+                archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
+                archive_data["statistics"]["completion_percentage"] = completion_percentage
+                
+                # Save archive
+                async with self._lock:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        self._executor,
+                        save_json,
+                        archive_path,
+                        archive_data,
+                        self.logger
+                    )
+        else:
+            # Save to active event (normal flow)
+            async with self._lock:
+                event.setdefault("gift_submissions", {})[user_id] = {
+                    "gift": gift_description,
+                    "receiver_id": receiver_id,
+                    "receiver_name": receiver_name,
+                    "submitted_at": time.time(),
+                    "timestamp": dt.datetime.now().isoformat()
+                }
+                await self._save_async()
 
         # Create beautiful success embed with variations
-        year = self.state['current_year']
+        year = current_year
         gift_templates = [
             # Variation A: Gift logged
             (f"🎁 Secret Santa {year} - GIFT LOGGED! 🎁",
@@ -1781,7 +2035,7 @@ class SecretSantaCog(commands.Cog):
         embed.set_footer(text="🎄 Thank you for participating in Secret Santa! Your kindness makes the season brighter.")
         embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/852616843715395605.png")  # Gift emoji
 
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="edit_gift", description="Edit your gift submission from a past year")
     async def ss_edit_gift(
@@ -1808,7 +2062,7 @@ class SecretSantaCog(commands.Cog):
             # Load archive
             archive_data = load_json(archive_path)
             if not archive_data:
-                await inter.edit_original_response(content=f"❌ Failed to load archive for {year}")
+                await self._safe_edit_response(inter, content=f"❌ Failed to load archive for {year}")
                 return
             
             # Handle both formats: list format (legacy) and unified format
@@ -1839,7 +2093,7 @@ class SecretSantaCog(commands.Cog):
                     })
             
             if not assignments:
-                await inter.edit_original_response(content=f"❌ No assignments found in archive for {year}")
+                await self._safe_edit_response(inter, content=f"❌ No assignments found in archive for {year}")
                 return
             
             # Find user's assignment
@@ -1931,7 +2185,7 @@ class SecretSantaCog(commands.Cog):
                 inline=False
             )
             
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             
             self.logger.info(f"User {inter.author.display_name} ({user_id}) updated their gift for {year}")
             
@@ -1974,12 +2228,12 @@ class SecretSantaCog(commands.Cog):
             
             # Check if already have this item
             if item.lower() in [w.lower() for w in user_wishlist]:
-                await inter.edit_original_response(content="❌ This item is already on your wishlist!")
+                await self._safe_edit_response(inter, content="❌ This item is already on your wishlist!")
                 return
             
             # Limit wishlist size
             if len(user_wishlist) >= 10:
-                await inter.edit_original_response(content="❌ Wishlist full! (max 10 items). Remove some items first.")
+                await self._safe_edit_response(inter, content="❌ Wishlist full! (max 10 items). Remove some items first.")
                 return
             
             # Add item
@@ -2018,7 +2272,7 @@ class SecretSantaCog(commands.Cog):
             value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
             inline=False
         )
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_wishlist.sub_command(name="remove", description="Remove item from your wishlist")
     async def wishlist_remove(
@@ -2040,11 +2294,11 @@ class SecretSantaCog(commands.Cog):
         user_wishlist = wishlists.get(user_id, [])
 
         if not user_wishlist:
-            await inter.edit_original_response(content="❌ Your wishlist is empty!")
+            await self._safe_edit_response(inter, content="❌ Your wishlist is empty!")
             return
 
         if item_number > len(user_wishlist):
-            await inter.edit_original_response(content=f"❌ Invalid item number! You only have {len(user_wishlist)} items.")
+            await self._safe_edit_response(inter, content=f"❌ Invalid item number! You only have {len(user_wishlist)} items.")
             return
 
         # Remove item
@@ -2065,7 +2319,7 @@ class SecretSantaCog(commands.Cog):
                 value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
                 inline=False
             )
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
     
     @wishlist_remove.autocomplete("item_number")
     async def autocomplete_wishlist_item_number_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2104,7 +2358,7 @@ class SecretSantaCog(commands.Cog):
             embed.add_field(name="🎁 Items", value=wishlist_text, inline=False)
             embed.set_footer(text=f"{len(user_wishlist)}/10 items • Use /ss wishlist remove [number] to remove")
         
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_wishlist.sub_command(name="clear", description="Clear your entire wishlist")
     async def wishlist_clear(self, inter: disnake.ApplicationCommandInteraction):
@@ -2121,7 +2375,7 @@ class SecretSantaCog(commands.Cog):
         wishlists = event.get("wishlists", {})
         
         if user_id not in wishlists or not wishlists[user_id]:
-            await inter.edit_original_response(content="❌ Your wishlist is already empty!")
+            await self._safe_edit_response(inter, content="❌ Your wishlist is already empty!")
             return
 
         # Clear wishlist
@@ -2129,7 +2383,7 @@ class SecretSantaCog(commands.Cog):
             wishlists[user_id] = []
             await self._save_async()
 
-        await inter.edit_original_response(content="✅ Wishlist cleared!")
+        await self._safe_edit_response(inter, content="✅ Wishlist cleared!")
 
     @ss_root.sub_command(name="giftee", description="View your giftee's wishlist")
     async def ss_view_giftee_wishlist(self, inter: disnake.ApplicationCommandInteraction):
@@ -2170,7 +2424,7 @@ class SecretSantaCog(commands.Cog):
             embed.add_field(name="🎁 Their Wishes", value=wishlist_text, inline=False)
             embed.set_footer(text="💡 Use these as inspiration for the perfect gift!")
         
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="view_gifts", description="View submitted gifts")
     @mod_check()
@@ -2185,7 +2439,7 @@ class SecretSantaCog(commands.Cog):
 
         submissions = event.get("gift_submissions", {})
         if not submissions:
-            await inter.edit_original_response(content="❌ No gifts submitted yet")
+            await self._safe_edit_response(inter, content="❌ No gifts submitted yet")
             return
 
         embed = disnake.Embed(
@@ -2220,7 +2474,7 @@ class SecretSantaCog(commands.Cog):
         if len(submissions) > 10:
             embed.set_footer(text=f"Showing 10 of {len(submissions)} submissions")
 
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="view_comms", description="View communications")
     @mod_check()
@@ -2235,7 +2489,7 @@ class SecretSantaCog(commands.Cog):
 
         comms = event.get("communications", {})
         if not comms:
-            await inter.edit_original_response(content="❌ No communications yet")
+            await self._safe_edit_response(inter, content="❌ No communications yet")
             return
 
         # Create consistent emoji mapping for all participants this year
@@ -2275,7 +2529,7 @@ class SecretSantaCog(commands.Cog):
                 )
             
             embed.set_footer(text=f"Total: {len(comms)} thread(s)")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="history", description="View past Secret Santa events")
     async def ss_history(
@@ -2291,7 +2545,7 @@ class SecretSantaCog(commands.Cog):
         archives = load_all_archives(logger=self.logger)
 
         if not archives:
-            await inter.edit_original_response(content="❌ No archived events found")
+            await self._safe_edit_response(inter, content="❌ No archived events found")
             return
 
         # Sort by year
@@ -2385,7 +2639,7 @@ class SecretSantaCog(commands.Cog):
                 )
 
                 embed.set_footer(text=f"Requested by {inter.author.display_name}")
-                await inter.edit_original_response(embed=embed)
+                await self._safe_edit_response(inter, embed=embed)
 
         else:
             # Show all years overview with pagination
@@ -2464,7 +2718,7 @@ class SecretSantaCog(commands.Cog):
 
                 embed.set_footer(
                     text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
-                await inter.edit_original_response(embed=embed)
+                await self._safe_edit_response(inter, embed=embed)
     
     @ss_history.autocomplete("year")
     async def autocomplete_year_history_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2487,7 +2741,7 @@ class SecretSantaCog(commands.Cog):
         archives = load_all_archives(logger=self.logger)
         
         if not archives:
-            await inter.edit_original_response(content="❌ No archived events found")
+            await self._safe_edit_response(inter, content="❌ No archived events found")
             return
         
         # Find user's participation across all years
@@ -2548,7 +2802,7 @@ class SecretSantaCog(commands.Cog):
                 color=disnake.Color.red()
             )
             embed.set_footer(text="Maybe this year! 🎅")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return
         
         # Build beautiful history embed
@@ -2613,7 +2867,7 @@ class SecretSantaCog(commands.Cog):
         embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
         embed.set_footer(text=f"Requested by {inter.author.display_name}")
         
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="test_emoji_consistency", description="🎨 Test emoji consistency across years for a user")
     async def ss_test_emoji_consistency(
@@ -2631,7 +2885,7 @@ class SecretSantaCog(commands.Cog):
         archives = load_all_archives(logger=self.logger)
         
         if not archives:
-            await inter.edit_original_response(content="❌ No archived events found")
+            await self._safe_edit_response(inter, content="❌ No archived events found")
             return
         
         # Check emoji for this user across all years
@@ -2690,7 +2944,7 @@ class SecretSantaCog(commands.Cog):
         
         embed.set_footer(text="Each user should have the same emoji across all years based on their user ID")
         
-        await inter.edit_original_response(embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="delete_year", description="🗑️ Delete an archive year (CAREFUL!)")
     @commands.has_permissions(administrator=True)
@@ -2706,7 +2960,7 @@ class SecretSantaCog(commands.Cog):
         # Safety check - don't allow deleting very old years accidentally
         current_year = dt.date.today().year
         if year < 2020 or year > current_year + 1:
-            await inter.edit_original_response(content=f"❌ Invalid year {year} (must be 2020-{current_year + 1})")
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020-{current_year + 1})")
             return
         
         # CRITICAL SAFETY CHECK: Prevent deleting current active year
@@ -2729,13 +2983,13 @@ class SecretSantaCog(commands.Cog):
                 inline=False
             )
             embed.set_footer(text="Safety first! Your active event data is protected.")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return
         
         archive_path = ARCHIVE_DIR / f"{year}.json"
         
         if not archive_path.exists():
-            await inter.edit_original_response(content=f"❌ No archive found for {year}")
+            await self._safe_edit_response(inter, content=f"❌ No archive found for {year}")
             return
         
         # INDESTRUCTIBLE BACKUP SYSTEM: Move to backups folder instead of deleting
@@ -2757,7 +3011,7 @@ class SecretSantaCog(commands.Cog):
                 inline=False
             )
             embed.set_footer(text="The current archive was NOT moved to prevent overwriting the existing backup.")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return
         
         try:
@@ -2790,7 +3044,7 @@ class SecretSantaCog(commands.Cog):
             )
             embed.set_footer(text="💡 Use /ss list_backups to view all backed-up years")
             
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             
             # Log to Discord
             if hasattr(self.bot, 'send_to_discord_log'):
@@ -2801,7 +3055,7 @@ class SecretSantaCog(commands.Cog):
             
         except Exception as e:
             self.logger.error(f"Failed to move archive to backups: {e}")
-            await inter.edit_original_response(content=f"❌ Failed to move archive: {e}")
+            await self._safe_edit_response(inter, content=f"❌ Failed to move archive: {e}")
     
     @ss_delete_year.autocomplete("year")
     async def autocomplete_year_delete_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2855,7 +3109,7 @@ class SecretSantaCog(commands.Cog):
                 inline=False
             )
             embed.set_footer(text="Protection: Prevents accidental overwrites!")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return
         
         try:
@@ -2880,7 +3134,7 @@ class SecretSantaCog(commands.Cog):
             )
             embed.set_footer(text="💡 Restoration complete!")
             
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             
             # Log to Discord
             if hasattr(self.bot, 'send_to_discord_log'):
@@ -2891,7 +3145,7 @@ class SecretSantaCog(commands.Cog):
             
         except Exception as e:
             self.logger.error(f"Failed to restore archive from backups: {e}")
-            await inter.edit_original_response(content=f"❌ Failed to restore archive: {e}")
+            await self._safe_edit_response(inter, content=f"❌ Failed to restore archive: {e}")
     
     @ss_restore_year.autocomplete("year")
     async def autocomplete_year_restore_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2915,7 +3169,7 @@ class SecretSantaCog(commands.Cog):
                 color=disnake.Color.green()
             )
             embed.set_footer(text="Use /ss delete_year to move archives to backups")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
             return
         
         # Build list of backed-up years with file sizes
@@ -2953,7 +3207,7 @@ class SecretSantaCog(commands.Cog):
             )
             
             embed.set_footer(text=f"Location: archive/backups/")
-            await inter.edit_original_response(embed=embed)
+            await self._safe_edit_response(inter, embed=embed)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: disnake.RawReactionActionEvent):
