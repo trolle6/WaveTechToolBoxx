@@ -1425,90 +1425,117 @@ class SecretSantaCog(commands.Cog):
         Returns:
             Tuple of (success: bool, error_message: Optional[str])
         """
-        event = self._get_current_event()
-        if not event:
-            error_msg = "❌ No active event - use `/ss start` to create one first"
-            if inter:
-                await self._safe_edit_response(inter, content=error_msg)
-            return False, error_msg
-
-        # Convert participant IDs to integers
-        participants = [int(uid) for uid in event["participants"]]
-
-        if len(participants) < 2:
-            error_msg = "❌ Need at least 2 participants"
-            if inter:
-                await self._safe_edit_response(inter, content=error_msg)
-            return False, error_msg
-
-        # Get guild for role assignment (if inter provided, use it; otherwise try to get from event)
-        guild = None
-        if inter:
-            guild = inter.guild
-        elif event.get("guild_id"):
-            guild = self.bot.get_guild(event["guild_id"])
-
-        # HISTORY LOADING: Load all past Secret Santa events from archive files
-        history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[], logger=self.logger)
-        
-        self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
-        self.logger.info(f"Available history years: {available_years}")
-        
-        # PROGRESSIVE FALLBACK SYSTEM
-        exclude_years = []
-        assignments = None
-        fallback_used = False
-        
-        # Try with all years first, then progressively exclude oldest years
-        for attempt in range(len(available_years) + 1):
-            if attempt:
-                exclude_years = available_years[:attempt]
-                fallback_used = True
-                self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
-                history, _ = load_history_from_archives(ARCHIVE_DIR, exclude_years=exclude_years, logger=self.logger)
-                
+        # Use lock to prevent concurrent shuffle executions
+        async with self._lock:
+            event = self._get_current_event()
+            if not event:
+                error_msg = "❌ No active event - use `/ss start` to create one first"
                 if inter:
-                    years_str = ", ".join(map(str, exclude_years))
-                    await inter.edit_original_response(
-                        content=f"⚠️ Initial assignment difficult... trying fallback (excluding {years_str})..."
-                    )
-            
-            validation_error = validate_assignment_possibility(participants, history)
-            if validation_error:
-                if attempt == len(available_years):
-                    error_msg = f"❌ {validation_error}"
-                    if inter:
-                        await self._safe_edit_response(inter, content=error_msg)
-                    if hasattr(self.bot, 'send_to_discord_log'):
-                        await self.bot.send_to_discord_log(
-                            f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
-                            "ERROR"
-                        )
-                    return False, error_msg
-                continue
-            
-            try:
-                assignments = make_assignments(participants, history)
-                break
-            except ValueError as e:
-                if attempt == len(available_years):
-                    error_msg = f"❌ Assignment failed: {e}"
-                    if inter:
-                        await self._safe_edit_response(inter, content=error_msg)
-                    if hasattr(self.bot, 'send_to_discord_log'):
-                        await self.bot.send_to_discord_log(
-                            f"Secret Santa assignment failed even with all fallbacks - {e}",
-                            "ERROR"
-                        )
-                    return False, error_msg
-                continue
-        
-        if not assignments:
-            error_msg = "❌ Assignment failed unexpectedly"
-            if inter:
-                await self._safe_edit_response(inter, content=error_msg)
-            return False, error_msg
+                    await self._safe_edit_response(inter, content=error_msg)
+                return False, error_msg
 
+            # CRITICAL: Check if assignments already exist - prevent overwriting
+            existing_assignments = event.get("assignments", {})
+            if existing_assignments:
+                error_msg = (
+                    "❌ **Assignments already exist!**\n\n"
+                    f"• {len(existing_assignments)} pairs have already been created\n"
+                    "• Participants have already received their assignments\n\n"
+                    "💡 **To reshuffle:** Use `/ss stop` to end the current event, then `/ss start` to create a new one.\n"
+                    "⚠️ **Warning:** Reshuffling will overwrite existing assignments and send new DMs to all participants!"
+                )
+                if inter:
+                    await self._safe_edit_response(inter, content=error_msg)
+                return False, error_msg
+
+            # Convert participant IDs to integers
+            participants = [int(uid) for uid in event["participants"]]
+
+            if len(participants) < 2:
+                error_msg = "❌ Need at least 2 participants"
+                if inter:
+                    await self._safe_edit_response(inter, content=error_msg)
+                return False, error_msg
+
+            # Get guild for role assignment (if inter provided, use it; otherwise try to get from event)
+            guild = None
+            if inter:
+                guild = inter.guild
+            elif event.get("guild_id"):
+                guild = self.bot.get_guild(event["guild_id"])
+
+            # HISTORY LOADING: Load all past Secret Santa events from archive files
+            history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[], logger=self.logger)
+            
+            self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
+            self.logger.info(f"Available history years: {available_years}")
+            
+            # PROGRESSIVE FALLBACK SYSTEM
+            exclude_years = []
+            assignments = None
+            fallback_used = False
+            
+            # Try with all years first, then progressively exclude oldest years
+            for attempt in range(len(available_years) + 1):
+                if attempt:
+                    exclude_years = available_years[:attempt]
+                    fallback_used = True
+                    self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
+                    history, _ = load_history_from_archives(ARCHIVE_DIR, exclude_years=exclude_years, logger=self.logger)
+                    
+                    if inter:
+                        years_str = ", ".join(map(str, exclude_years))
+                        await inter.edit_original_response(
+                            content=f"⚠️ Initial assignment difficult... trying fallback (excluding {years_str})..."
+                        )
+                
+                validation_error = validate_assignment_possibility(participants, history)
+                if validation_error:
+                    if attempt == len(available_years):
+                        error_msg = f"❌ {validation_error}"
+                        if inter:
+                            await self._safe_edit_response(inter, content=error_msg)
+                        if hasattr(self.bot, 'send_to_discord_log'):
+                            await self.bot.send_to_discord_log(
+                                f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
+                                "ERROR"
+                            )
+                        return False, error_msg
+                    continue
+                
+                try:
+                    assignments = make_assignments(participants, history)
+                    break
+                except ValueError as e:
+                    if attempt == len(available_years):
+                        error_msg = f"❌ Assignment failed: {e}"
+                        if inter:
+                            await self._safe_edit_response(inter, content=error_msg)
+                        if hasattr(self.bot, 'send_to_discord_log'):
+                            await self.bot.send_to_discord_log(
+                                f"Secret Santa assignment failed even with all fallbacks - {e}",
+                                "ERROR"
+                            )
+                        return False, error_msg
+                    continue
+            
+            if not assignments:
+                error_msg = "❌ Assignment failed unexpectedly"
+                if inter:
+                    await self._safe_edit_response(inter, content=error_msg)
+                return False, error_msg
+
+            # Save assignments BEFORE sending DMs (prevents race conditions)
+            event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
+            event["join_closed"] = True
+            # Clear any scheduled shuffle since we just executed
+            event.pop("scheduled_shuffle_time", None)
+            event.pop("scheduled_by_user_id", None)
+            await self._save_async()
+        
+        # Release lock before sending DMs (they can take time, don't block other operations)
+        # Assignments are already saved, so concurrent shuffle attempts will see them and fail
+        
         # Assign role to participants (if role_id was provided)
         if guild and event.get("role_id"):
             role = guild.get_role(event["role_id"])
@@ -1535,15 +1562,6 @@ class SecretSantaCog(commands.Cog):
             dm_tasks.append(self._send_dm(giver, msg))
 
         await asyncio.gather(*dm_tasks)
-
-        # Save assignments
-        async with self._lock:
-            event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
-            event["join_closed"] = True
-            # Clear any scheduled shuffle since we just executed
-            event.pop("scheduled_shuffle_time", None)
-            event.pop("scheduled_by_user_id", None)
-            await self._save_async()
 
         # Build success message
         response_msg = f"✅ Assignments complete!\n"
