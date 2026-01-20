@@ -3211,6 +3211,92 @@ class SecretSantaCog(commands.Cog):
         """Autocomplete decorator for restore_year year parameter"""
         return await self.autocomplete_year_restore(inter, string)
 
+    @ss_root.sub_command_group(name="distribute", description="File distribution management")
+    async def ss_distribute(self, inter: disnake.ApplicationCommandInteraction):
+        """File distribution commands"""
+        pass
+    
+    @ss_distribute.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
+    async def ss_distribute_upload(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        attachment: disnake.Attachment = commands.Param(default=None, description="File to upload (can attach multiple in Discord)"),
+        required_by: Optional[disnake.Member] = commands.Param(default=None, description="Optional: Who requires this file (works in DMs too)")
+    ):
+        """Upload and distribute files"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            await distributezip_cog.upload_file(inter, attachment, required_by)
+        else:
+            await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
+    
+    @ss_distribute.sub_command(name="list", description="List all uploaded files")
+    async def ss_distribute_list(self, inter: disnake.ApplicationCommandInteraction):
+        """List all uploaded files"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            await distributezip_cog.list_files(inter)
+        else:
+            await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
+    
+    @ss_distribute.sub_command(name="browse", description="Browse and select files using an interactive file browser")
+    async def ss_distribute_browse(self, inter: disnake.ApplicationCommandInteraction):
+        """Browse files using an interactive file browser"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            await distributezip_cog.browse_files(inter)
+        else:
+            await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
+    
+    @ss_distribute.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
+    async def ss_distribute_get(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)")
+    ):
+        """Get/download a specific file"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            # Use the cog's autocomplete method
+            if not file_name:
+                # Call the method that handles file browser
+                await distributezip_cog.get_file(inter, None)
+            else:
+                await distributezip_cog.get_file(inter, file_name)
+        else:
+            await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
+    
+    @ss_distribute.sub_command(name="remove", description="Remove a file (moderator only, use browse for easier selection)")
+    @mod_check()
+    async def ss_distribute_remove(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        file_name: str = commands.Param(default=None, description="File name (leave empty to use file browser)")
+    ):
+        """Remove a file (moderator only)"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            await distributezip_cog.remove_file(inter, file_name)
+        else:
+            await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
+    
+    # Autocomplete handlers for distribute commands (delegate to DistributeZipCog)
+    @ss_distribute_get.autocomplete("file_name")
+    async def autocomplete_ss_distribute_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for ss distribute get file_name"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            return await distributezip_cog.autocomplete_file_name_get(inter, string)
+        return []
+    
+    @ss_distribute_remove.autocomplete("file_name")
+    async def autocomplete_ss_distribute_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+        """Autocomplete for ss distribute remove file_name"""
+        distributezip_cog = self.bot.get_cog("DistributeZipCog")
+        if distributezip_cog:
+            return await distributezip_cog.autocomplete_file_name_remove(inter, string)
+        return []
+    
     @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
     @admin_check()
     async def ss_list_backups(self, inter: disnake.ApplicationCommandInteraction):
