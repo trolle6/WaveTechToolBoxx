@@ -1177,12 +1177,6 @@ class SecretSantaCog(commands.Cog):
         # Get role ID if provided
         role_id_int = role.id if role else None
 
-        # Check if event already active
-        event = self.state.get("current_event")
-        if event and event.get("active"):
-            await self._safe_edit_response(inter, content="❌ Event already active")
-            return
-
         # SAFETY WARNING: Check if current year is already archived
         # Prevents accidental data loss if you test on wrong server or run twice
         current_year = dt.date.today().year
@@ -1377,7 +1371,14 @@ class SecretSantaCog(commands.Cog):
             new_event["scheduled_stop_time"] = scheduled_stop_timestamp
             new_event["scheduled_stop_by_user_id"] = inter.author.id
 
+        # Use lock to prevent concurrent event creation
         async with self._lock:
+            # CRITICAL: Check if event already active INSIDE lock (prevents race conditions)
+            event = self.state.get("current_event")
+            if event and event.get("active"):
+                await self._safe_edit_response(inter, content="❌ Event already active")
+                return
+            
             self.state["current_year"] = current_year
             self.state["current_event"] = new_event
             await self._save_async()
@@ -1594,11 +1595,25 @@ class SecretSantaCog(commands.Cog):
         Returns:
             Tuple of (success: bool, error_message: Optional[str])
         """
-        event = self._get_current_event()
-        if not event:
-            return False, "❌ No active event"
+        # Use lock to prevent concurrent stop executions
+        async with self._lock:
+            event = self._get_current_event()
+            if not event:
+                return False, "❌ No active event"
+            
+            year = self.state["current_year"]
+            
+            # Archive event (with automatic backup protection)
+            saved_filename = self._archive_event(event, year)
+            
+            # Clear scheduled stop before clearing event
+            event.pop("scheduled_stop_time", None)
+            event.pop("scheduled_stop_by_user_id", None)
+            self.state["current_event"] = None
+            await self._save_async()
         
-        year = self.state["current_year"]
+        # Release lock before sending DMs (they can take time)
+        # Event is already cleared, so concurrent stops will see no event and fail
         
         # Send thank you message to all participants
         participants = event.get("participants", {})
@@ -1606,16 +1621,6 @@ class SecretSantaCog(commands.Cog):
             end_msg = self._get_event_end_message(year)
             dm_tasks = [self._send_dm(int(uid), end_msg) for uid in participants]
             await asyncio.gather(*dm_tasks, return_exceptions=True)
-        
-        # Archive event (with automatic backup protection)
-        saved_filename = self._archive_event(event, year)
-        
-        async with self._lock:
-            # Clear scheduled stop before clearing event
-            event.pop("scheduled_stop_time", None)
-            event.pop("scheduled_stop_by_user_id", None)
-            self.state["current_event"] = None
-            await self._save_async()
         
         # Notify Discord log channel
         if hasattr(self.bot, 'send_to_discord_log'):
