@@ -1466,10 +1466,14 @@ class SecretSantaCog(commands.Cog):
                 guild = self.bot.get_guild(event["guild_id"])
 
             # HISTORY LOADING: Load all past Secret Santa events from archive files
-            history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[], logger=self.logger)
+            # CRITICAL: Exclude current year from history - we're creating a NEW event for this year
+            # The current year's archive should only be used for history when creating events for FUTURE years
+            current_year = self.state.get('current_year', dt.date.today().year)
+            history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[current_year], logger=self.logger)
             
             self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
             self.logger.info(f"Available history years: {available_years}")
+            self.logger.info(f"Excluding current year {current_year} from history (creating new event for this year)")
             
             # PROGRESSIVE FALLBACK SYSTEM
             exclude_years = []
