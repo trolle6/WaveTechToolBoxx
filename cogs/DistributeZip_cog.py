@@ -580,15 +580,15 @@ class DistributeZipCog(commands.Cog):
         failed = 0
         forbidden_count = 0  # Users with DMs disabled
         successful_recipients = []  # Track who successfully received the file
-        total_members = len(members)
+        
+        # Exclude uploader from total count (they get summary DM instead of file)
+        members_to_send = [m for m in members if m.id != inter.author.id]
+        total_members = len(members_to_send)
         show_progress = total_members > 20  # Show progress for large distributions
         
         async with self._sending_lock:
-            for i, member in enumerate(members, 1):
+            for i, member in enumerate(members_to_send, 1):
                 try:
-                    # Skip uploader (they'll get a summary DM instead)
-                    if member.id == inter.author.id:
-                        continue
                     
                     # Create file object for each member
                     file = disnake.File(file_path, filename=file_path.name)
