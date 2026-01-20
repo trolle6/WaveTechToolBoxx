@@ -601,7 +601,7 @@ class DistributeZipCog(commands.Cog):
         members, distribution_type = await self._get_distribution_targets(guild)
         
         if not members:
-            await self._safe_followup_send(inter, content="⚠️ No members found to send the file to")
+            await self._safe_followup_send(inter, content="⚠️ No members found to send the file to", ephemeral=True)
             return
         
         # Create embed
@@ -779,7 +779,7 @@ class DistributeZipCog(commands.Cog):
         else:
             summary_embed.set_footer(text="Distributed to all server members")
         
-        await self._safe_followup_send(inter, embed=summary_embed)
+        await self._safe_followup_send(inter, embed=summary_embed, ephemeral=True)
         
         # Send summary DM to uploader
         await self._send_uploader_summary(

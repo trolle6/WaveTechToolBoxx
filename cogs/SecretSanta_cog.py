@@ -1754,6 +1754,9 @@ class SecretSantaCog(commands.Cog):
             await self._safe_edit_response(inter, content=saved_filename or "❌ Failed to stop event")
             return
 
+        # Get current year (state was updated by _execute_stop_internal)
+        current_year = self.state.get('current_year', dt.date.today().year)
+
         # Build response message
         if cancelled_scheduled:
             response_msg = f"⚠️ Scheduled stop cancelled and executed manually.\n"
@@ -1766,14 +1769,14 @@ class SecretSantaCog(commands.Cog):
             # Archive protection was triggered
             embed = disnake.Embed(
                 title="✅ Event Stopped & Protected",
-                description=(response_msg if response_msg else "") + f"Secret Santa {self.state['current_year']} has been archived with data protection!",
+                description=(response_msg if response_msg else "") + f"Secret Santa {current_year} has been archived with data protection!",
                 color=disnake.Color.orange()
             )
             embed.add_field(
                 name="🔒 Archive Protection",
-                value=f"**Original:** `{self.state['current_year']}.json` (preserved)\n"
+                value=f"**Original:** `{current_year}.json` (preserved)\n"
                       f"**This event:** `{saved_filename}`\n\n"
-                      f"⚠️ You ran multiple {self.state['current_year']} events! Review archives folder manually.",
+                      f"⚠️ You ran multiple {current_year} events! Review archives folder manually.",
                 inline=False
             )
             embed.set_footer(text="Your original archive was NOT overwritten!")
