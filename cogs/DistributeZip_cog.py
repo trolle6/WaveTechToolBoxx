@@ -1,8 +1,8 @@
 """
-Zip File Distribution Cog
+File Distribution Cog
 
 FEATURES:
-- 📦 Upload and distribute zip files (e.g., Minecraft texture packs)
+- 📦 Upload and distribute files (any type: ZIP, JAR, RAR, etc. - up to 25MB)
 - 👤 Track who required the file
 - 📨 Automatically send files to Secret Santa participants (if active) or all server members via DM
 - 🔒 Permission checks (only authorized users can upload)
@@ -14,7 +14,7 @@ FEATURES:
 - 🚦 Improved rate limiting (Discord API compliant)
 
 COMMANDS:
-- /distributezip upload [attachment] [required_by] - Upload a zip file and distribute it
+- /distributezip upload [attachment] [required_by] - Upload file(s) and distribute them
 - /distributezip list - List all uploaded files (with pagination for 10+ files)
 - /distributezip browse - Browse files using interactive file browser
 - /distributezip get [file_name] - Get a specific file (use browse for easier selection)
@@ -131,7 +131,7 @@ def save_metadata(data: Dict, logger=None):
 
 
 class DistributeZipCog(commands.Cog):
-    """Zip file distribution system"""
+    """File distribution system - supports any file type up to Discord's 25MB limit"""
 
     def __init__(self, bot):
         self.bot = bot
@@ -372,9 +372,8 @@ class DistributeZipCog(commands.Cog):
     
     def _validate_file(self, attachment: disnake.Attachment) -> Optional[str]:
         """Validate file. Returns error message if invalid, None if valid"""
-        if not attachment.filename.lower().endswith('.zip'):
-            return "❌ Error: File must be a .zip file"
-        
+        # Allow any file type - Discord handles file distribution regardless of format
+        # Size check is the main concern (Discord's 25MB limit)
         if attachment.size > MAX_FILE_SIZE:
             size_mb = attachment.size / MEGABYTE
             return f"❌ Error: File size ({size_mb:.2f}MB) exceeds maximum allowed size ({MAX_FILE_SIZE / MEGABYTE:.0f}MB)"
@@ -672,7 +671,7 @@ class DistributeZipCog(commands.Cog):
         """Main distributezip command group"""
         pass
 
-    @distributezip.sub_command(name="upload", description="Upload zip file(s) and distribute them")
+    @distributezip.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
     async def upload_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -680,8 +679,9 @@ class DistributeZipCog(commands.Cog):
         required_by: disnake.Member = None
     ):
         """
-        Upload one or more zip files and send them to Secret Santa participants (if active) or all server members.
+        Upload one or more files (any type) and send them to Secret Santa participants (if active) or all server members.
         
+        Supports any file type (ZIP, JAR, RAR, etc.) up to Discord's 25MB limit.
         You can attach multiple files in Discord - the bot will process all of them!
         """
         await inter.response.defer()
@@ -733,7 +733,7 @@ class DistributeZipCog(commands.Cog):
         if not attachments:
             await self._safe_edit_response(inter,
                 content="❌ **No files attached**\n\n"
-                       f"Please attach one or more `.zip` files to this command.\n"
+                       f"Please attach one or more files to this command.\n"
                        f"💡 **Tip:** You can attach multiple files at once in Discord!"
             )
             return
