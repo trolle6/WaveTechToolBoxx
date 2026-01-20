@@ -39,6 +39,7 @@ import disnake
 from disnake.ext import commands
 
 from . import utils
+from .secret_santa_checks import manage_guild_check
 
 
 # ============ CONSTANTS ============
@@ -1451,7 +1452,7 @@ class VoiceProcessingCog(commands.Cog):
         await inter.edit_original_response(embed=embed)
 
     @tts_cmd.sub_command(name="disconnect", description="Disconnect bot from voice")
-    @commands.has_permissions(manage_guild=True)
+    @manage_guild_check()
     async def tts_disconnect(self, inter: disnake.ApplicationCommandInteraction):
         """Force disconnect"""
         await inter.response.defer(ephemeral=True)
@@ -1468,7 +1469,7 @@ class VoiceProcessingCog(commands.Cog):
             await inter.edit_original_response(content=f"❌ Error: {e}")
 
     @tts_cmd.sub_command(name="clear", description="Clear TTS queue")
-    @commands.has_permissions(manage_guild=True)
+    @manage_guild_check()
     async def tts_clear(self, inter: disnake.ApplicationCommandInteraction):
         """Clear queue"""
         await inter.response.defer(ephemeral=True)

@@ -88,7 +88,7 @@ from .secret_santa_views import (
     SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
     CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
 )
-from .secret_santa_checks import mod_check, participant_check
+from .secret_santa_checks import mod_check, participant_check, admin_check, safe_display_name
 
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
@@ -1205,7 +1205,7 @@ class SecretSantaCog(commands.Cog):
             self.logger.warning(f"Starting new event for {current_year} but archive already exists!")
             if hasattr(self.bot, 'send_to_discord_log'):
                 await self.bot.send_to_discord_log(
-                    f"⚠️ {inter.author.display_name} is starting a new Secret Santa {current_year} event, but {current_year}.json archive already exists!",
+                    f"⚠️ {safe_display_name(inter.author)} is starting a new Secret Santa {current_year} event, but {current_year}.json archive already exists!",
                     "WARNING"
                 )
             
@@ -1413,7 +1413,7 @@ class SecretSantaCog(commands.Cog):
         await inter.edit_original_response(response_msg)
         
         # Notify Discord log channel
-        log_msg = f"Secret Santa {current_year} event started by {inter.author.display_name} - {len(participants)} participants joined"
+        log_msg = f"Secret Santa {current_year} event started by {safe_display_name(inter.author)} - {len(participants)} participants joined"
         if scheduled_timestamp:
             log_msg += f" (shuffle scheduled for <t:{int(scheduled_timestamp)}:F>)"
         if hasattr(self.bot, 'send_to_discord_log'):
@@ -1579,7 +1579,7 @@ class SecretSantaCog(commands.Cog):
             await self._safe_edit_response(inter, content=response_msg)
         
         # Notify Discord log channel
-        executor_name = inter.author.display_name if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
+        executor_name = safe_display_name(inter.author) if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
         if hasattr(self.bot, 'send_to_discord_log'):
             log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs created"
             if fallback_used:
@@ -2242,7 +2242,7 @@ class SecretSantaCog(commands.Cog):
             
             await self._safe_edit_response(inter, embed=embed)
             
-            self.logger.info(f"User {inter.author.display_name} ({user_id}) updated their gift for {year}")
+            self.logger.info(f"User {safe_display_name(inter.author)} ({user_id}) updated their gift for {year}")
             
         except Exception as e:
             self.logger.error(f"Error editing gift for {year}: {e}", exc_info=True)
@@ -2693,7 +2693,7 @@ class SecretSantaCog(commands.Cog):
                     inline=True
                 )
 
-                embed.set_footer(text=f"Requested by {inter.author.display_name}")
+                embed.set_footer(text=f"Requested by {safe_display_name(inter.author)}")
                 await self._safe_edit_response(inter, embed=embed)
 
         else:
@@ -2772,7 +2772,7 @@ class SecretSantaCog(commands.Cog):
                 )
 
                 embed.set_footer(
-                    text=f"Use /ss history [year] for detailed view • Requested by {inter.author.display_name}")
+                    text=f"Use /ss history [year] for detailed view • Requested by {safe_display_name(inter.author)}")
                 await self._safe_edit_response(inter, embed=embed)
     
     @ss_history.autocomplete("year")
@@ -2920,7 +2920,7 @@ class SecretSantaCog(commands.Cog):
         )
         
         embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
-        embed.set_footer(text=f"Requested by {inter.author.display_name}")
+        embed.set_footer(text=f"Requested by {safe_display_name(inter.author)}")
         
         await self._safe_edit_response(inter, embed=embed)
 
@@ -3002,7 +3002,7 @@ class SecretSantaCog(commands.Cog):
         await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="delete_year", description="🗑️ Delete an archive year (CAREFUL!)")
-    @commands.has_permissions(administrator=True)
+    @admin_check()
     async def ss_delete_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3104,7 +3104,7 @@ class SecretSantaCog(commands.Cog):
             # Log to Discord
             if hasattr(self.bot, 'send_to_discord_log'):
                 await self.bot.send_to_discord_log(
-                    f"🛡️ {inter.author.display_name} moved Secret Santa {year} to backups (safely archived)",
+                    f"🛡️ {safe_display_name(inter.author)} moved Secret Santa {year} to backups (safely archived)",
                     "INFO"
                 )
             
@@ -3118,7 +3118,7 @@ class SecretSantaCog(commands.Cog):
         return await self.autocomplete_year_delete(inter, string)
 
     @ss_root.sub_command(name="restore_year", description="♻️ Restore a year from backups")
-    @commands.has_permissions(administrator=True)
+    @admin_check()
     async def ss_restore_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3194,7 +3194,7 @@ class SecretSantaCog(commands.Cog):
             # Log to Discord
             if hasattr(self.bot, 'send_to_discord_log'):
                 await self.bot.send_to_discord_log(
-                    f"♻️ {inter.author.display_name} restored Secret Santa {year} from backups",
+                    f"♻️ {safe_display_name(inter.author)} restored Secret Santa {year} from backups",
                     "INFO"
                 )
             
@@ -3208,7 +3208,7 @@ class SecretSantaCog(commands.Cog):
         return await self.autocomplete_year_restore(inter, string)
 
     @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
-    @commands.has_permissions(administrator=True)
+    @admin_check()
     async def ss_list_backups(self, inter: disnake.ApplicationCommandInteraction):
         """List all years in the backups folder (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):

@@ -47,6 +47,48 @@ def mod_check():
     return commands.check(predicate)
 
 
+def admin_check():
+    """Check if user is administrator (guild-only, fails in DMs)"""
+    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
+        # Admin checks only work in guilds (not DMs)
+        if not inter.guild:
+            return False
+        
+        # Get Member object
+        if isinstance(inter.author, disnake.Member):
+            member = inter.author
+        else:
+            member = inter.guild.get_member(inter.author.id)
+            if not member:
+                return False
+        
+        # Check administrator permission
+        return member.guild_permissions.administrator
+
+    return commands.check(predicate)
+
+
+def manage_guild_check():
+    """Check if user has manage_guild permission (guild-only, fails in DMs)"""
+    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
+        # Manage guild checks only work in guilds (not DMs)
+        if not inter.guild:
+            return False
+        
+        # Get Member object
+        if isinstance(inter.author, disnake.Member):
+            member = inter.author
+        else:
+            member = inter.guild.get_member(inter.author.id)
+            if not member:
+                return False
+        
+        # Check manage_guild permission
+        return member.guild_permissions.manage_guild
+
+    return commands.check(predicate)
+
+
 def participant_check():
     """Check if user is a participant"""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
@@ -64,3 +106,13 @@ def participant_check():
             return False
 
     return commands.check(predicate)
+
+
+def safe_display_name(author: disnake.User | disnake.Member) -> str:
+    """
+    Safely get display_name from User or Member object.
+    Returns display_name for Member, name for User.
+    """
+    if isinstance(author, disnake.Member):
+        return author.display_name
+    return author.name

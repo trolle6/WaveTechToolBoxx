@@ -26,6 +26,7 @@ import disnake
 from disnake.ext import commands
 
 from .secret_santa_views import EventListPaginator
+from .secret_santa_checks import manage_guild_check, safe_display_name
 
 
 # Paths
@@ -441,7 +442,7 @@ class CustomEventsCog(commands.Cog):
         pass
     
     @event_root.sub_command(name="create", description="Create a new custom event")
-    @commands.has_permissions(manage_guild=True)
+    @manage_guild_check()
     async def event_create(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -527,7 +528,7 @@ class CustomEventsCog(commands.Cog):
         
         async with self._lock:
             event.participants[user_id] = {
-                "name": inter.author.display_name,
+                "name": safe_display_name(inter.author),
                 "timezone": timezone,
                 "joined_at": time.time()
             }
@@ -550,7 +551,7 @@ class CustomEventsCog(commands.Cog):
         return await self.autocomplete_timezone_join(inter, string)
     
     @event_root.sub_command(name="shuffle", description="Run the matching algorithm")
-    @commands.has_permissions(manage_guild=True)
+    @manage_guild_check()
     async def event_shuffle(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -663,7 +664,7 @@ class CustomEventsCog(commands.Cog):
         await inter.edit_original_response(embed=embed)
     
     @event_root.sub_command(name="stop", description="Stop and archive event")
-    @commands.has_permissions(manage_guild=True)
+    @manage_guild_check()
     async def event_stop(
         self,
         inter: disnake.ApplicationCommandInteraction,
