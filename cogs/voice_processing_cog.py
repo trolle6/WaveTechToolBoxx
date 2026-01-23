@@ -84,6 +84,8 @@ CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
 
 # Audio Processing
 AUDIO_VOLUME_MULTIPLIER = 0.6  # Reduce volume to 60% for voice channel playback
+TTS_SPEED = 0.9  # TTS playback speed (0.25-4.0, lower = slower, 0.9 = slightly slower than normal for clarity)
+AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback (prevents buffering issues)
 
 
 @dataclass
@@ -651,7 +653,7 @@ class VoiceProcessingCog(commands.Cog):
             "input": text,
             "voice": voice,
             "response_format": "opus",  # Opus: better compression, smaller files, Discord-native
-            "speed": 1.0
+            "speed": TTS_SPEED  # Slightly slower for better clarity and natural pacing
         }
         
         # Log what we're sending to API (first 200 chars for debugging)
@@ -737,6 +739,7 @@ class VoiceProcessingCog(commands.Cog):
                 temp_file = f.name
 
             # Prepare audio source (Opus format - Discord-native, efficient)
+            # Simple options for local file playback - no reconnect needed for local files
             audio = disnake.FFmpegOpusAudio(
                 temp_file,
                 before_options='-nostdin',
@@ -761,7 +764,12 @@ class VoiceProcessingCog(commands.Cog):
                     os.unlink(temp_file)
                 return False
 
+            # Start playback
             vc.play(audio, after=after)
+            
+            # Small delay to allow audio source to initialize and buffer properly
+            # This prevents the "buffering then speedup" issue
+            await asyncio.sleep(AUDIO_PLAYBACK_START_DELAY)
 
             # Wait for playback to start
             for _ in range(30):

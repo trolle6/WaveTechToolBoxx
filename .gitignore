@@ -46,3 +46,6 @@ SECRET_SANTA_MESSAGES.md
 deploy_cross_platform.py
 deploy_windows.ps1
 deploy_linux.sh
+
+# Code review documents (local development only)
+CODE_REVIEW*.md

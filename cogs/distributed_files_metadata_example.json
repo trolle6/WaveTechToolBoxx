@@ -1,0 +1,70 @@
+{
+  "files": {
+    "1735702400456": {
+      "name": "Secret_Santa_Mapart_Collection",
+      "filename": "Secret_Santa_Mapart_Collection_1735702400.zip",
+      "uploaded_by": 251835504654286852,
+      "required_by": 306569126141493249,
+      "uploaded_at": 1735702400.456,
+      "size": 8388608,
+      "download_count": 18
+    },
+    "1735715200789": {
+      "name": "Holiday_Decorations",
+      "filename": "Holiday_Decorations.zip",
+      "uploaded_by": 251835504654286852,
+      "required_by": 571818326146416640,
+      "uploaded_at": 1735715200.789,
+      "size": 5242880,
+      "download_count": 22
+    },
+    "1735728000123": {
+      "name": "Winter_Resource_Pack",
+      "filename": "Winter_Resource_Pack.zip",
+      "uploaded_by": 251835504654286852,
+      "required_by": 185834053558075392,
+      "uploaded_at": 1735728000.123,
+      "size": 10485760,
+      "download_count": 20
+    }
+  },
+  "history": [
+    {
+      "file_id": "1735689600123",
+      "file_name": "Christmas_Texture_Pack",
+      "uploaded_by": 251835504654286852,
+      "required_by": 188187888289054720,
+      "uploaded_at": 1735689600.123,
+      "status": "*deleted*"
+    },
+    {
+      "file_id": "1735702400456",
+      "file_name": "Secret_Santa_Mapart_Collection",
+      "uploaded_by": 251835504654286852,
+      "required_by": 306569126141493249,
+      "uploaded_at": 1735702400.456
+    },
+    {
+      "file_id": "1735715200789",
+      "file_name": "Holiday_Decorations",
+      "uploaded_by": 251835504654286852,
+      "required_by": 571818326146416640,
+      "uploaded_at": 1735715200.789
+    },
+    {
+      "file_id": "1735728000123",
+      "file_name": "Winter_Resource_Pack",
+      "uploaded_by": 251835504654286852,
+      "required_by": 185834053558075392,
+      "uploaded_at": 1735728000.123
+    },
+    {
+      "file_id": "1735740800456",
+      "file_name": "Gift_Submission_Templates",
+      "uploaded_by": 251835504654286852,
+      "required_by": 294480895065194507,
+      "uploaded_at": 1735740800.456,
+      "status": "*deleted*"
+    }
+  ]
+}

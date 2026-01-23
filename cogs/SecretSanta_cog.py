@@ -919,31 +919,27 @@ class SecretSantaCog(commands.Cog):
                         
                         # Notify the scheduler
                         if scheduler_id:
-                            try:
-                                user = await self.bot.fetch_user(scheduler_id)
-                                year = self.state.get('current_year', dt.date.today().year)
-                                await user.send(
-                                    f"🎲 **Secret Santa {year} - THE CARDS HAVE BEEN DEALT!** 🎲\n\n"
-                                    f"The shuffle is complete! Everyone has been matched with their giftee!\n\n"
-                                    f"The magic is officially in motion... ✨\n\n"
-                                    f"All Santas should now have a DM with their special assignment. The gift-giving adventure begins!"
-                                )
-                            except Exception as e:
-                                self.logger.warning(f"Failed to notify scheduler {scheduler_id}: {e}")
+                            year = self.state.get('current_year', dt.date.today().year)
+                            notification_msg = (
+                                f"🎲 **Secret Santa {year} - THE CARDS HAVE BEEN DEALT!** 🎲\n\n"
+                                f"The shuffle is complete! Everyone has been matched with their giftee!\n\n"
+                                f"The magic is officially in motion... ✨\n\n"
+                                f"All Santas should now have a DM with their special assignment. The gift-giving adventure begins!"
+                            )
+                            success = await self._send_dm(scheduler_id, notification_msg)
+                            if not success:
+                                self.logger.debug(f"Could not send shuffle notification to scheduler {scheduler_id} (DMs may be disabled)")
                     except Exception as e:
                         self.logger.error(f"Error executing scheduled shuffle: {e}", exc_info=True)
                         # Try to notify scheduler about the error
                         if scheduler_id:
-                            try:
-                                user = await self.bot.fetch_user(scheduler_id)
-                                await user.send(
-                                    f"❌ **Oops – the scheduled shuffle hit a snag!**\n\n"
-                                    f"Something went wrong while trying to make the assignments:\n"
-                                    f"`{str(e)}`\n\n"
-                                    f"You'll need to run `/ss shuffle` manually to get everyone paired up."
-                                )
-                            except Exception:
-                                pass
+                            error_msg = (
+                                f"❌ **Oops – the scheduled shuffle hit a snag!**\n\n"
+                                f"Something went wrong while trying to make the assignments:\n"
+                                f"`{str(e)}`\n\n"
+                                f"You'll need to run `/ss shuffle` manually to get everyone paired up."
+                            )
+                            await self._send_dm(scheduler_id, error_msg)
                 
                 # Check if there's a scheduled stop
                 scheduled_stop_time = event.get("scheduled_stop_time")
@@ -957,41 +953,34 @@ class SecretSantaCog(commands.Cog):
                         if success:
                             # Notify the stopper
                             if stopper_id:
-                                try:
-                                    user = await self.bot.fetch_user(stopper_id)
-                                    await user.send(
-                                        f"🛑 **Auto-stop complete!** Your Secret Santa event is now officially wrapped up.\n\n"
-                                        f"Everything's been saved to: `{saved_filename}`\n\n"
-                                        f"All your participants have gotten their \"event's over\" DM."
-                                    )
-                                except Exception as e:
-                                    self.logger.warning(f"Failed to notify stopper {stopper_id}: {e}")
+                                success_msg = (
+                                    f"🛑 **Auto-stop complete!** Your Secret Santa event is now officially wrapped up.\n\n"
+                                    f"Everything's been saved to: `{saved_filename}`\n\n"
+                                    f"All your participants have gotten their \"event's over\" DM."
+                                )
+                                success = await self._send_dm(stopper_id, success_msg)
+                                if not success:
+                                    self.logger.debug(f"Could not send stop notification to stopper {stopper_id} (DMs may be disabled)")
                         else:
                             self.logger.error(f"Scheduled stop returned error: {saved_filename}")
                             if stopper_id:
-                                try:
-                                    user = await self.bot.fetch_user(stopper_id)
-                                    await user.send(
-                                        f"❌ **Couldn't auto-stop the event.**\n\n"
-                                        f"Ran into an issue while trying to wrap things up:\n"
-                                        f"`{saved_filename}`\n\n"
-                                        f"Please run `/ss stop` manually to end the event."
-                                    )
-                                except Exception:
-                                    pass
+                                error_msg = (
+                                    f"❌ **Couldn't auto-stop the event.**\n\n"
+                                    f"Ran into an issue while trying to wrap things up:\n"
+                                    f"`{saved_filename}`\n\n"
+                                    f"Please run `/ss stop` manually to end the event."
+                                )
+                                await self._send_dm(stopper_id, error_msg)
                     except Exception as e:
                         self.logger.error(f"Error executing scheduled stop: {e}", exc_info=True)
                         if stopper_id:
-                            try:
-                                user = await self.bot.fetch_user(stopper_id)
-                                await user.send(
-                                    f"❌ **Couldn't auto-stop the event.**\n\n"
-                                    f"Ran into an issue while trying to wrap things up:\n"
-                                    f"`{str(e)}`\n\n"
-                                    f"Please run `/ss stop` manually to end the event."
-                                )
-                            except Exception:
-                                pass
+                            error_msg = (
+                                f"❌ **Couldn't auto-stop the event.**\n\n"
+                                f"Ran into an issue while trying to wrap things up:\n"
+                                f"`{str(e)}`\n\n"
+                                f"Please run `/ss stop` manually to end the event."
+                            )
+                            await self._send_dm(stopper_id, error_msg)
                 
         except asyncio.CancelledError:
             pass
