@@ -756,12 +756,12 @@ class VoiceProcessingCog(commands.Cog):
                 temp_file = f.name
 
             # Prepare audio source (MP3 input -> Opus output for Discord)
-            # MP3 provides cleaner FFmpeg decode path, avoiding Opus-to-Opus re-encoding artifacts
-            # Explicit sample rate and channels ensure consistent processing
+            # Using minimal FFmpeg options to avoid processing artifacts
+            # FFmpegOpusAudio handles the Opus encoding internally
             audio = disnake.FFmpegOpusAudio(
                 temp_file,
-                before_options='-nostdin -loglevel warning -vn',
-                options='-ar 48000 -ac 2 -af volume=0.6'
+                before_options='-nostdin -loglevel warning',
+                options='-vn'
             )
 
             # Play with callback
