@@ -19,7 +19,7 @@ COMMANDS:
 
 DESIGN DECISIONS:
 - Unlimited message length: Messages are split at sentence boundaries to handle any length
-- Opus format: Used instead of MP3 for better compression and Discord-native support
+- MP3 format: Used for cleaner FFmpeg decode path, avoiding Opus-to-Opus re-encoding artifacts
 - Dynamic timeouts: API and playback timeouts scale with text/audio length
 - Sequential processing: Chunks are processed one at a time for reliability (not parallel)
 - Session-based voice assignment: Voices assigned per-guild session, cleared when user leaves voice channel
@@ -32,7 +32,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 import aiohttp
 import disnake
@@ -55,7 +55,7 @@ TTS_API_TIMEOUT_PER_100_CHARS = 0.15  # Additional seconds per 100 characters
 TTS_API_TIMEOUT_MAX = 180  # Maximum timeout (3 minutes)
 
 # Audio Playback Configuration
-OPUS_BYTES_PER_SECOND = 8000  # Opus at 64kbps ≈ 8000 bytes/second
+# Note: Previously used OPUS_BYTES_PER_SECOND = 8000, switched to MP3 to avoid Opus-to-Opus re-encoding artifacts
 AUDIO_PLAYBACK_TIMEOUT_BASE = 120  # Base timeout (2 minutes)
 AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER = 2.0  # Multiplier for estimated duration
 AUDIO_PLAYBACK_TIMEOUT_BUFFER = 30  # Additional buffer seconds
@@ -86,6 +86,16 @@ CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
 AUDIO_VOLUME_MULTIPLIER = 0.6  # Reduce volume to 60% for voice channel playback
 TTS_SPEED = 0.9  # TTS playback speed (0.25-4.0, lower = slower, 0.9 = slightly slower than normal for clarity)
 AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback (prevents buffering issues)
+MP3_BYTES_PER_SECOND = 16000  # MP3 at 128kbps ≈ 16000 bytes/second (OpenAI TTS default)
+
+# Playback wait configuration
+AUDIO_FINISH_WAIT_MAX_ATTEMPTS = 50  # Maximum attempts to wait for current audio to finish (5 seconds total)
+AUDIO_FINISH_WAIT_INTERVAL = 0.1  # Seconds between checks for audio finish
+AUDIO_START_CHECK_MAX_ATTEMPTS = 30  # Maximum attempts to check if playback started (3 seconds total)
+AUDIO_START_CHECK_INITIAL_DELAYS = 3  # Number of initial attempts with longer delay for initialization
+VOICE_DISCONNECT_DELAY = 3.0  # Seconds to wait before checking voice channel again (avoids race conditions)
+VOICE_CLEANUP_DELAY = 0.3  # Seconds to wait after cleanup before reconnecting
+VOICE_CONNECTION_RETRY_DELAY = 0.8  # Seconds between connection retry attempts
 
 
 @dataclass
@@ -228,7 +238,7 @@ class VoiceProcessingCog(commands.Cog):
         
         # Voice assignments (per-guild, session-based - cleared when user leaves voice)
         # Structure: guild_id -> {user_id: {"voice": voice_name, "timestamp": timestamp}}
-        self._voice_assignments: Dict[int, Dict[int, Dict[str, any]]] = {}
+        self._voice_assignments: Dict[int, Dict[int, Dict[str, Any]]] = {}
         self._voice_lock = asyncio.Lock()
         
         # TTS role requirement (optional)
@@ -375,9 +385,11 @@ class VoiceProcessingCog(commands.Cog):
     # ============ TEXT PROCESSING ============
     def _compile_correction_patterns(self) -> list[tuple[re.Pattern, str]]:
         """Pre-compile correction patterns for efficient replacement"""
+        # Note: Only include contractions that are unambiguous
+        # Excluded "were" because it's a valid past tense word (not always a typo for "we're")
         corrections = {
             r'\bim\b': "I'm", r'\byoure\b': "you're", r'\btheyre\b': "they're",
-            r'\bwere\b': "we're", r'\bitsnt\b': "isn't", r'\bdoesnt\b': "doesn't",
+            r'\bitsnt\b': "isn't", r'\bdoesnt\b': "doesn't",
             r'\bdidnt\b': "didn't", r'\bwont\b': "won't", r'\bcant\b': "can't",
             r'\bshouldnt\b': "shouldn't", r'\bcouldnt\b': "couldn't",
             r'\bwouldnt\b': "wouldn't", r'\bhavent\b': "haven't",
@@ -439,8 +451,12 @@ class VoiceProcessingCog(commands.Cog):
                     final_text = improved if improved else text
                     await self.pronunciation_cache.set(text, final_text)
                     return final_text
-        except Exception:
-            pass
+                else:
+                    self.logger.warning(f"Pronunciation improvement API returned {resp.status}")
+        except asyncio.TimeoutError:
+            self.logger.debug("Pronunciation improvement timed out, using original text")
+        except Exception as e:
+            self.logger.debug(f"Pronunciation improvement failed: {e}")
         
         return text
 
@@ -626,7 +642,8 @@ class VoiceProcessingCog(commands.Cog):
     # ============ TTS GENERATION ============
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
-        key_str = f"{voice}:{text}"
+        # Include format in key to avoid serving wrong format from cache after format changes
+        key_str = f"mp3:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     async def _generate_tts(self, text: str, voice: str = None) -> Optional[bytes]:
@@ -652,7 +669,7 @@ class VoiceProcessingCog(commands.Cog):
             "model": "tts-1",
             "input": text,
             "voice": voice,
-            "response_format": "opus",  # Opus: better compression, smaller files, Discord-native
+            "response_format": "mp3",  # MP3: more reliable FFmpeg decode path, avoids Opus-to-Opus re-encoding artifacts
             "speed": TTS_SPEED  # Slightly slower for better clarity and natural pacing
         }
         
@@ -712,7 +729,7 @@ class VoiceProcessingCog(commands.Cog):
         
         Args:
             vc: Discord voice client to play audio through
-            audio_data: Audio bytes in Opus format to play
+            audio_data: Audio bytes in MP3 format to play
             
         Returns:
             True if playback completed successfully, False if failed or timed out
@@ -725,24 +742,24 @@ class VoiceProcessingCog(commands.Cog):
 
             # Wait for current audio to finish
             if vc.is_playing():
-                for _ in range(50):
+                for _ in range(AUDIO_FINISH_WAIT_MAX_ATTEMPTS):
                     if not vc.is_playing():
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL)
                 else:
                     vc.stop()
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL * 2)  # Brief pause after stopping
 
             # Create temp file
-            with tempfile.NamedTemporaryFile(suffix='.opus', delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Prepare audio source (Opus format - Discord-native, efficient)
-            # Simple options for local file playback - no reconnect needed for local files
+            # Prepare audio source (MP3 input -> Opus output for Discord)
+            # MP3 provides cleaner FFmpeg decode path, avoiding Opus-to-Opus re-encoding artifacts
             audio = disnake.FFmpegOpusAudio(
                 temp_file,
-                before_options='-nostdin',
+                before_options='-nostdin -loglevel warning',
                 options='-vn -af volume=0.6'
             )
 
@@ -767,16 +784,21 @@ class VoiceProcessingCog(commands.Cog):
             # Start playback
             vc.play(audio, after=after)
             
-            # Small delay to allow audio source to initialize and buffer properly
-            # This prevents the "buffering then speedup" issue
-            await asyncio.sleep(AUDIO_PLAYBACK_START_DELAY)
-
-            # Wait for playback to start
-            for _ in range(30):
+            # Wait for playback to start (with small delay to allow initialization)
+            # This prevents the "buffering then speedup" issue by giving FFmpeg time to initialize
+            playback_started = False
+            for attempt in range(AUDIO_START_CHECK_MAX_ATTEMPTS):
                 if vc.is_playing():
+                    playback_started = True
                     break
-                await asyncio.sleep(0.1)
-            else:
+                # Small delay on first few attempts to allow audio source to initialize
+                if attempt < AUDIO_START_CHECK_INITIAL_DELAYS:
+                    await asyncio.sleep(AUDIO_PLAYBACK_START_DELAY / AUDIO_START_CHECK_INITIAL_DELAYS)
+                else:
+                    await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL)
+            
+            if not playback_started:
+                # Playback didn't start - stop and cleanup
                 vc.stop()
                 if temp_file and os.path.exists(temp_file):
                     os.unlink(temp_file)
@@ -785,9 +807,9 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to complete
             try:
                 # Calculate dynamic timeout based on audio length
-                # Opus format: estimate duration from file size (8000 bytes/sec at 64kbps)
+                # MP3 format: estimate duration from file size (16000 bytes/sec at 128kbps)
                 # Use 2x multiplier + buffer to handle network/system delays
-                estimated_duration = len(audio_data) / OPUS_BYTES_PER_SECOND
+                estimated_duration = len(audio_data) / MP3_BYTES_PER_SECOND
                 timeout = max(
                     AUDIO_PLAYBACK_TIMEOUT_BASE,
                     min(
@@ -798,10 +820,21 @@ class VoiceProcessingCog(commands.Cog):
                 self.logger.debug(f"Waiting for playback completion, timeout={timeout:.1f}s (audio_size={len(audio_data)} bytes, estimated_duration={estimated_duration:.1f}s)")
                 await asyncio.wait_for(play_done.wait(), timeout=timeout)
                 self.logger.debug("Playback completed successfully")
+                
+                # Verify playback actually completed (callback was called, so assume success)
+                # Log warning if disconnected, but still return success (callback was called)
+                if not vc.is_connected():
+                    self.logger.warning("Voice client disconnected during playback")
                 return True
             except asyncio.TimeoutError:
                 self.logger.warning(f"Playback timeout after {timeout:.1f}s (estimated {estimated_duration:.1f}s), stopping")
                 vc.stop()
+                # Clean up temp file on timeout (callback might not run)
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except Exception:
+                        pass
                 return False
 
         except Exception as e:
@@ -844,7 +877,7 @@ class VoiceProcessingCog(commands.Cog):
                     vc.cleanup()
                 except Exception:
                     pass
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(VOICE_CLEANUP_DELAY)
 
         # Connect with retry
         for attempt in range(3):
@@ -867,12 +900,12 @@ class VoiceProcessingCog(commands.Cog):
                     if vc.is_connected() and vc.channel.id == channel.id:
                         return vc
                     await vc.disconnect(force=True)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(VOICE_CLEANUP_DELAY * 1.67)  # Slightly longer after force disconnect
             except Exception as e:
                 if attempt == 2:
                     self.logger.error(f"Connection failed after {attempt + 1} attempts: {e}")
                     return None
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
         
         return None
 
@@ -963,7 +996,7 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
 
                     # Estimate playback duration to decide on pipeline generation
-                    estimated_duration = len(item.audio_data) / OPUS_BYTES_PER_SECOND
+                    estimated_duration = len(item.audio_data) / MP3_BYTES_PER_SECOND
                     will_pipeline = estimated_duration > PIPELINE_THRESHOLD
 
                     # If playback will be long, start generating next item in background (pipeline)
@@ -1211,10 +1244,11 @@ class VoiceProcessingCog(commands.Cog):
                             f"(left VC, assignment was {time.time() - timestamp:.1f}s old)" if timestamp else f"(left VC)"
                         )
             
-            # Check if should disconnect (wait 3s to avoid race conditions)
+            # Check if should disconnect (wait to avoid race conditions)
+            # Uses module-level VOICE_DISCONNECT_DELAY constant
             if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
                 if not self._has_humans_in_voice(ch):
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(VOICE_DISCONNECT_DELAY)
                     if vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
                         if not self._has_humans_in_voice(ch):
                             await vc.disconnect()
