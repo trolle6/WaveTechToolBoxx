@@ -603,7 +603,9 @@ class SecretSantaCog(commands.Cog):
             )
             await self._safe_edit_response(inter, embed=embed)
             return None
-        return event["assignments"][user_id]
+        # Safe access - event is validated and assignments exist (checked above)
+        assignments = event.get("assignments", {})
+        return assignments.get(user_id)
     
     def _find_santa_for_giftee(self, event: dict, giftee_id: str) -> Optional[int]:
         """Find the Santa (giver) for a given giftee (receiver). Returns santa_id as int, or None"""
@@ -1438,8 +1440,9 @@ class SecretSantaCog(commands.Cog):
                     await self._safe_edit_response(inter, content=error_msg)
                 return False, error_msg
 
-            # Convert participant IDs to integers
-            participants = [int(uid) for uid in event["participants"]]
+            # Convert participant IDs to integers (safe access - event is validated)
+            participants_dict = event.get("participants", {})
+            participants = [int(uid) for uid in participants_dict]
 
             if len(participants) < 2:
                 error_msg = "❌ Need at least 2 participants"
@@ -1548,7 +1551,8 @@ class SecretSantaCog(commands.Cog):
 
         # Send assignment DMs
         dm_tasks = []
-        participants_dict = event["participants"]
+        # Safe access - event is validated and participants dict exists
+        participants_dict = event.get("participants", {})
         current_year = self.state['current_year']
         for giver, receiver in assignments.items():
             receiver_name = participants_dict.get(str(receiver), f"User {receiver}")
@@ -2450,7 +2454,9 @@ class SecretSantaCog(commands.Cog):
         if not receiver_id:
             return
         receiver_id = str(receiver_id)
-        receiver_name = event["participants"].get(receiver_id, f"User {receiver_id}")
+        # Safe access - event is validated and participants dict exists
+        participants = event.get("participants", {})
+        receiver_name = participants.get(receiver_id, f"User {receiver_id}")
 
         wishlists = event.get("wishlists", {})
         giftee_wishlist = wishlists.get(receiver_id, [])
@@ -2496,10 +2502,12 @@ class SecretSantaCog(commands.Cog):
         )
 
         # Create consistent emoji mapping for all participants this year
-        emoji_mapping = self._get_year_emoji_mapping(event["participants"])
+        # Safe access - event is validated and participants dict exists
+        participants = event.get("participants", {})
+        emoji_mapping = self._get_year_emoji_mapping(participants)
         
         for giver_id, submission in list(submissions.items())[:10]:
-            giver_name = event["participants"].get(giver_id, f"User {giver_id}")
+            giver_name = participants.get(giver_id, f"User {giver_id}")
             receiver_name = submission.get("receiver_name", "Unknown")
             gift = submission["gift"][:200] + "..." if len(submission["gift"]) > 200 else submission["gift"]
 
@@ -2541,11 +2549,13 @@ class SecretSantaCog(commands.Cog):
             return
 
         # Create consistent emoji mapping for all participants this year
-        emoji_mapping = self._get_year_emoji_mapping(event["participants"])
+        # Safe access - event is validated and participants dict exists
+        participants = event.get("participants", {})
+        emoji_mapping = self._get_year_emoji_mapping(participants)
         
         # Use paginator if more than 5 threads, otherwise show all
         if len(comms) > 5:
-            paginator = CommunicationsPaginator(comms, event["participants"], emoji_mapping, timeout=300)
+            paginator = CommunicationsPaginator(comms, participants, emoji_mapping, timeout=300)
             embed = paginator.get_embed()
             await inter.edit_original_response(embed=embed, view=paginator)
         else:
@@ -2555,10 +2565,12 @@ class SecretSantaCog(commands.Cog):
                 color=disnake.Color.blue()
             )
             
+            # Safe access - event is validated and participants dict exists
+            participants = event.get("participants", {})
             for santa_id, data in comms.items():
-                santa_name = event["participants"].get(santa_id, f"User {santa_id}")
+                santa_name = participants.get(santa_id, f"User {santa_id}")
                 giftee_id = data.get("giftee_id")
-                giftee_name = event["participants"].get(str(giftee_id), "Unknown")
+                giftee_name = participants.get(str(giftee_id), "Unknown")
 
                 # Get consistent emojis for each person this year
                 santa_emoji = emoji_mapping.get(santa_id, "🎅")
@@ -2608,7 +2620,11 @@ class SecretSantaCog(commands.Cog):
                 )
                 return
 
-            archive = archives[year]
+            # Safe access - year is validated to exist in archives
+            archive = archives.get(year)
+            if not archive:
+                await self._safe_edit_response(inter, content=f"❌ No archive found for year {year}")
+                return
             event_data = archive.get("event", {})
             participants = event_data.get("participants", {})
             assignments = event_data.get("assignments", {})

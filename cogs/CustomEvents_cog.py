@@ -150,7 +150,8 @@ class FullyRandomMatcher(MatcherInterface):
         metadata: Dict[int, Dict[str, Any]]
     ) -> Dict[str, List[int]]:
         """Create random teams or pairs"""
-        team_size = metadata.get("_config", {}).get("team_size", 2)
+        config = metadata.get("_config", {})
+        team_size = config.get("team_size", 2) if isinstance(config, dict) else 2
         
         shuffled = participants.copy()
         rng = secrets.SystemRandom()
@@ -186,7 +187,8 @@ class TimezoneGroupedMatcher(MatcherInterface):
         metadata: Dict[int, Dict[str, Any]]
     ) -> Dict[str, List[int]]:
         """Group by timezone, then create teams within groups"""
-        team_size = metadata.get("_config", {}).get("team_size", 2)
+        config = metadata.get("_config", {})
+        team_size = config.get("team_size", 2) if isinstance(config, dict) else 2
         
         # Group by timezone
         tz_groups: Dict[str, List[int]] = {}
