@@ -755,13 +755,11 @@ class VoiceProcessingCog(commands.Cog):
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Use FFmpegPCMAudio to convert Opus to clean PCM, then let Discord encode to Opus
-            # This avoids double Opus encoding which causes quality loss
-            # Output: 48kHz stereo PCM (Discord's native format)
+            # Use FFmpegPCMAudio and let it auto-detect the best settings
+            # This avoids conflicts from explicit options
             audio = disnake.FFmpegPCMAudio(
                 temp_file,
-                before_options='-nostdin',
-                options='-f s16le -ar 48000 -ac 2'  # Raw PCM: 16-bit signed little-endian, 48kHz, stereo
+                before_options='-nostdin'
             )
 
             # Play with callback
