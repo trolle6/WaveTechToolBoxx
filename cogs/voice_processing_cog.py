@@ -19,7 +19,7 @@ COMMANDS:
 
 DESIGN DECISIONS:
 - Unlimited message length: Messages are split at sentence boundaries to handle any length
-- MP3 format: More reliable FFmpeg processing, converted to PCM via FFmpegPCMAudio, Discord encodes to Opus
+- Opus format: better compression, smaller files, Discord-native
 - Dynamic timeouts: API and playback timeouts scale with text/audio length
 - Sequential processing: Chunks are processed one at a time for reliability (not parallel)
 - Session-based voice assignment: Voices assigned per-guild session, cleared when user leaves voice channel
@@ -86,7 +86,7 @@ CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
 AUDIO_VOLUME_MULTIPLIER = 0.6  # Reduce volume to 60% for voice channel playback
 TTS_SPEED = 0.9  # TTS playback speed (0.25-4.0, lower = slower, 0.9 = slightly slower than normal for clarity)
 AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback (prevents buffering issues)
-MP3_BYTES_PER_SECOND = 16000  # MP3 at 128kbps ≈ 16000 bytes/second (OpenAI TTS default)
+OPUS_BYTES_PER_SECOND = 8000  # Opus at 64kbps ≈ 8000 bytes/second (OpenAI TTS default)
 
 # Playback wait configuration
 AUDIO_FINISH_WAIT_MAX_ATTEMPTS = 50  # Maximum attempts to wait for current audio to finish (5 seconds total)
@@ -643,7 +643,7 @@ class VoiceProcessingCog(commands.Cog):
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
         # Include format in key to avoid serving wrong format from cache after format changes
-        key_str = f"mp3:{voice}:{text}"
+        key_str = f"opus:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     async def _generate_tts(self, text: str, voice: str = None) -> Optional[bytes]:
@@ -669,7 +669,7 @@ class VoiceProcessingCog(commands.Cog):
             "model": "tts-1",
             "input": text,
             "voice": voice,
-            "response_format": "mp3",  # MP3: More reliable FFmpeg processing, better compatibility
+            "response_format": "opus",  # Opus: better compression, smaller files, Discord-native
             "speed": TTS_SPEED  # Slightly slower for better clarity and natural pacing
         }
         
@@ -729,7 +729,7 @@ class VoiceProcessingCog(commands.Cog):
         
         Args:
             vc: Discord voice client to play audio through
-            audio_data: Audio bytes in MP3 format from OpenAI TTS API
+            audio_data: Audio bytes in Opus format to play
             
         Returns:
             True if playback completed successfully, False if failed or timed out
@@ -751,15 +751,16 @@ class VoiceProcessingCog(commands.Cog):
                     await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL * 2)  # Brief pause after stopping
 
             # Create temp file
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix='.opus', delete=False) as f:
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Use FFmpegPCMAudio and let it auto-detect the best settings
-            # This avoids conflicts from explicit options
-            audio = disnake.FFmpegPCMAudio(
+            # Prepare audio source (Opus format - Discord-native, efficient)
+            # Simple options for local file playback - no reconnect needed for local files
+            audio = disnake.FFmpegOpusAudio(
                 temp_file,
-                before_options='-nostdin'
+                before_options='-nostdin',
+                options='-vn -af volume=0.6'
             )
 
             # Play with callback
@@ -806,9 +807,9 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to complete
             try:
                 # Calculate dynamic timeout based on audio length
-                # MP3 format: estimate duration from file size (16000 bytes/sec at 128kbps)
+                # Opus format: estimate duration from file size (8000 bytes/sec at 64kbps)
                 # Use 2x multiplier + buffer to handle network/system delays
-                estimated_duration = len(audio_data) / MP3_BYTES_PER_SECOND
+                estimated_duration = len(audio_data) / OPUS_BYTES_PER_SECOND
                 timeout = max(
                     AUDIO_PLAYBACK_TIMEOUT_BASE,
                     min(
