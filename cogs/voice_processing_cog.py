@@ -19,7 +19,7 @@ COMMANDS:
 
 DESIGN DECISIONS:
 - Unlimited message length: Messages are split at sentence boundaries to handle any length
-- Opus format: Native Discord format, minimal processing needed by FFmpegOpusAudio
+- Opus format: OpenAI TTS outputs Opus, converted to PCM via FFmpegPCMAudio, Discord encodes to Opus (avoids double-encoding quality loss)
 - Dynamic timeouts: API and playback timeouts scale with text/audio length
 - Sequential processing: Chunks are processed one at a time for reliability (not parallel)
 - Session-based voice assignment: Voices assigned per-guild session, cleared when user leaves voice channel
@@ -729,7 +729,7 @@ class VoiceProcessingCog(commands.Cog):
         
         Args:
             vc: Discord voice client to play audio through
-            audio_data: Audio bytes in Opus format to play
+            audio_data: Audio bytes in Opus format from OpenAI TTS API
             
         Returns:
             True if playback completed successfully, False if failed or timed out
@@ -755,10 +755,15 @@ class VoiceProcessingCog(commands.Cog):
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Prepare audio source (Opus input -> Opus output for Discord)
-            # Using Opus format natively - FFmpegOpusAudio can handle Opus directly
-            # No extra options needed - let FFmpegOpusAudio handle it natively
-            audio = disnake.FFmpegOpusAudio(temp_file)
+            # Use FFmpegPCMAudio to convert Opus to clean PCM, then let Discord encode to Opus
+            # This avoids double Opus encoding which causes quality loss
+            # Output: 48kHz stereo PCM (Discord's native format)
+            audio = disnake.FFmpegPCMAudio(
+                temp_file,
+                pipe=True,  # Use pipe mode for cleaner processing
+                before_options='-nostdin',
+                options='-f s16le -ar 48000 -ac 2'  # Raw PCM: 16-bit signed little-endian, 48kHz, stereo
+            )
 
             # Play with callback
             play_done = asyncio.Event()
