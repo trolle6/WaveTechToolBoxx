@@ -19,7 +19,7 @@ COMMANDS:
 
 DESIGN DECISIONS:
 - Unlimited message length: Messages are split at sentence boundaries to handle any length
-- MP3 format: Used for cleaner FFmpeg decode path, avoiding Opus-to-Opus re-encoding artifacts
+- Opus format: Native Discord format, minimal processing needed by FFmpegOpusAudio
 - Dynamic timeouts: API and playback timeouts scale with text/audio length
 - Sequential processing: Chunks are processed one at a time for reliability (not parallel)
 - Session-based voice assignment: Voices assigned per-guild session, cleared when user leaves voice channel
@@ -55,7 +55,7 @@ TTS_API_TIMEOUT_PER_100_CHARS = 0.15  # Additional seconds per 100 characters
 TTS_API_TIMEOUT_MAX = 180  # Maximum timeout (3 minutes)
 
 # Audio Playback Configuration
-# Note: Previously used OPUS_BYTES_PER_SECOND = 8000, switched to MP3 to avoid Opus-to-Opus re-encoding artifacts
+# Audio format: Using Opus natively for Discord compatibility
 AUDIO_PLAYBACK_TIMEOUT_BASE = 120  # Base timeout (2 minutes)
 AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER = 2.0  # Multiplier for estimated duration
 AUDIO_PLAYBACK_TIMEOUT_BUFFER = 30  # Additional buffer seconds
@@ -86,7 +86,7 @@ CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
 AUDIO_VOLUME_MULTIPLIER = 0.6  # Reduce volume to 60% for voice channel playback
 TTS_SPEED = 0.9  # TTS playback speed (0.25-4.0, lower = slower, 0.9 = slightly slower than normal for clarity)
 AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback (prevents buffering issues)
-MP3_BYTES_PER_SECOND = 16000  # MP3 at 128kbps ≈ 16000 bytes/second (OpenAI TTS default)
+OPUS_BYTES_PER_SECOND = 8000  # Opus at 64kbps ≈ 8000 bytes/second (OpenAI TTS default)
 
 # Playback wait configuration
 AUDIO_FINISH_WAIT_MAX_ATTEMPTS = 50  # Maximum attempts to wait for current audio to finish (5 seconds total)
@@ -643,7 +643,7 @@ class VoiceProcessingCog(commands.Cog):
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
         # Include format in key to avoid serving wrong format from cache after format changes
-        key_str = f"mp3:{voice}:{text}"
+        key_str = f"opus:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     async def _generate_tts(self, text: str, voice: str = None) -> Optional[bytes]:
@@ -669,7 +669,7 @@ class VoiceProcessingCog(commands.Cog):
             "model": "tts-1",
             "input": text,
             "voice": voice,
-            "response_format": "mp3",  # MP3: more reliable FFmpeg decode path, avoids Opus-to-Opus re-encoding artifacts
+            "response_format": "opus",  # Opus: Discord-native format, minimal processing needed
             "speed": TTS_SPEED  # Slightly slower for better clarity and natural pacing
         }
         
@@ -729,7 +729,7 @@ class VoiceProcessingCog(commands.Cog):
         
         Args:
             vc: Discord voice client to play audio through
-            audio_data: Audio bytes in MP3 format to play
+            audio_data: Audio bytes in Opus format to play
             
         Returns:
             True if playback completed successfully, False if failed or timed out
@@ -751,18 +751,14 @@ class VoiceProcessingCog(commands.Cog):
                     await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL * 2)  # Brief pause after stopping
 
             # Create temp file
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix='.opus', delete=False) as f:
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Prepare audio source (MP3 input -> Opus output for Discord)
-            # Using minimal FFmpeg options to avoid processing artifacts
-            # FFmpegOpusAudio handles the Opus encoding internally
-            audio = disnake.FFmpegOpusAudio(
-                temp_file,
-                before_options='-nostdin -loglevel warning',
-                options='-vn'
-            )
+            # Prepare audio source (Opus input -> Opus output for Discord)
+            # Using Opus format natively - FFmpegOpusAudio can handle Opus directly
+            # No extra options needed - let FFmpegOpusAudio handle it natively
+            audio = disnake.FFmpegOpusAudio(temp_file)
 
             # Play with callback
             play_done = asyncio.Event()
@@ -808,9 +804,9 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to complete
             try:
                 # Calculate dynamic timeout based on audio length
-                # MP3 format: estimate duration from file size (16000 bytes/sec at 128kbps)
+                # Opus format: estimate duration from file size (8000 bytes/sec at 64kbps)
                 # Use 2x multiplier + buffer to handle network/system delays
-                estimated_duration = len(audio_data) / MP3_BYTES_PER_SECOND
+                estimated_duration = len(audio_data) / OPUS_BYTES_PER_SECOND
                 timeout = max(
                     AUDIO_PLAYBACK_TIMEOUT_BASE,
                     min(
@@ -997,7 +993,7 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
 
                     # Estimate playback duration to decide on pipeline generation
-                    estimated_duration = len(item.audio_data) / MP3_BYTES_PER_SECOND
+                    estimated_duration = len(item.audio_data) / OPUS_BYTES_PER_SECOND
                     will_pipeline = estimated_duration > PIPELINE_THRESHOLD
 
                     # If playback will be long, start generating next item in background (pipeline)
