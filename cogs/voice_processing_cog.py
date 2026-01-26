@@ -760,7 +760,6 @@ class VoiceProcessingCog(commands.Cog):
             # Output: 48kHz stereo PCM (Discord's native format)
             audio = disnake.FFmpegPCMAudio(
                 temp_file,
-                pipe=True,  # Use pipe mode for cleaner processing
                 before_options='-nostdin',
                 options='-f s16le -ar 48000 -ac 2'  # Raw PCM: 16-bit signed little-endian, 48kHz, stereo
             )
