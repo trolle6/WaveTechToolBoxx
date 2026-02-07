@@ -1075,7 +1075,7 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
 
                     # Estimate playback duration to decide on pipeline generation
-                    estimated_duration = len(item.audio_data) / OPUS_BYTES_PER_SECOND
+                    estimated_duration = len(item.audio_data) / MP3_BYTES_PER_SECOND
                     will_pipeline = estimated_duration > PIPELINE_THRESHOLD
 
                     # If playback will be long, start generating next item in background (pipeline)
