@@ -1,12 +1,15 @@
 """
 Voice Processing Cog - Text-to-Speech with Smart Features
 
+⚠️ TEMPORARY TESTING MODE: Text cleaning, pronunciation improvement, and name prefixes are DISABLED
+   to test if they're causing audio quality issues. See on_message() function for details.
+
 FEATURES:
 - 🎤 Automatic TTS for messages from users in voice channels
 - 🎭 Session-based voice assignment (13 voices, assigned per-guild session)
-- 🤖 AI pronunciation improvement for acronyms and usernames
-- 📝 Smart grammar corrections
-- 👤 Name announcement (first message per session)
+- 🤖 AI pronunciation improvement for acronyms and usernames (TEMPORARILY DISABLED)
+- 📝 Smart grammar corrections (TEMPORARILY DISABLED)
+- 👤 Name announcement (first message per session) (TEMPORARILY DISABLED)
 - ⚡ LRU caching for TTS audio and pronunciations
 - 🔧 Circuit breaker for API failure protection
 - 🚦 Rate limiting
@@ -19,7 +22,7 @@ COMMANDS:
 
 DESIGN DECISIONS:
 - Unlimited message length: Messages are split at sentence boundaries to handle any length
-- MP3 format: Used for cleaner FFmpeg decode path, avoiding Opus-to-Opus re-encoding artifacts
+- MP3 from API + FFmpegPCMAudio + PCMVolumeTransformer: single decode, single encode (no Opus→Opus re-encode that caused slow/double-voice)
 - Dynamic timeouts: API and playback timeouts scale with text/audio length
 - Sequential processing: Chunks are processed one at a time for reliability (not parallel)
 - Session-based voice assignment: Voices assigned per-guild session, cleared when user leaves voice channel
@@ -55,7 +58,7 @@ TTS_API_TIMEOUT_PER_100_CHARS = 0.15  # Additional seconds per 100 characters
 TTS_API_TIMEOUT_MAX = 180  # Maximum timeout (3 minutes)
 
 # Audio Playback Configuration
-# Note: Previously used OPUS_BYTES_PER_SECOND = 8000, switched to MP3 to avoid Opus-to-Opus re-encoding artifacts
+# MP3 from API; FFmpeg decodes to PCM, library encodes to Opus once (avoids Opus re-encode artifacts)
 AUDIO_PLAYBACK_TIMEOUT_BASE = 120  # Base timeout (2 minutes)
 AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER = 2.0  # Multiplier for estimated duration
 AUDIO_PLAYBACK_TIMEOUT_BUFFER = 30  # Additional buffer seconds
@@ -82,11 +85,11 @@ CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5  # Open circuit after this many failures
 CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # Try recovery after this many seconds
 CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
 
-# Audio Processing
-AUDIO_VOLUME_MULTIPLIER = 0.6  # Reduce volume to 60% for voice channel playback
-TTS_SPEED = 0.9  # TTS playback speed (0.25-4.0, lower = slower, 0.9 = slightly slower than normal for clarity)
-AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback (prevents buffering issues)
-MP3_BYTES_PER_SECOND = 16000  # MP3 at 128kbps ≈ 16000 bytes/second (OpenAI TTS default)
+# Audio Processing - MP3 + FFmpegPCMAudio + PCMVolumeTransformer (avoids Opus re-encode)
+AUDIO_VOLUME_MULTIPLIER = 0.7  # 70% volume for clarity without clipping
+TTS_SPEED = 1.0  # Natural speed (no artificial slowdown)
+AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback
+MP3_BYTES_PER_SECOND = 16000  # MP3 ~128kbps ≈ 16000 bytes/second (OpenAI TTS default)
 
 # Playback wait configuration
 AUDIO_FINISH_WAIT_MAX_ATTEMPTS = 50  # Maximum attempts to wait for current audio to finish (5 seconds total)
@@ -180,6 +183,9 @@ class VoiceProcessingCog(commands.Cog):
 
         self.enabled = True
         self.logger.info("TTS enabled")
+        
+        # Check FFmpeg availability and log diagnostics
+        self._check_ffmpeg_availability()
         
         # Pre-compile regex patterns
         self._compiled_corrections = self._compile_correction_patterns()
@@ -368,6 +374,76 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.info(f"Current voice assignments for guild {guild_id}: {active_assignments}")
             
             return new_voice
+
+    # ============ SYSTEM DIAGNOSTICS ============
+    def _check_ffmpeg_availability(self):
+        """
+        Check if FFmpeg is available and log diagnostic information.
+        This helps identify system-level issues that could affect audio quality.
+        """
+        try:
+            import subprocess
+            import shutil
+            
+            # Check if FFmpeg is in PATH
+            ffmpeg_path = shutil.which('ffmpeg')
+            if not ffmpeg_path:
+                self.logger.error(
+                    "⚠️ FFmpeg not found in PATH! Audio playback will fail.\n"
+                    "Install FFmpeg:\n"
+                    "  Windows: Download from https://ffmpeg.org/download.html or use: choco install ffmpeg\n"
+                    "  Linux: sudo apt-get install ffmpeg\n"
+                    "  macOS: brew install ffmpeg"
+                )
+                return False
+            
+            self.logger.info(f"✅ FFmpeg found at: {ffmpeg_path}")
+            
+            # Try to get FFmpeg version and codec information
+            try:
+                result = subprocess.run(
+                    ['ffmpeg', '-version'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    errors='ignore'
+                )
+                if result.returncode == 0:
+                    version_line = result.stdout.split('\n')[0] if result.stdout else "Unknown"
+                    self.logger.info(f"FFmpeg version: {version_line}")
+                else:
+                    self.logger.warning(f"FFmpeg version check failed: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                self.logger.warning("FFmpeg version check timed out")
+            except Exception as e:
+                self.logger.warning(f"Could not check FFmpeg version: {e}")
+            
+            # Check for MP3 decode and Opus encode support
+            try:
+                result = subprocess.run(
+                    ['ffmpeg', '-codecs'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    errors='ignore'
+                )
+                if result.returncode == 0:
+                    has_mp3 = 'mp3' in result.stdout.lower() or 'libmp3lame' in result.stdout.lower()
+                    has_opus = 'opus' in result.stdout.lower() or 'libopus' in result.stdout.lower()
+                    if not has_mp3:
+                        self.logger.warning("⚠️ MP3 codec not found in FFmpeg - TTS playback may fail")
+                    if not has_opus:
+                        self.logger.warning("⚠️ Opus codec not found in FFmpeg - Discord voice may fail")
+                    if has_mp3 and has_opus:
+                        self.logger.info("✅ FFmpeg has required codecs (MP3, Opus)")
+            except Exception as e:
+                self.logger.debug(f"Could not check FFmpeg codecs: {e}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error checking FFmpeg availability: {e}", exc_info=True)
+            return False
 
     # ============ API HELPERS ============
     def _get_openai_headers(self) -> Dict[str, str]:
@@ -666,11 +742,11 @@ class VoiceProcessingCog(commands.Cog):
         headers = self._get_openai_headers()
 
         payload = {
-            "model": "tts-1",
+            "model": "tts-1-hd",  # Higher quality
             "input": text,
             "voice": voice,
-            "response_format": "mp3",  # MP3: more reliable FFmpeg decode path, avoids Opus-to-Opus re-encoding artifacts
-            "speed": TTS_SPEED  # Slightly slower for better clarity and natural pacing
+            "response_format": "mp3",  # MP3: single decode in FFmpeg, then library encodes to Opus once (no Opus→Opus re-encode)
+            "speed": TTS_SPEED  # 1.0 = natural speed
         }
         
         # Log what we're sending to API (first 200 chars for debugging)
@@ -720,19 +796,8 @@ class VoiceProcessingCog(commands.Cog):
         """
         Play audio through Discord voice client with proper cleanup and timeout handling.
         
-        DESIGN DECISIONS:
-        - Temp file: FFmpegOpusAudio requires file path (can't use bytes directly)
-        - Callback cleanup: Automatically deletes temp file after playback completes
-        - Dynamic timeout: Scales with audio length to handle long messages
-        - Volume reduction: 60% volume prevents audio clipping in voice channels
-        - Wait for completion: Uses asyncio.Event to properly wait for playback finish
-        
-        Args:
-            vc: Discord voice client to play audio through
-            audio_data: Audio bytes in MP3 format to play
-            
-        Returns:
-            True if playback completed successfully, False if failed or timed out
+        Uses MP3 from API → FFmpegPCMAudio (decode to 48kHz PCM) → PCMVolumeTransformer → library encodes to Opus.
+        This avoids Opus→Opus re-encoding in FFmpegOpusAudio which caused slow playback and double-voice artifacts.
         """
         temp_file = None
 
@@ -750,18 +815,33 @@ class VoiceProcessingCog(commands.Cog):
                     vc.stop()
                     await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL * 2)  # Brief pause after stopping
 
-            # Create temp file
+            # Create temp file (MP3)
             with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
                 f.write(audio_data)
                 temp_file = f.name
 
-            # Prepare audio source (MP3 input -> Opus output for Discord)
-            # MP3 provides cleaner FFmpeg decode path, avoiding Opus-to-Opus re-encoding artifacts
-            audio = disnake.FFmpegOpusAudio(
-                temp_file,
-                before_options='-nostdin -loglevel warning',
-                options='-vn -af volume=0.6'
-            )
+            # MP3 → FFmpeg decodes to PCM 48kHz stereo → PCMVolumeTransformer applies volume → library encodes to Opus once.
+            # No Opus re-encode = no slow/double-voice artifacts.
+            try:
+                pcm_source = disnake.FFmpegPCMAudio(
+                    temp_file,
+                    before_options='-nostdin',
+                    options='-vn'
+                )
+                audio = disnake.PCMVolumeTransformer(pcm_source, volume=AUDIO_VOLUME_MULTIPLIER)
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to create audio source: {e}\n"
+                    f"  - FFmpeg not installed or not in PATH\n"
+                    f"  - Missing MP3 codec support\n"
+                    f"  - Permission issues: {temp_file}"
+                )
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except Exception:
+                        pass
+                return False
 
             # Play with callback
             play_done = asyncio.Event()
@@ -807,8 +887,7 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to complete
             try:
                 # Calculate dynamic timeout based on audio length
-                # MP3 format: estimate duration from file size (16000 bytes/sec at 128kbps)
-                # Use 2x multiplier + buffer to handle network/system delays
+                # MP3: estimate duration from file size (~16000 bytes/sec at 128kbps)
                 estimated_duration = len(audio_data) / MP3_BYTES_PER_SECOND
                 timeout = max(
                     AUDIO_PLAYBACK_TIMEOUT_BASE,
@@ -1148,21 +1227,39 @@ class VoiceProcessingCog(commands.Cog):
         original_content_length = len(message.content)
         self.logger.debug(f"Processing message from {message.author.display_name}: original length={original_content_length} chars")
         
-        # Clean text - reserve space for name prefix if first message
-        cleaned_text = await self._clean_text(message.content, max_length=None)
-        if not cleaned_text or not cleaned_text.strip():
-            self.logger.debug("Cleaned text is empty, skipping")
+        # ========== TEXT CLEANING IS DISABLED FOR TESTING ==========
+        # ALL text processing is bypassed to test raw TTS audio quality
+        # This includes: emoji extraction, Discord formatting removal, whitespace normalization,
+        # grammar corrections, pronunciation improvement, and name announcements
+        # ============================================================
+        
+        # Use raw message content directly - NO processing whatsoever
+        text = message.content.strip()
+        if not text:
+            self.logger.debug("[TEXT CLEANING BYPASSED] Message content is empty after strip, skipping")
             return
         
-        if is_first_message:
-            display_name = message.author.display_name
-            pronounceable_name = await self._improve_pronunciation(display_name) if self._detect_needs_pronunciation_help(display_name) else display_name
-            prefix = f"{pronounceable_name} says: "
-            text = prefix + cleaned_text
-            self.logger.debug(f"First message: added prefix '{prefix}' (len={len(prefix)}), total length={len(text)}")
-        else:
-            text = cleaned_text
-            self.logger.debug(f"Cleaned text length={len(text)}")
+        # Log with clear indicator that text cleaning is BYPASSED
+        self.logger.debug(f"[TEXT CLEANING BYPASSED] Using RAW message content: length={len(text)}, content='{text[:100]}'")
+        
+        # IMPORTANT: The code below is commented out - text cleaning is DISABLED
+        # If you see logs about "Cleaned text" or "Pronunciation improvement", 
+        # the bot needs to be restarted to pick up these changes
+        #
+        # cleaned_text = await self._clean_text(message.content, max_length=None)
+        # if not cleaned_text or not cleaned_text.strip():
+        #     self.logger.debug("Cleaned text is empty, skipping")
+        #     return
+        # 
+        # if is_first_message:
+        #     display_name = message.author.display_name
+        #     pronounceable_name = await self._improve_pronunciation(display_name) if self._detect_needs_pronunciation_help(display_name) else display_name
+        #     prefix = f"{pronounceable_name} says: "
+        #     text = prefix + cleaned_text
+        #     self.logger.debug(f"First message: added prefix '{prefix}' (len={len(prefix)}), total length={len(text)}")
+        # else:
+        #     text = cleaned_text
+        #     self.logger.debug(f"Cleaned text length={len(text)}")
 
         # Get voice
         user_voice = await self._get_voice_for_user(message.author)
@@ -1568,6 +1665,104 @@ class VoiceProcessingCog(commands.Cog):
                 human_names.append(f"... and {len(humans) - 5} more")
             embed.add_field(name="👥 Humans in Channel", value="\n".join(human_names), inline=False)
 
+        await inter.edit_original_response(embed=embed)
+
+    @tts_cmd.sub_command(name="diagnostics", description="Check system diagnostics (FFmpeg, codecs, etc.)")
+    async def tts_diagnostics(self, inter: disnake.ApplicationCommandInteraction):
+        """Check system diagnostics"""
+        await inter.response.defer(ephemeral=True)
+        
+        embed = disnake.Embed(title="🔍 TTS System Diagnostics", color=disnake.Color.blue())
+        
+        # Check FFmpeg
+        try:
+            import subprocess
+            import shutil
+            
+            ffmpeg_path = shutil.which('ffmpeg')
+            if ffmpeg_path:
+                embed.add_field(
+                    name="✅ FFmpeg",
+                    value=f"Found at: `{ffmpeg_path}`",
+                    inline=False
+                )
+                
+                # Get version
+                try:
+                    result = subprocess.run(
+                        ['ffmpeg', '-version'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        errors='ignore'
+                    )
+                    if result.returncode == 0:
+                        version_line = result.stdout.split('\n')[0] if result.stdout else "Unknown"
+                        embed.add_field(
+                            name="FFmpeg Version",
+                            value=f"`{version_line[:100]}`",
+                            inline=False
+                        )
+                except Exception as e:
+                    embed.add_field(
+                        name="⚠️ FFmpeg Version",
+                        value=f"Could not check: {e}",
+                        inline=False
+                    )
+            else:
+                embed.add_field(
+                    name="❌ FFmpeg",
+                    value="**NOT FOUND**\nInstall FFmpeg:\n• Windows: `choco install ffmpeg`\n• Linux: `sudo apt-get install ffmpeg`\n• macOS: `brew install ffmpeg`",
+                    inline=False
+                )
+        except Exception as e:
+            embed.add_field(
+                name="❌ FFmpeg Check Failed",
+                value=f"Error: {e}",
+                inline=False
+            )
+        
+        # Check codecs
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['ffmpeg', '-codecs'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                errors='ignore'
+            )
+            if result.returncode == 0:
+                has_mp3 = 'mp3' in result.stdout.lower() or 'libmp3lame' in result.stdout.lower()
+                has_opus = 'opus' in result.stdout.lower() or 'libopus' in result.stdout.lower()
+                codec_status = []
+                codec_status.append(f"{'✅' if has_mp3 else '❌'} MP3 codec: {'Available' if has_mp3 else 'Missing'}")
+                codec_status.append(f"{'✅' if has_opus else '❌'} Opus codec: {'Available' if has_opus else 'Missing'}")
+                
+                embed.add_field(
+                    name="Audio Codecs",
+                    value="\n".join(codec_status),
+                    inline=False
+                )
+        except Exception as e:
+            embed.add_field(
+                name="⚠️ Codec Check",
+                value=f"Could not check: {e}",
+                inline=False
+            )
+        
+        # TTS Status
+        embed.add_field(
+            name="TTS Status",
+            value=f"Enabled: {'✅ Yes' if self.enabled else '❌ No'}\n"
+                  f"Total Requests: {self.total_requests:,}\n"
+                  f"Failed: {self.total_failed:,}\n"
+                  f"Cached: {self.total_cached:,}",
+            inline=False
+        )
+        
+        embed.set_footer(text="If you see errors, check logs for 'policy.d denied' or missing dependencies")
+        
         await inter.edit_original_response(embed=embed)
 
 
