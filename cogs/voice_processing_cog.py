@@ -1,15 +1,12 @@
 """
 Voice Processing Cog - Text-to-Speech with Smart Features
 
-⚠️ TEMPORARY TESTING MODE: Text cleaning, pronunciation improvement, and name prefixes are DISABLED
-   to test if they're causing audio quality issues. See on_message() function for details.
-
 FEATURES:
 - 🎤 Automatic TTS for messages from users in voice channels
 - 🎭 Session-based voice assignment (13 voices, assigned per-guild session)
-- 🤖 AI pronunciation improvement for acronyms and usernames (TEMPORARILY DISABLED)
-- 📝 Smart grammar corrections (TEMPORARILY DISABLED)
-- 👤 Name announcement (first message per session) (TEMPORARILY DISABLED)
+- 🤖 AI pronunciation improvement for acronyms and usernames
+- 📝 Smart grammar corrections (contractions, etc.)
+- 👤 Name announcement (first message per session, 2-hour cooldown)
 - ⚡ LRU caching for TTS audio and pronunciations
 - 🔧 Circuit breaker for API failure protection
 - 🚦 Rate limiting
@@ -1173,8 +1170,9 @@ class VoiceProcessingCog(commands.Cog):
         if not self.enabled or message.author.bot or not message.guild:
             return False
 
-        # Check duplicate
-        message_key = f"{message.id}:{message.author.id}:{message.content[:50]}"
+        # Check duplicate (defensive: content can be None for embed-only messages)
+        content_slice = (message.content or "")[:50]
+        message_key = f"{message.id}:{message.author.id}:{content_slice}"
         async with self._processed_messages_lock:
             if message_key in self._processed_messages:
                 return False
@@ -1223,43 +1221,27 @@ class VoiceProcessingCog(commands.Cog):
             if is_first_message:
                 self._announced_users[guild_id][user_id] = current_time
 
-        # Log original message length
-        original_content_length = len(message.content)
+        # Log original message length (content can be None for embed-only messages)
+        raw_content = message.content or ""
+        original_content_length = len(raw_content)
         self.logger.debug(f"Processing message from {message.author.display_name}: original length={original_content_length} chars")
         
-        # ========== TEXT CLEANING IS DISABLED FOR TESTING ==========
-        # ALL text processing is bypassed to test raw TTS audio quality
-        # This includes: emoji extraction, Discord formatting removal, whitespace normalization,
-        # grammar corrections, pronunciation improvement, and name announcements
-        # ============================================================
-        
-        # Use raw message content directly - NO processing whatsoever
-        text = message.content.strip()
-        if not text:
-            self.logger.debug("[TEXT CLEANING BYPASSED] Message content is empty after strip, skipping")
+        # Clean text: emoji extraction, Discord formatting removal, whitespace normalization,
+        # grammar corrections, and pronunciation improvement for acronyms/usernames in body
+        cleaned_text = await self._clean_text(raw_content, max_length=None)
+        if not cleaned_text or not cleaned_text.strip():
+            self.logger.debug("Cleaned text is empty, skipping")
             return
         
-        # Log with clear indicator that text cleaning is BYPASSED
-        self.logger.debug(f"[TEXT CLEANING BYPASSED] Using RAW message content: length={len(text)}, content='{text[:100]}'")
-        
-        # IMPORTANT: The code below is commented out - text cleaning is DISABLED
-        # If you see logs about "Cleaned text" or "Pronunciation improvement", 
-        # the bot needs to be restarted to pick up these changes
-        #
-        # cleaned_text = await self._clean_text(message.content, max_length=None)
-        # if not cleaned_text or not cleaned_text.strip():
-        #     self.logger.debug("Cleaned text is empty, skipping")
-        #     return
-        # 
-        # if is_first_message:
-        #     display_name = message.author.display_name
-        #     pronounceable_name = await self._improve_pronunciation(display_name) if self._detect_needs_pronunciation_help(display_name) else display_name
-        #     prefix = f"{pronounceable_name} says: "
-        #     text = prefix + cleaned_text
-        #     self.logger.debug(f"First message: added prefix '{prefix}' (len={len(prefix)}), total length={len(text)}")
-        # else:
-        #     text = cleaned_text
-        #     self.logger.debug(f"Cleaned text length={len(text)}")
+        if is_first_message:
+            display_name = message.author.display_name
+            pronounceable_name = await self._improve_pronunciation(display_name) if self._detect_needs_pronunciation_help(display_name) else display_name
+            prefix = f"{pronounceable_name} says: "
+            text = prefix + cleaned_text
+            self.logger.debug(f"First message: added prefix '{prefix}' (len={len(prefix)}), total length={len(text)}")
+        else:
+            text = cleaned_text
+            self.logger.debug(f"Cleaned text length={len(text)}")
 
         # Get voice
         user_voice = await self._get_voice_for_user(message.author)

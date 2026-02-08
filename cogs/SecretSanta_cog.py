@@ -69,6 +69,7 @@ import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import disnake
 from disnake.ext import commands
@@ -93,6 +94,42 @@ from .secret_santa_checks import mod_check, participant_check, admin_check, safe
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
 SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 60  # 1 minute - how often to check for scheduled events
+
+# Discord locale (language) -> IANA timezone for schedule parsing when user doesn't set schedule_timezone.
+# Discord doesn't provide timezone, so this is a best-effort guess from their app language.
+DISCORD_LOCALE_TO_IANA: Dict[str, str] = {
+    "id": "Asia/Jakarta",
+    "da": "Europe/Copenhagen",
+    "de": "Europe/Berlin",
+    "en-GB": "Europe/London",
+    "en-US": "America/New_York",
+    "es-ES": "Europe/Madrid",
+    "es-419": "America/Mexico_City",
+    "fr": "Europe/Paris",
+    "hr": "Europe/Zagreb",
+    "it": "Europe/Rome",
+    "lt": "Europe/Vilnius",
+    "hu": "Europe/Budapest",
+    "nl": "Europe/Amsterdam",
+    "no": "Europe/Oslo",
+    "pl": "Europe/Warsaw",
+    "pt-BR": "America/Sao_Paulo",
+    "ro": "Europe/Bucharest",
+    "fi": "Europe/Helsinki",
+    "sv-SE": "Europe/Stockholm",
+    "vi": "Asia/Ho_Chi_Minh",
+    "tr": "Europe/Istanbul",
+    "cs": "Europe/Prague",
+    "el": "Europe/Athens",
+    "bg": "Europe/Sofia",
+    "ru": "Europe/Moscow",
+    "uk": "Europe/Kyiv",
+    "hi": "Asia/Kolkata",
+    "th": "Asia/Bangkok",
+    "zh-CN": "Asia/Shanghai",
+    "ja": "Asia/Tokyo",
+    "ko": "Asia/Seoul",
+}
 
 
 def autocomplete_safety_wrapper(func):
@@ -895,20 +932,33 @@ class SecretSantaCog(commands.Cog):
         """Background task that checks for scheduled shuffles and stops, and executes them"""
         try:
             while True:
-                await asyncio.sleep(SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS)
-                
+                # Check first, then sleep – so we don't miss a schedule that's already due
+                # and the first check runs soon after cog load
+                current_time = time.time()
                 event = self._get_current_event()
                 if not event:
-                    continue
-                
-                current_time = time.time()
-                
+                    self.logger.debug("Scheduled shuffle checker: no active event, skipping")
+                else:
+                    shuffle_ts = event.get("scheduled_shuffle_time")
+                    stop_ts = event.get("scheduled_stop_time")
+                    self.logger.debug(
+                        "Scheduled shuffle checker tick: shuffle_time=%s, stop_time=%s, now=%s",
+                        shuffle_ts,
+                        stop_ts,
+                        int(current_time),
+                    )
+
                 # Check if there's a scheduled shuffle
-                scheduled_shuffle_time = event.get("scheduled_shuffle_time")
-                if scheduled_shuffle_time and current_time >= scheduled_shuffle_time:
+                scheduled_shuffle_time = event.get("scheduled_shuffle_time") if event else None
+                if event and scheduled_shuffle_time is not None and current_time >= scheduled_shuffle_time:
                     # Time to shuffle! Get scheduler ID before clearing
                     scheduler_id = event.get("scheduled_by_user_id")
-                    
+                    self.logger.info(
+                        "Running scheduled shuffle (scheduled_time=%s, scheduler_id=%s)",
+                        int(scheduled_shuffle_time),
+                        scheduler_id,
+                    )
+
                     # Clear the schedule first to prevent double execution
                     async with self._lock:
                         event.pop("scheduled_shuffle_time", None)
@@ -944,11 +994,16 @@ class SecretSantaCog(commands.Cog):
                             await self._send_dm(scheduler_id, error_msg)
                 
                 # Check if there's a scheduled stop
-                scheduled_stop_time = event.get("scheduled_stop_time")
-                if scheduled_stop_time and current_time >= scheduled_stop_time:
+                scheduled_stop_time = event.get("scheduled_stop_time") if event else None
+                if event and scheduled_stop_time is not None and current_time >= scheduled_stop_time:
                     # Time to stop! Get stopper ID before clearing
                     stopper_id = event.get("scheduled_stop_by_user_id")
-                    
+                    self.logger.info(
+                        "Running scheduled stop (scheduled_time=%s, stopper_id=%s)",
+                        int(scheduled_stop_time),
+                        stopper_id,
+                    )
+
                     # Execute the stop (this will clear the scheduled_stop_time internally)
                     try:
                         success, saved_filename = await self._execute_stop_internal(stopper_id=stopper_id)
@@ -983,6 +1038,8 @@ class SecretSantaCog(commands.Cog):
                                 f"Please run `/ss stop` manually to end the event."
                             )
                             await self._send_dm(stopper_id, error_msg)
+
+                await asyncio.sleep(SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS)
                 
         except asyncio.CancelledError:
             pass
@@ -1145,7 +1202,11 @@ class SecretSantaCog(commands.Cog):
         message: disnake.Message = commands.Param(description="Message to track reactions on"),
         role: Optional[disnake.Role] = commands.Param(default=None, description="Optional: Role to assign participants"),
         shuffle_date: Optional[str] = commands.Param(default=None, description="Optional: Date to auto-shuffle (REQUIRES shuffle_time if set)"),
-        shuffle_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if shuffle_date is set! Time to auto-shuffle (e.g., '14:30' or '2:30 PM')"),
+        shuffle_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if shuffle_date is set! Time to auto-shuffle (e.g. 14:30 or 2:30 PM)"),
+        schedule_timezone: Optional[str] = commands.Param(
+            default=None,
+            description="Optional: Timezone for times (e.g. Europe/Stockholm). If unset, we guess from your Discord language"
+        ),
         end_date_preset: Optional[str] = commands.Param(
             default=None,
             choices=["December 24", "December 25", "December 31", "January 1", "Custom"],
@@ -1218,10 +1279,35 @@ class SecretSantaCog(commands.Cog):
                     name = member.display_name if member else user.name
                     participants[user_id_str] = name
 
+        # Resolve timezone: explicit schedule_timezone, or guess from Discord locale (language)
+        tz_info = None
+        used_locale_tz: Optional[str] = None  # IANA zone we guessed from locale, for response message
+        if schedule_timezone:
+            try:
+                tz_info = ZoneInfo(schedule_timezone)
+            except Exception:
+                await inter.edit_original_response(
+                    content=f"❌ Invalid timezone: `{schedule_timezone}`.\n\n"
+                            "Use a valid IANA name, e.g. `Europe/Stockholm`, `America/New_York`, `UTC`."
+                )
+                return
+        else:
+            # No timezone given – try to use command author's Discord locale (language) as hint
+            locale_raw = getattr(inter, "locale", None)
+            if locale_raw is not None:
+                locale_str = getattr(locale_raw, "value", str(locale_raw)).replace("_", "-")
+                tz_name = DISCORD_LOCALE_TO_IANA.get(locale_str)
+                if tz_name:
+                    try:
+                        tz_info = ZoneInfo(tz_name)
+                        used_locale_tz = tz_name
+                    except Exception:
+                        pass
+
         # Parse and validate shuffle schedule if provided
         scheduled_timestamp = None
         if shuffle_date and shuffle_time:
-            scheduled_timestamp = self._parse_datetime(shuffle_date, shuffle_time)
+            scheduled_timestamp = self._parse_datetime(shuffle_date, shuffle_time, tz_info=tz_info)
             if not scheduled_timestamp:
                 await inter.edit_original_response(
                     content="❌ Invalid date or time format!\n\n"
@@ -1286,7 +1372,7 @@ class SecretSantaCog(commands.Cog):
         
         # Validate stop schedule
         if actual_end_date and end_time:
-            scheduled_stop_timestamp = self._parse_datetime(actual_end_date, end_time)
+            scheduled_stop_timestamp = self._parse_datetime(actual_end_date, end_time, tz_info=tz_info)
             if not scheduled_stop_timestamp:
                 await inter.edit_original_response(
                     content="❌ Invalid end date or time format!\n\n"
@@ -1392,6 +1478,10 @@ class SecretSantaCog(commands.Cog):
         
         if scheduled_timestamp:
             response_msg += f"\n\n📅 **Shuffle scheduled for:** <t:{int(scheduled_timestamp)}:F>\n"
+            if schedule_timezone:
+                response_msg += f"⏰ Times in: **{schedule_timezone}**\n"
+            elif used_locale_tz:
+                response_msg += f"⏰ Times in: **{used_locale_tz}** (from your Discord language)\n"
             response_msg += f"🎉 You'll be notified when it happens!"
         
         if scheduled_stop_timestamp:
@@ -1400,6 +1490,9 @@ class SecretSantaCog(commands.Cog):
                 preset_info = f" (preset: {end_date_preset})"
             response_msg += f"\n\n🛑 **Event will auto-stop on:** <t:{int(scheduled_stop_timestamp)}:F>{preset_info}\n"
             response_msg += f"✨ Event will archive automatically!"
+        
+        if (scheduled_timestamp or scheduled_stop_timestamp) and not schedule_timezone and not used_locale_tz:
+            response_msg += "\n\n⏰ _Times are in **server (UTC)**. Discord shows them above in your local time. Set `schedule_timezone` (e.g. Europe/Stockholm) or use a Discord language we can map to a timezone._"
         
         await inter.edit_original_response(response_msg)
         
@@ -1636,13 +1729,16 @@ class SecretSantaCog(commands.Cog):
         
         return True, saved_filename
 
-    def _parse_datetime(self, date_str: str, time_str: str) -> Optional[float]:
+    def _parse_datetime(self, date_str: str, time_str: str, tz_info: Optional[ZoneInfo] = None) -> Optional[float]:
         """
         Parse date and time strings into a Unix timestamp.
         
         Supports intuitive formats:
         - Date: "YYYY-MM-DD", "MM/DD/YYYY", "December 25, 2025"
         - Time: "HH:MM" (24-hour), "HH:MM AM/PM" (12-hour)
+        
+        If tz_info is set, the time is interpreted in that timezone (e.g. user local).
+        Otherwise the time is interpreted in server local time (often UTC).
         
         Returns:
             Unix timestamp (float) or None if parsing fails
@@ -1688,10 +1784,8 @@ class SecretSantaCog(commands.Cog):
             if not time_obj:
                 return None
             
-            # Combine date and time
-            datetime_obj = dt.datetime.combine(date_obj, time_obj)
-            
-            # Convert to Unix timestamp
+            # Combine date and time; if timezone given, interpret in that zone
+            datetime_obj = dt.datetime.combine(date_obj, time_obj, tzinfo=tz_info)
             return datetime_obj.timestamp()
             
         except Exception as e:

@@ -49,3 +49,6 @@ deploy_linux.sh
 
 # Code review documents (local development only)
 CODE_REVIEW*.md
+
+# Temporary / working copies (do not commit)
+temp_working_version.py
