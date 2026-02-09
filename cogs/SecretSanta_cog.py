@@ -10,7 +10,7 @@ FEATURES:
 - 🔒 Archive protection (prevents accidental data loss)
 
 COMMANDS (Moderator):
-- /ss start [message] [role] [shuffle_date] [shuffle_time] [end_date] [end_time] - Start new event (optional auto-shuffle and auto-stop)
+- /ss start [message] [role] [shuffle_at] [end_at] - Start new event (optional auto-shuffle and auto-stop)
 - /ss shuffle - Make Secret Santa assignments
 - /ss stop - Stop event and archive data (manual stop, cancels scheduled stop if set)
 - /ss participants - View current participants
@@ -1207,19 +1207,18 @@ class SecretSantaCog(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         message: disnake.Message = commands.Param(description="Message to track reactions on"),
         role: Optional[disnake.Role] = commands.Param(default=None, description="Optional: Role to assign participants"),
-        shuffle_date: Optional[str] = commands.Param(default=None, description="Optional: Date to auto-shuffle (REQUIRES shuffle_time if set)"),
-        shuffle_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if shuffle_date is set! Time to auto-shuffle (e.g. 14:30 or 2:30 PM)"),
+        shuffle_at: Optional[str] = commands.Param(
+            default=None,
+            description="Optional: Date and time to auto-shuffle (e.g. 2025-12-25 14:30 or Dec 25 2:30 PM)"
+        ),
         schedule_timezone: Optional[str] = commands.Param(
             default=None,
-            description="Optional: Timezone for times (e.g. Europe/Stockholm). If unset, we guess from your Discord language"
+            description="Optional: Timezone for shuffle/end times (e.g. Europe/Stockholm)"
         ),
-        end_date_preset: Optional[str] = commands.Param(
+        end_at: Optional[str] = commands.Param(
             default=None,
-            choices=["December 24", "December 25", "December 31", "January 1", "Custom"],
-            description="Optional: Quick preset for end date (REQUIRES end_time below if set)"
-        ),
-        end_date: Optional[str] = commands.Param(default=None, description="Optional: Custom date to auto-stop (only if end_date_preset is 'Custom')"),
-        end_time: Optional[str] = commands.Param(default=None, description="⚠️ REQUIRED if end_date_preset is set! Time to auto-stop (e.g., '23:59' or '11:59 PM')")
+            description="Optional: Date and time to auto-stop (e.g. 2025-12-31 23:59 or Dec 31 11:59 PM)"
+        )
     ):
         """Start new Secret Santa event (optionally schedule automatic shuffle)"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -1317,23 +1316,17 @@ class SecretSantaCog(commands.Cog):
 
         # Parse and validate shuffle schedule if provided
         scheduled_timestamp = None
-        if shuffle_date and shuffle_time:
-            scheduled_timestamp = self._parse_datetime(shuffle_date, shuffle_time, tz_info=tz_info)
+        if shuffle_at:
+            scheduled_timestamp = self._parse_datetime_combined(shuffle_at, tz_info=tz_info)
             if not scheduled_timestamp:
                 await inter.edit_original_response(
-                    content="❌ Invalid date or time format!\n\n"
-                           "**Date formats:**\n"
-                           "• `2025-12-25` (YYYY-MM-DD)\n"
-                           "• `12/25/2025` (MM/DD/YYYY)\n"
-                           "• `December 25, 2025`\n\n"
-                           "**Time formats:**\n"
-                           "• `14:30` (24-hour)\n"
-                           "• `2:30 PM` (12-hour)\n\n"
-                           "**Example:** `/ss start ... shuffle_date:2025-12-25 shuffle_time:2:30 PM`"
+                    content="❌ Invalid shuffle date/time. Use one string with both date and time.\n\n"
+                           "**Examples:**\n"
+                           "• `2025-12-25 14:30`\n"
+                           "• `December 25, 2025 2:30 PM`\n"
+                           "• `12/25/2025 11:00 AM`"
                 )
                 return
-            
-            # Check if scheduled time is in the past
             current_time = time.time()
             if scheduled_timestamp <= current_time:
                 await inter.edit_original_response(
@@ -1342,64 +1335,20 @@ class SecretSantaCog(commands.Cog):
                            f"Your time: <t:{int(scheduled_timestamp)}:F>"
                 )
                 return
-        elif shuffle_date or shuffle_time:
-            # One provided but not the other
-            await inter.edit_original_response(
-                content="❌ Both `shuffle_date` and `shuffle_time` must be provided together, or leave both empty for manual shuffle."
-            )
-            return
 
         # Parse and validate stop schedule if provided
         scheduled_stop_timestamp = None
-        
-        # Handle end date preset or custom
-        actual_end_date = None
-        if end_date_preset:
-            if end_date_preset == "Custom":
-                # Use custom date if provided
-                if end_date:
-                    actual_end_date = end_date
-                else:
-                    await inter.edit_original_response(
-                        content="❌ You selected 'Custom' for end_date_preset but didn't provide `end_date`.\n\n"
-                               "Either:\n"
-                               "• Choose a preset date (December 24, 25, 31, or January 1)\n"
-                               "• Or provide both `end_date` and `end_time` when using 'Custom'"
-                    )
-                    return
-            else:
-                # Use preset date - map to current year (reuse current_year from above)
-                preset_map = {
-                    "December 24": f"December 24, {current_year}",
-                    "December 25": f"December 25, {current_year}",
-                    "December 31": f"December 31, {current_year}",
-                    "January 1": f"January 1, {current_year + 1}"  # Next year for Jan 1
-                }
-                actual_end_date = preset_map.get(end_date_preset)
-        
-        # If no preset but custom date provided, use it
-        if not actual_end_date and end_date:
-            actual_end_date = end_date
-        
-        # Validate stop schedule
-        if actual_end_date and end_time:
-            scheduled_stop_timestamp = self._parse_datetime(actual_end_date, end_time, tz_info=tz_info)
+        if end_at:
+            scheduled_stop_timestamp = self._parse_datetime_combined(end_at, tz_info=tz_info)
             if not scheduled_stop_timestamp:
                 await inter.edit_original_response(
-                    content="❌ Invalid end date or time format!\n\n"
-                           "**Date formats:**\n"
-                           "• `2025-12-31` (YYYY-MM-DD)\n"
-                           "• `12/31/2025` (MM/DD/YYYY)\n"
-                           "• `December 31, 2025`\n\n"
-                           "**Time formats:**\n"
-                           "• `23:59` (24-hour)\n"
-                           "• `11:59 PM` (12-hour)\n\n"
-                           "**Example:** `/ss start ... end_date_preset:December 31 end_time:11:59 PM`\n"
-                           "**Or:** `/ss start ... end_date_preset:Custom end_date:2025-12-31 end_time:11:59 PM`"
+                    content="❌ Invalid end date/time. Use one string with both date and time.\n\n"
+                           "**Examples:**\n"
+                           "• `2025-12-31 23:59`\n"
+                           "• `December 31, 2025 11:59 PM`\n"
+                           "• `12/31/2025 11:59 PM`"
                 )
                 return
-            
-            # Check if scheduled stop time is in the future
             current_time = time.time()
             if scheduled_stop_timestamp <= current_time:
                 await inter.edit_original_response(
@@ -1408,8 +1357,6 @@ class SecretSantaCog(commands.Cog):
                            f"Your time: <t:{int(scheduled_stop_timestamp)}:F>"
                 )
                 return
-            
-            # Check if stop is after shuffle (if shuffle is scheduled)
             if scheduled_timestamp and scheduled_stop_timestamp <= scheduled_timestamp:
                 await inter.edit_original_response(
                     content="❌ Scheduled stop time must be after shuffle time!\n\n"
@@ -1417,23 +1364,6 @@ class SecretSantaCog(commands.Cog):
                            f"Stop: <t:{int(scheduled_stop_timestamp)}:F>"
                 )
                 return
-        elif (actual_end_date and not end_time) or (end_time and not actual_end_date):
-            # One provided but not the other
-            await inter.edit_original_response(
-                content="❌ Both end date (preset or custom) and `end_time` must be provided together, or leave both empty for manual stop.\n\n"
-                       "**Quick preset:** Use `end_date_preset` (e.g., 'December 25') + `end_time`\n"
-                       "**Custom date:** Use `end_date_preset:Custom` + `end_date` + `end_time`"
-            )
-            return
-        elif end_date_preset == "Custom" and not end_date:
-            # Custom selected but no custom date provided
-            await inter.edit_original_response(
-                content="❌ You selected 'Custom' for end_date_preset but didn't provide `end_date`.\n\n"
-                       "Either:\n"
-                       "• Choose a preset date (December 24, 25, 31, or January 1)\n"
-                       "• Or provide both `end_date` and `end_time` when using 'Custom'"
-            )
-            return
 
         # Create event (current_year already set above during safety check)
         new_event = {
@@ -1496,10 +1426,7 @@ class SecretSantaCog(commands.Cog):
             response_msg += f"🎉 You'll be notified when it happens!"
         
         if scheduled_stop_timestamp:
-            preset_info = ""
-            if end_date_preset and end_date_preset != "Custom":
-                preset_info = f" (preset: {end_date_preset})"
-            response_msg += f"\n\n🛑 **Event will auto-stop on:** <t:{int(scheduled_stop_timestamp)}:F>{preset_info}\n"
+            response_msg += f"\n\n🛑 **Event will auto-stop on:** <t:{int(scheduled_stop_timestamp)}:F>\n"
             response_msg += f"✨ Event will archive automatically!"
         
         if (scheduled_timestamp or scheduled_stop_timestamp) and not schedule_timezone and not used_locale_tz:
@@ -1814,10 +1741,53 @@ class SecretSantaCog(commands.Cog):
             self.logger.debug(f"Date/time parsing error: {e}")
             return None
 
+    def _parse_datetime_combined(self, date_time_str: str, tz_info: Optional[ZoneInfo] = None) -> Optional[float]:
+        """
+        Parse a single string containing both date and time into a Unix timestamp.
+        E.g. "2025-12-25 14:30", "December 25, 2025 2:30 PM", "12/25/2025 11:59 PM".
+        """
+        if not date_time_str or not isinstance(date_time_str, str):
+            return None
+        s = date_time_str.strip()
+        if not s:
+            return None
+        combined_formats = [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %I:%M %p",
+            "%Y-%m-%d %I:%M%p",
+            "%Y-%m-%d %H:%M:%S",
+            "%m/%d/%Y %H:%M",
+            "%m/%d/%Y %I:%M %p",
+            "%m/%d/%Y %I:%M%p",
+            "%B %d, %Y %H:%M",
+            "%B %d, %Y %I:%M %p",
+            "%B %d, %Y %I:%M%p",
+            "%b %d, %Y %H:%M",
+            "%b %d, %Y %I:%M %p",
+            "%b %d, %Y %I:%M%p",
+            "%d %B %Y %H:%M",
+            "%d %B %Y %I:%M %p",
+            "%d %b %Y %H:%M",
+            "%d %b %Y %I:%M %p",
+        ]
+        try:
+            for fmt in combined_formats:
+                try:
+                    dt_obj = dt.datetime.strptime(s, fmt)
+                    if tz_info:
+                        dt_obj = dt_obj.replace(tzinfo=tz_info)
+                    return dt_obj.timestamp()
+                except ValueError:
+                    continue
+            return None
+        except Exception as e:
+            self.logger.debug(f"Combined date/time parsing error: {e}")
+            return None
+
     @ss_root.sub_command(name="shuffle", description="🔧 Manually assign Secret Santas (emergency/fallback)")
     @owner_check()
     async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
-        """Make assignments manually (use /ss start with shuffle_date/shuffle_time for automatic execution)"""
+        """Make assignments manually (use /ss start with shuffle_at for automatic execution)"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
         
