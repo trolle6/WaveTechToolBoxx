@@ -93,7 +93,9 @@ from .secret_santa_checks import mod_check, participant_check, admin_check, safe
 
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
-SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 60  # 1 minute - how often to check for scheduled events
+# How often to re-check for scheduled shuffle/stop: when idle we sleep this long; when we have a
+# schedule we sleep until the scheduled time but at most this long (so we re-check if the event is edited).
+SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 3600  # 1 hour
 
 # Discord locale (language) -> IANA timezone for schedule parsing when user doesn't set schedule_timezone.
 # Discord doesn't provide timezone, so this is a best-effort guess from their app language.
@@ -933,20 +935,8 @@ class SecretSantaCog(commands.Cog):
         try:
             while True:
                 # Check first, then sleep – so we don't miss a schedule that's already due
-                # and the first check runs soon after cog load
                 current_time = time.time()
                 event = self._get_current_event()
-                if not event:
-                    self.logger.debug("Scheduled shuffle checker: no active event, skipping")
-                else:
-                    shuffle_ts = event.get("scheduled_shuffle_time")
-                    stop_ts = event.get("scheduled_stop_time")
-                    self.logger.debug(
-                        "Scheduled shuffle checker tick: shuffle_time=%s, stop_time=%s, now=%s",
-                        shuffle_ts,
-                        stop_ts,
-                        int(current_time),
-                    )
 
                 # Check if there's a scheduled shuffle
                 scheduled_shuffle_time = event.get("scheduled_shuffle_time") if event else None
@@ -1039,7 +1029,23 @@ class SecretSantaCog(commands.Cog):
                             )
                             await self._send_dm(stopper_id, error_msg)
 
-                await asyncio.sleep(SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS)
+                # Next run: soonest future scheduled time (shuffle or stop). If we have one, sleep until then
+                # (capped at CHECK_INTERVAL so we re-check hourly in case the event was edited).
+                next_run = None
+                if event and scheduled_shuffle_time is not None and scheduled_shuffle_time > current_time:
+                    next_run = scheduled_shuffle_time
+                if event and scheduled_stop_time is not None and scheduled_stop_time > current_time:
+                    if next_run is None or scheduled_stop_time < next_run:
+                        next_run = scheduled_stop_time
+                if next_run is not None:
+                    sleep_seconds = min(
+                        next_run - current_time,
+                        SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS,
+                    )
+                else:
+                    sleep_seconds = SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS
+                sleep_seconds = max(0.0, sleep_seconds)
+                await asyncio.sleep(sleep_seconds)
                 
         except asyncio.CancelledError:
             pass

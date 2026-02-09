@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -394,6 +395,35 @@ bot.send_to_discord_log = send_to_discord_log
 bot.send_to_discord_channel = send_to_discord_channel
 
 
+# ============ DAILY MAINTENANCE ============
+SECONDS_PER_DAY_MAINTENANCE = 86400  # 24 hours
+
+
+async def daily_maintenance_loop():
+    """
+    Run once per day at midnight UTC: cache cleanups and optional cog maintenance.
+    Cogs can implement daily_maintenance() to clear caches or soft-reset state.
+    """
+    while True:
+        now = datetime.now(timezone.utc)
+        tomorrow = (now.date() + timedelta(days=1))
+        next_midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
+        wait_seconds = (next_midnight - now).total_seconds()
+        if wait_seconds <= 0:
+            wait_seconds = SECONDS_PER_DAY_MAINTENANCE
+        logger.info(f"Daily maintenance next at midnight UTC (in {wait_seconds/3600:.1f}h)")
+        await asyncio.sleep(wait_seconds)
+        logger.info("Daily maintenance (midnight UTC) — running cog cleanups")
+        for name, cog in bot.cogs.items():
+            fn = getattr(cog, "daily_maintenance", None)
+            if asyncio.iscoroutinefunction(fn):
+                try:
+                    await fn()
+                except Exception as e:
+                    logger.error(f"Daily maintenance failed for {name}: {e}", exc_info=True)
+        await asyncio.sleep(SECONDS_PER_DAY_MAINTENANCE)
+
+
 # ============ BOT EVENTS ============
 @bot.event
 async def on_ready():
@@ -411,6 +441,8 @@ async def on_ready():
         if discord_handler:
             discord_handler.set_bot(bot)
             logger.info("Discord logging handler connected")
+        
+        asyncio.create_task(daily_maintenance_loop())
         
         try:
             channel = bot.get_channel(config.DISCORD_LOG_CHANNEL_ID)

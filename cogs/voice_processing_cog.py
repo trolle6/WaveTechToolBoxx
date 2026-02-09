@@ -1407,6 +1407,16 @@ class VoiceProcessingCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Cleanup loop error: {e}", exc_info=True)
 
+    async def daily_maintenance(self):
+        """Called by main at midnight UTC — clear expired cache entries."""
+        if not self.enabled:
+            return
+        if hasattr(self, "cache") and hasattr(self.cache, "cleanup"):
+            await self.cache.cleanup()
+        if hasattr(self, "pronunciation_cache") and hasattr(self.pronunciation_cache, "cleanup"):
+            await self.pronunciation_cache.cleanup()
+        self.logger.debug("Voice: daily cache cleanup done")
+
     # ============ COG LIFECYCLE ============
     async def cog_load(self):
         """Initialize cog"""

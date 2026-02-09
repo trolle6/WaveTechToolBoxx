@@ -520,6 +520,14 @@ class DALLECog(commands.Cog):
                 content="❌ Queue is full. Try again in a few minutes."
             )
 
+    async def daily_maintenance(self):
+        """Called by main at midnight UTC — clear expired cache entries."""
+        if not self.enabled:
+            return
+        if hasattr(self, "cache") and hasattr(self.cache, "cleanup"):
+            await self.cache.cleanup()
+        self.logger.debug("DALL-E: daily cache cleanup done")
+
     # ============ COG LIFECYCLE ============
     async def cog_load(self):
         """Initialize cog"""
