@@ -135,15 +135,14 @@ class YearHistoryPaginator(disnake.ui.View):
             giver_emoji = emoji_mapping.get(str(giver_id), "🎁")
             receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
             
-            # Check for gift
+            # Check for gift (handle null/empty consistently)
             submission = gifts.get(str(giver_id))
             if submission and isinstance(submission, dict):
-                gift_desc = submission.get("gift", "No description provided")
-                if isinstance(gift_desc, str) and len(gift_desc) > 60:
-                    gift_desc = gift_desc[:57] + "..."
-                elif not isinstance(gift_desc, str):
-                    gift_desc = "Invalid gift description"
-                
+                raw = submission.get("gift")
+                if isinstance(raw, str) and raw.strip():
+                    gift_desc = raw[:57] + "..." if len(raw) > 60 else raw
+                else:
+                    gift_desc = "(not yet submitted)"
                 self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
                 self.all_lines.append(f"    ⤷ *{gift_desc}*")
             else:
@@ -167,12 +166,13 @@ class YearHistoryPaginator(disnake.ui.View):
         event_data = self.archive.get("event", {})
         assignments = event_data.get("assignments", {})
         gifts = event_data.get("gift_submissions", {})
+        gifts_count = sum(1 for gid in assignments if (gifts.get(str(gid)) or {}).get("gift"))
         
         has_assignments = bool(assignments)
-        has_gifts = bool(gifts)
+        has_gifts = gifts_count > 0
         
         if has_gifts:
-            description = f"**{len(self.participants)}** participants, **{len(gifts)}** gifts exchanged"
+            description = f"**{len(self.participants)}** participants, **{gifts_count}** gifts exchanged"
         elif has_assignments:
             description = f"**{len(self.participants)}** participants, assignments made but no gifts recorded"
         else:
@@ -215,7 +215,7 @@ class YearHistoryPaginator(disnake.ui.View):
                 
                 assignment_idx += 1
             
-            gifts_count = len([g for g in gifts.keys() if g in [str(a) for a in assignments.keys()]])
+            gifts_count = sum(1 for gid in assignments if (gifts.get(str(gid)) or {}).get("gift"))
             field_name = f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)"
             
             if self.total_pages > 1:
@@ -231,10 +231,10 @@ class YearHistoryPaginator(disnake.ui.View):
             embed.add_field(name="📝 Event Status", value=status_text, inline=False)
         
         # Statistics
-        completion_rate = (len(gifts) / len(self.participants) * 100) if self.participants else 0
+        completion_rate = (gifts_count / len(self.participants) * 100) if self.participants else 0
         embed.add_field(
             name="📊 Statistics",
-            value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {len(gifts)}",
+            value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {gifts_count}",
             inline=True
         )
         
@@ -292,18 +292,21 @@ class FileListPaginator(disnake.ui.View):
         )
         
         for file_id, file_data in page_files:
-            file_name = file_data.get("name", "Unknown")
-            uploaded_at = file_data.get("uploaded_at", 0)
-            size = file_data.get("size", 0)
+            if not isinstance(file_data, dict):
+                continue
+            file_name = file_data.get("name") or "Unknown"
+            uploaded_at = file_data.get("uploaded_at")
+            size = file_data.get("size")
+            size_mb = (size / 1024 / 1024) if isinstance(size, (int, float)) and size is not None else 0.0
             download_count = file_data.get("download_count", 0)
-            
+            uploaded_ts = int(uploaded_at) if isinstance(uploaded_at, (int, float)) and uploaded_at else 0
             embed.add_field(
                 name=f"📦 {file_name}",
                 value=(
                     f"Required by: 🎅 A Secret Santa\n"
-                    f"Size: {size / 1024 / 1024:.2f} MB\n"
+                    f"Size: {size_mb:.2f} MB\n"
                     f"Sent to: {download_count} members\n"
-                    f"Uploaded: <t:{int(uploaded_at)}:R>"
+                    f"Uploaded: <t:{uploaded_ts}:R>"
                 ),
                 inline=False
             )
@@ -510,15 +513,16 @@ class YearTimelinePaginator(disnake.ui.View):
             timestamp=dt.datetime.now()
         )
         
-        # Build timeline for this page
+        # Build timeline for this page (count only submissions with non-empty gift)
         timeline_text = []
         for year_val in page_years:
             archive = self.archives[year_val]
             event_data = archive.get("event", {})
             participants = event_data.get("participants", {})
             gifts = event_data.get("gift_submissions", {})
-            
-            completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
+            assignments_y = event_data.get("assignments", {})
+            gifts_count_y = sum(1 for gid in assignments_y if (gifts.get(str(gid)) or {}).get("gift"))
+            completion_rate = (gifts_count_y / len(participants) * 100) if participants else 0
             
             # Status indicator
             if completion_rate >= 90:
@@ -531,7 +535,7 @@ class YearTimelinePaginator(disnake.ui.View):
                 status = "⏳"
             
             timeline_text.append(
-                f"**{year_val}** {status} — {len(participants)} participants, {len(gifts)} gifts ({completion_rate:.0f}%)"
+                f"**{year_val}** {status} — {len(participants)} participants, {gifts_count_y} gifts ({completion_rate:.0f}%)"
             )
         
         embed.add_field(
@@ -540,12 +544,15 @@ class YearTimelinePaginator(disnake.ui.View):
             inline=False
         )
         
-        # Calculate all-time statistics
+        # Calculate all-time statistics (real gift count per year)
         total_participants = total_gifts = 0
         for y in self.sorted_years:
             event_data = self.archives[y].get("event", {})
-            total_participants += len(event_data.get("participants", {}))
-            total_gifts += len(event_data.get("gift_submissions", {}))
+            participants_y = event_data.get("participants", {})
+            gifts_y = event_data.get("gift_submissions", {})
+            assignments_y = event_data.get("assignments", {})
+            total_participants += len(participants_y)
+            total_gifts += sum(1 for gid in assignments_y if (gifts_y.get(str(gid)) or {}).get("gift"))
         avg_participants = total_participants / len(self.sorted_years) if self.sorted_years else 0
         avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
         

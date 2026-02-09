@@ -92,13 +92,14 @@ def autocomplete_safety_wrapper(func):
 
 
 def load_metadata() -> Dict:
-    """Load file metadata (synchronous - call from executor)"""
-    if METADATA_FILE.exists():
-        try:
-            return json.loads(METADATA_FILE.read_text(encoding='utf-8'))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            return {}
-    return {}
+    """Load file metadata (synchronous - call from executor). Always returns a dict."""
+    if not METADATA_FILE.exists():
+        return {}
+    try:
+        data = json.loads(METADATA_FILE.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
 
 
 def save_metadata(data: Dict, logger=None):
@@ -109,6 +110,10 @@ def save_metadata(data: Dict, logger=None):
     writes to temporary file first, then replaces original.
     This prevents corruption if process crashes during write.
     """
+    if data is None or not isinstance(data, dict):
+        if logger:
+            logger.warning("save_metadata: data is None or not a dict, skipping save")
+        return
     temp = METADATA_FILE.with_suffix('.tmp')
     try:
         temp.write_text(
@@ -139,12 +144,16 @@ class DistributeZipCog(commands.Cog):
         
         # Load metadata synchronously during init (acceptable for startup)
         self.metadata = load_metadata()
+        if not isinstance(self.metadata, dict):
+            self.metadata = {}
         self._sending_lock = asyncio.Lock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="distzip-io")
         
-        # Ensure metadata structure
-        self.metadata.setdefault("files", {})
-        self.metadata.setdefault("history", [])
+        # Ensure metadata structure (normalize in case file had null or wrong types)
+        if not isinstance(self.metadata.get("files"), dict):
+            self.metadata["files"] = {}
+        if not isinstance(self.metadata.get("history"), list):
+            self.metadata["history"] = []
         
         # Migration: Mark history entries as deleted if file no longer exists
         # This handles cases where files were deleted before the status field was added
@@ -162,8 +171,12 @@ class DistributeZipCog(commands.Cog):
     # ============ FILE UTILITIES ============
     def _find_file_by_name(self, file_name: str) -> Optional[Tuple[str, dict]]:
         """Find file by name (case-insensitive)"""
-        files = self.metadata.get("files", {})
-        file_name_lower = file_name.lower()
+        if not file_name or not isinstance(file_name, str) or not file_name.strip():
+            return None
+        files = self.metadata.get("files") or {}
+        if not isinstance(files, dict):
+            return None
+        file_name_lower = file_name.strip().lower()
         for fid, data in files.items():
             if data.get("name", "").lower() == file_name_lower:
                 return (fid, data)
@@ -171,8 +184,14 @@ class DistributeZipCog(commands.Cog):
     
     def _get_available_files(self) -> List[str]:
         """Get list of available file names"""
-        files = self.metadata.get("files", {})
-        return sorted([data.get("name", "") for data in files.values() if data.get("name")])
+        files = self.metadata.get("files") or {}
+        if not isinstance(files, dict):
+            return []
+        return sorted([
+            (data.get("name") or "").strip()
+            for data in files.values()
+            if isinstance(data, dict) and (data.get("name") or "").strip()
+        ])
     
     # ============ SAFE DISCORD API WRAPPERS ============
     async def _safe_edit_response(
@@ -372,6 +391,8 @@ class DistributeZipCog(commands.Cog):
     
     def _validate_file(self, attachment: disnake.Attachment) -> Optional[str]:
         """Validate file. Returns error message if invalid, None if valid"""
+        if not attachment:
+            return "❌ No attachment provided"
         # Allow any file type - Discord handles file distribution regardless of format
         # Size check is the main concern (Discord's 25MB limit)
         if attachment.size > MAX_FILE_SIZE:
@@ -486,12 +507,14 @@ class DistributeZipCog(commands.Cog):
             self.logger.error(f"Error creating/sending uploader summary: {e}", exc_info=True)
     
     def _create_file_embed(self, file_data: dict, color: disnake.Color = disnake.Color.green()) -> disnake.Embed:
-        """Create a standard file embed"""
-        embed = disnake.Embed(title=f"📦 {file_data.get('name')}", color=color)
+        """Create a standard file embed (handles missing/None fields)"""
+        name = file_data.get("name") if isinstance(file_data, dict) else None
+        embed = disnake.Embed(title=f"📦 {name or 'Unknown'}", color=color)
         embed.add_field(name="Required By", value="🎅 A Secret Santa", inline=False)
+        uploaded_at = file_data.get("uploaded_at", 0) if isinstance(file_data, dict) else 0
         embed.add_field(
             name="Uploaded",
-            value=f"<t:{int(file_data.get('uploaded_at', 0))}:F>",
+            value=f"<t:{int(uploaded_at) if uploaded_at else 0}:F>",
             inline=False
         )
         return embed
@@ -499,9 +522,9 @@ class DistributeZipCog(commands.Cog):
     # ============ FILE BROWSER ============
     async def _handle_file_browser(self, inter: disnake.ApplicationCommandInteraction, action_type: str, handler_func):
         """Common file browser setup"""
-        files = self.metadata.get("files", {})
-        if not files:
-            await self._safe_edit_response(inter,content="📦 No files have been uploaded yet")
+        files = self.metadata.get("files") or {}
+        if not isinstance(files, dict) or not files:
+            await self._safe_edit_response(inter, content="📦 No files have been uploaded yet")
             return
         
         embed, browser_view = create_file_browser_view(FILES_DIR, self.metadata, action_type)
@@ -564,6 +587,13 @@ class DistributeZipCog(commands.Cog):
         - Improved rate limiting (Discord-friendly)
         - Progress updates for large distributions
         """
+        if not file_path or not file_path.exists():
+            await self._safe_followup_send(
+                inter,
+                content="❌ File no longer found on disk. It may have been removed.",
+                ephemeral=True
+            )
+            return
         guild = inter.guild
         
         # If in DM, try to find a guild from the bot (use first available guild)
@@ -1027,16 +1057,16 @@ class DistributeZipCog(commands.Cog):
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
         """List all uploaded files"""
         await inter.response.defer(ephemeral=True)
-        
-        files = self.metadata.get("files", {})
-        
+        files = self.metadata.get("files") or {}
+        if not isinstance(files, dict):
+            files = {}
         if not files:
             await self._safe_edit_response(inter,content="📦 No files have been uploaded yet")
             return
         
-        # Sort by upload time (newest first)
+        # Sort by upload time (newest first); only include entries that are dicts
         sorted_files = sorted(
-            files.items(),
+            [(fid, data) for fid, data in files.items() if isinstance(data, dict)],
             key=lambda x: x[1].get("uploaded_at", 0),
             reverse=True
         )
@@ -1094,12 +1124,15 @@ class DistributeZipCog(commands.Cog):
         """Get/download a specific file"""
         await inter.response.defer(ephemeral=True)
         
-        if not file_name:
+        if not file_name or (isinstance(file_name, str) and not file_name.strip()):
             async def handler(interaction, file_id, file_data, file_path):
                 embed = self._create_file_embed(file_data)
-                file = disnake.File(file_path, filename=file_data.get("filename"))
+                fn = (file_data.get("filename") or file_data.get("name") or file_path.name if file_path else "").strip()
+                file = disnake.File(file_path, filename=fn or "file") if file_path and file_path.exists() else None
+                if not file:
+                    await interaction.response.send_message("❌ File not found on disk", ephemeral=True)
+                    return
                 await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
-            
             await self._handle_file_browser(inter, "get", handler)
             return
         
@@ -1112,15 +1145,17 @@ class DistributeZipCog(commands.Cog):
             return
         
         file_id, file_data = result
-        file_path = FILES_DIR / file_data.get("filename")
-        
-        if not file_path.exists():
-            await self._safe_edit_response(inter,content="❌ File not found on disk")
+        filename = (file_data.get("filename") or file_data.get("name") or "").strip()
+        if not filename:
+            await self._safe_edit_response(inter, content="❌ File metadata missing filename")
             return
-        
+        file_path = FILES_DIR / filename
+        if not file_path.exists():
+            await self._safe_edit_response(inter, content="❌ File not found on disk")
+            return
         embed = self._create_file_embed(file_data)
-        file = disnake.File(file_path, filename=file_data.get("filename"))
-        await self._safe_edit_response(inter,embed=embed, file=file)
+        file = disnake.File(file_path, filename=filename)
+        await self._safe_edit_response(inter, embed=embed, file=file)
 
     @distributezip.sub_command(name="remove", description="Remove a file (moderator only, use browse for easier selection)")
     @mod_check()
@@ -1165,8 +1200,11 @@ class DistributeZipCog(commands.Cog):
             return
         
         file_id, file_data = result
-        file_path = FILES_DIR / file_data.get("filename")
-        
+        filename = (file_data.get("filename") or file_data.get("name") or "").strip()
+        if not filename:
+            await self._safe_edit_response(inter, content="❌ File metadata missing filename")
+            return
+        file_path = FILES_DIR / filename
         try:
             if file_path.exists():
                 file_path.unlink()

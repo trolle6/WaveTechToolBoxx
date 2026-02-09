@@ -94,8 +94,9 @@ from .secret_santa_checks import mod_check, participant_check, admin_check, safe
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
 # How often to re-check for scheduled shuffle/stop: when idle we sleep this long; when we have a
-# schedule we sleep until the scheduled time but at most this long (so we re-check if the event is edited).
-SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 3600  # 1 hour
+# When idle (no schedule), re-check this often. When a schedule exists, we sleep until that time but at most this long.
+# No per-tick logging — only log when actually running a scheduled shuffle/stop.
+SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 900  # 15 minutes
 
 # Discord locale (language) -> IANA timezone for schedule parsing when user doesn't set schedule_timezone.
 # Discord doesn't provide timezone, so this is a best-effort guess from their app language.
@@ -571,11 +572,10 @@ class SecretSantaCog(commands.Cog):
             return None
         
         user_id = str(inter.author.id)
-        # COMBINED CHECK: Get participants once and check membership
-        if user_id not in event.get("participants", {}):
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict) or user_id not in participants:
             await self._safe_edit_response(inter, content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
             return None
-        
         return (event, user_id)
     
     async def _validate_participant_with_assignment(self, inter: disnake.ApplicationCommandInteraction) -> Optional[tuple]:
@@ -590,15 +590,14 @@ class SecretSantaCog(commands.Cog):
             return None
         
         user_id = str(inter.author.id)
-        participants = event.get("participants", {})
-        assignments = event.get("assignments", {})
-        
-        # Check participant status
+        participants = event.get("participants") or {}
+        assignments = event.get("assignments") or {}
+        if not isinstance(participants, dict):
+            await self._safe_edit_response(inter, content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
+            return None
         if user_id not in participants:
             await self._safe_edit_response(inter, content="Hmm, it doesn't look like you're signed up for Secret Santa this year!")
             return None
-        
-        # Check assignment status
         receiver_id = assignments.get(user_id)
         if not receiver_id:
             embed = self._error_embed(
@@ -635,7 +634,8 @@ class SecretSantaCog(commands.Cog):
     
     async def _check_assignment(self, inter: disnake.ApplicationCommandInteraction, event: dict, user_id: str) -> Optional[str]:
         """Check if user has assignment. Returns receiver_id if valid, None otherwise (sends error response)"""
-        if user_id not in event.get("assignments", {}):
+        assignments = event.get("assignments") or {}
+        if not isinstance(assignments, dict) or user_id not in assignments:
             embed = self._error_embed(
                 title="🎅 Hold your reindeer!",
                 description="You don't have a giftee yet! The organizer still needs to run the shuffle. Good things come to those who wait!"
@@ -1224,10 +1224,14 @@ class SecretSantaCog(commands.Cog):
         """Start new Secret Santa event (optionally schedule automatic shuffle)"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
-
+        if not inter.guild:
+            await self._safe_edit_response(inter, content="❌ Use this command in a server.")
+            return
+        if not message:
+            await self._safe_edit_response(inter, content="❌ No message provided.")
+            return
         # Get message ID and validate it's in this guild
         msg_id = message.id
-        
         if message.guild and message.guild.id != inter.guild.id:
             await self._safe_edit_response(inter, content="❌ Message must be from this server")
             return
@@ -1270,20 +1274,21 @@ class SecretSantaCog(commands.Cog):
             # Don't block - let user continue immediately, warning is already shown
             # The warning embed is sufficient, no need to force a delay
 
-        # Collect participants from the message reactions
+        # Collect participants from the message reactions (may be empty if no one reacted yet)
         participants = {}
-
-        # Collect users who reacted
-        for reaction in message.reactions:
-            async for user in reaction.users():
-                if user.bot:
-                    continue
-
-                user_id_str = str(user.id)
-                if user_id_str not in participants:
-                    member = inter.guild.get_member(user.id)
-                    name = member.display_name if member else user.name
-                    participants[user_id_str] = name
+        try:
+            reactions = getattr(message, "reactions", None) or []
+            for reaction in reactions:
+                async for user in reaction.users():
+                    if getattr(user, "bot", True):
+                        continue
+                    user_id_str = str(user.id)
+                    if user_id_str not in participants:
+                        member = inter.guild.get_member(user.id)
+                        name = member.display_name if member else getattr(user, "name", f"User {user.id}")
+                        participants[user_id_str] = name
+        except Exception as e:
+            self.logger.warning(f"Could not load reactions from message: {e}")
 
         # Resolve timezone: explicit schedule_timezone, or guess from Discord locale (language)
         tz_info = None
@@ -1539,9 +1544,14 @@ class SecretSantaCog(commands.Cog):
                     await self._safe_edit_response(inter, content=error_msg)
                 return False, error_msg
 
-            # Convert participant IDs to integers (safe access - event is validated)
-            participants_dict = event.get("participants", {})
-            participants = [int(uid) for uid in participants_dict]
+            # Convert participant IDs to integers (safe: skip malformed keys)
+            participants_dict = event.get("participants", {}) or {}
+            participants = []
+            for uid in participants_dict:
+                try:
+                    participants.append(int(uid))
+                except (ValueError, TypeError):
+                    continue
 
             if len(participants) < 2:
                 error_msg = "❌ Need at least 2 participants"
@@ -1716,12 +1726,18 @@ class SecretSantaCog(commands.Cog):
         # Release lock before sending DMs (they can take time)
         # Event is already cleared, so concurrent stops will see no event and fail
         
-        # Send thank you message to all participants
-        participants = event.get("participants", {})
+        # Send thank you message to all participants (safe uid conversion)
+        participants = event.get("participants", {}) or {}
         if participants:
             end_msg = self._get_event_end_message(year)
-            dm_tasks = [self._send_dm(int(uid), end_msg) for uid in participants]
-            await asyncio.gather(*dm_tasks, return_exceptions=True)
+            dm_tasks = []
+            for uid in participants:
+                try:
+                    dm_tasks.append(self._send_dm(int(uid), end_msg))
+                except (ValueError, TypeError):
+                    continue
+            if dm_tasks:
+                await asyncio.gather(*dm_tasks, return_exceptions=True)
         
         # Notify Discord log channel
         if hasattr(self.bot, 'send_to_discord_log'):
@@ -1895,9 +1911,8 @@ class SecretSantaCog(commands.Cog):
         event = await self._require_event(inter)
         if not event:
             return
-
-        participants = event.get("participants", {})
-        if not participants:
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict) or not participants:
             await self._safe_edit_response(inter, content="❌ No participants yet")
             return
 
@@ -2609,7 +2624,11 @@ class SecretSantaCog(commands.Cog):
         for giver_id, submission in list(submissions.items())[:10]:
             giver_name = participants.get(giver_id, f"User {giver_id}")
             receiver_name = submission.get("receiver_name", "Unknown")
-            gift = submission["gift"][:200] + "..." if len(submission["gift"]) > 200 else submission["gift"]
+            raw_gift = submission.get("gift")
+            if raw_gift and isinstance(raw_gift, str):
+                gift = raw_gift[:200] + "..." if len(raw_gift) > 200 else raw_gift
+            else:
+                gift = "*(not yet submitted)*"
 
             # Get consistent emojis for each person this year
             giver_emoji = emoji_mapping.get(giver_id, "🎁")
@@ -2742,10 +2761,10 @@ class SecretSantaCog(commands.Cog):
                 # Few assignments - show all on one page (no buttons needed)
                 gifts = event_data.get("gift_submissions", {})
                 has_assignments = bool(assignments)
-                has_gifts = bool(gifts)
-                
+                gifts_count = sum(1 for gid in (assignments or {}) if ((gifts or {}).get(str(gid)) or {}).get("gift"))
+                has_gifts = gifts_count > 0
                 if has_gifts:
-                    description = f"**{len(participants)}** participants, **{len(gifts)}** gifts exchanged"
+                    description = f"**{len(participants)}** participants, **{gifts_count}** gifts exchanged"
                 elif has_assignments:
                     description = f"**{len(participants)}** participants, assignments made but no gifts recorded"
                 else:
@@ -2773,32 +2792,31 @@ class SecretSantaCog(commands.Cog):
                         
                         submission = gifts.get(str(giver_id))
                         if submission and isinstance(submission, dict):
-                            gift_desc = submission.get("gift", "No description provided")
-                            if isinstance(gift_desc, str) and len(gift_desc) > 60:
-                                gift_desc = gift_desc[:57] + "..."
-                            elif not isinstance(gift_desc, str):
-                                gift_desc = "Invalid gift description"
-                            
+                            raw = submission.get("gift")
+                            if isinstance(raw, str) and raw.strip():
+                                gift_desc = raw[:57] + "..." if len(raw) > 60 else raw
+                            else:
+                                gift_desc = "(not yet submitted)"
                             exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
                             exchange_lines.append(f"    ⤷ *{gift_desc}*")
                         else:
                             exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *(no gift recorded)*")
                     
-                    gifts_count = len([g for g in gifts.keys() if g in [str(a) for a in assignments.keys()]])
                     embed.add_field(
                         name=f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)",
                         value="\n".join(exchange_lines),
                         inline=False
                     )
                 else:
+                    gifts_count = 0
                     status_text = f"⏸️ Signup completed ({len(participants)} joined)\n❌ No assignments made\n❌ No gifts recorded"
                     embed.add_field(name="📝 Event Status", value=status_text, inline=False)
 
-                # Statistics
-                completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
+                # Statistics (count only submissions with non-empty gift)
+                completion_rate = (gifts_count / len(participants) * 100) if participants else 0
                 embed.add_field(
                     name="📊 Statistics",
-                    value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {len(gifts)}",
+                    value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {gifts_count}",
                     inline=True
                 )
 
@@ -2821,15 +2839,16 @@ class SecretSantaCog(commands.Cog):
                     timestamp=dt.datetime.now()
                 )
 
-                # Create year timeline
+                # Create year timeline (count only submissions with non-empty gift)
                 timeline_text = []
                 for year_val in sorted_years:
                     archive = archives[year_val]
                     event_data = archive.get("event", {})
                     participants = event_data.get("participants", {})
                     gifts = event_data.get("gift_submissions", {})
-
-                    completion_rate = (len(gifts) / len(participants) * 100) if participants else 0
+                    assignments_y = event_data.get("assignments", {})
+                    gifts_count_y = sum(1 for gid in assignments_y if (gifts.get(str(gid)) or {}).get("gift"))
+                    completion_rate = (gifts_count_y / len(participants) * 100) if participants else 0
 
                     # Status indicator
                     if completion_rate >= 90:
@@ -2842,7 +2861,7 @@ class SecretSantaCog(commands.Cog):
                         status = "⏳"
 
                     timeline_text.append(
-                        f"**{year_val}** {status} — {len(participants)} participants, {len(gifts)} gifts ({completion_rate:.0f}%)"
+                        f"**{year_val}** {status} — {len(participants)} participants, {gifts_count_y} gifts ({completion_rate:.0f}%)"
                     )
 
                 embed.add_field(
@@ -2851,12 +2870,15 @@ class SecretSantaCog(commands.Cog):
                     inline=False
                 )
 
-                # Calculate all-time statistics
+                # Calculate all-time statistics (real gift count per year)
                 total_participants = total_gifts = 0
                 for y in sorted_years:
                     event_data = archives[y].get("event", {})
-                    total_participants += len(event_data.get("participants", {}))
-                    total_gifts += len(event_data.get("gift_submissions", {}))
+                    participants_y = event_data.get("participants", {})
+                    gifts_y = event_data.get("gift_submissions", {})
+                    assignments_y = event_data.get("assignments", {})
+                    total_participants += len(participants_y)
+                    total_gifts += sum(1 for gid in assignments_y if (gifts_y.get(str(gid)) or {}).get("gift"))
                 avg_participants = total_participants / len(sorted_years) if sorted_years else 0
                 avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
 
@@ -2927,11 +2949,14 @@ class SecretSantaCog(commands.Cog):
             gave_to_id = assignments.get(user_id)
             gave_to_name = participants.get(str(gave_to_id), "Unknown") if gave_to_id else None
             
-            # Find what gift they gave
+            # Find what gift they gave (normalize: only None or non-empty string for display safety)
             gift_data = gifts.get(user_id)
             gift_desc = None
             if gift_data and isinstance(gift_data, dict):
-                gift_desc = gift_data.get("gift", "No description")
+                raw = gift_data.get("gift")
+                if isinstance(raw, str) and raw.strip():
+                    gift_desc = raw
+                # else leave None so display shows "(no gift recorded)"
             
             # Find who gave to them
             received_from_id = None
@@ -2942,11 +2967,11 @@ class SecretSantaCog(commands.Cog):
                 if str(receiver_id) == user_id:
                     received_from_id = giver_id
                     received_from_name = participants.get(giver_id, "Unknown")
-                    
-                    # Find gift they received
                     giver_gift = gifts.get(giver_id)
                     if giver_gift and isinstance(giver_gift, dict):
-                        received_gift = giver_gift.get("gift", "No description")
+                        raw = giver_gift.get("gift")
+                        if isinstance(raw, str) and raw.strip():
+                            received_gift = raw
                     break
             
             participations.append({
@@ -2988,7 +3013,7 @@ class SecretSantaCog(commands.Cog):
             if participation["gave_to_name"]:
                 gave_to_mention = f"<@{participation['gave_to_id']}>" if participation['gave_to_id'] else participation['gave_to_name']
                 year_lines.append(f"🎁 **Gave to:** {gave_to_mention}")
-                if participation["gift_given"]:
+                if participation["gift_given"] and isinstance(participation["gift_given"], str):
                     gift_short = participation["gift_given"][:80] + "..." if len(participation["gift_given"]) > 80 else participation["gift_given"]
                     year_lines.append(f"   └─ *{gift_short}*")
                 else:
@@ -3000,7 +3025,7 @@ class SecretSantaCog(commands.Cog):
             if participation["received_from_name"]:
                 received_from_mention = f"<@{participation['received_from_id']}>" if participation['received_from_id'] else participation['received_from_name']
                 year_lines.append(f"🎅 **Received from:** {received_from_mention}")
-                if participation["gift_received"]:
+                if participation["gift_received"] and isinstance(participation["gift_received"], str):
                     gift_short = participation["gift_received"][:80] + "..." if len(participation["gift_received"]) > 80 else participation["gift_received"]
                     year_lines.append(f"   └─ *{gift_short}*")
                 else:
@@ -3489,15 +3514,18 @@ class SecretSantaCog(commands.Cog):
             except Exception:
                 pass
 
-        # Add participant (ensure participants dict exists in event, then modify it)
+        # Add participant only if event is still current (re-check inside lock)
         async with self._lock:
-            if "participants" not in event:
-                event["participants"] = {}
-            event["participants"][user_id] = name
+            current = self.state.get("current_event")
+            if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
+                return  # Event was stopped or is different
+            if "participants" not in current:
+                current["participants"] = {}
+            current["participants"][user_id] = name
             await self._save_async()
 
         # Send confirmation (same message as /ss start)
-        join_msg = self._get_join_message(self.state['current_year'])
+        join_msg = self._get_join_message(self.state.get("current_year", dt.date.today().year))
         await self._send_dm(payload.user_id, join_msg)
 
     @commands.Cog.listener()
@@ -3536,14 +3564,17 @@ class SecretSantaCog(commands.Cog):
                 if has_reaction:
                     break
 
-            # Remove if no reactions (modify event's participants dict)
+            # Remove if no reactions (only if event is still current and active)
             if not has_reaction:
                 async with self._lock:
-                    if "participants" in event:
-                        event["participants"].pop(user_id, None)
+                    current = self.state.get("current_event")
+                    if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
+                        return  # Event was stopped or is different, don't modify
+                    if "participants" in current:
+                        current["participants"].pop(user_id, None)
                     await self._save_async()
 
-                leave_msg = self._get_leave_message(self.state['current_year'])
+                leave_msg = self._get_leave_message(self.state.get("current_year", dt.date.today().year))
                 await self._send_dm(payload.user_id, leave_msg)
 
         except Exception as e:

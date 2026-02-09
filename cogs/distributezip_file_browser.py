@@ -16,9 +16,8 @@ def create_file_browser_view(
     action_type: str = "get"
 ) -> Tuple[disnake.Embed, Optional['FileBrowserSelectView']]:
     """Create a file browser view for file selection"""
-    files = metadata.get("files", {})
-    
-    if not files:
+    files = metadata.get("files") if isinstance(metadata, dict) else None
+    if not isinstance(files, dict) or not files:
         embed = disnake.Embed(
             title="📁 File Browser",
             description="No files available",
@@ -80,16 +79,18 @@ class FileSelectMenu(disnake.ui.Select):
         file_id = self.values[0]
         file_data = view.metadata["files"].get(file_id)
         
-        if not file_data:
+        if not file_data or not isinstance(file_data, dict):
             await inter.response.send_message("❌ File not found in metadata", ephemeral=True)
             return
-        
-        filename = file_data.get("filename")
+        filename = (file_data.get("filename") or file_data.get("name") or "").strip()
+        if not filename:
+            await inter.response.send_message("❌ File metadata missing filename", ephemeral=True)
+            return
         file_path = view.files_dir / filename
-        
         if not file_path.exists():
+            display_name = file_data.get("name") or filename
             await inter.response.send_message(
-                f"❌ File '{file_data.get('name')}' not found on disk",
+                f"❌ File '{display_name}' not found on disk",
                 ephemeral=True
             )
             return
@@ -118,8 +119,11 @@ class FileBrowserSelectView(disnake.ui.View):
         # Create select options
         options = []
         for file_id, file_data in display_files:
-            file_name = file_data.get("name", "Unknown")
-            size_mb = file_data.get("size", 0) / 1024 / 1024
+            if not isinstance(file_data, dict):
+                continue
+            file_name = (file_data.get("name") or "Unknown").strip()
+            size_val = file_data.get("size")
+            size_mb = (size_val / 1024 / 1024) if isinstance(size_val, (int, float)) and size_val is not None else 0.0
             
             # Truncate long names (Discord label limit: 100 chars)
             display_name = file_name[:90] + "..." if len(file_name) > 90 else file_name

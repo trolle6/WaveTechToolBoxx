@@ -211,19 +211,18 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
                     giver_name = assignment.get("giver_name", "Unknown")
                     receiver_id = assignment.get("receiver_id", "")
                     receiver_name = assignment.get("receiver_name", "Unknown")
-                    gift = assignment.get("gift", "No description")
-                    
-                    participants[giver_id] = giver_name
-                    if receiver_id:
-                        participants[receiver_id] = receiver_name
-                    
-                    if gift and gift != "No description":
+                    gift = assignment.get("gift")
+                    # Only include in gift_submissions when gift is a non-empty string (handles null/empty/legacy)
+                    if isinstance(gift, str) and gift.strip():
                         gifts[giver_id] = {
                             "gift": gift,
                             "receiver_name": receiver_name,
                             "receiver_id": receiver_id
                         }
                     
+                    participants[giver_id] = giver_name
+                    if receiver_id:
+                        participants[receiver_id] = receiver_name
                     if giver_id and receiver_id:
                         assignments_map[giver_id] = receiver_id
                 

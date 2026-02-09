@@ -299,8 +299,9 @@ class VoiceProcessingCog(commands.Cog):
         guild_id = member.guild.id
         user_id = member.id
         
-        # Check role requirement
-        if self.tts_role_id and not any(role.id == self.tts_role_id for role in member.roles):
+        # Check role requirement (guard None/empty roles)
+        roles = getattr(member, "roles", None) or []
+        if self.tts_role_id and not any(getattr(r, "id", None) == self.tts_role_id for r in roles):
             return self.default_voice
         
         # Get or assign voice for this user in this guild (session-based)
@@ -554,6 +555,8 @@ class VoiceProcessingCog(commands.Cog):
         Returns:
             Truncated text ending at sentence boundary if possible, otherwise truncated with "..."
         """
+        if not text or max_length <= 0:
+            return "" if not text else text
         truncated = text[:max_length]
         last_period = truncated.rfind('.')
         last_exclamation = truncated.rfind('!')
@@ -595,6 +598,8 @@ class VoiceProcessingCog(commands.Cog):
         
         OpenAI TTS API supports up to 4096 characters per request.
         """
+        if text is None:
+            return ""
         original_length = len(text)
         # Normalize excessive formatting: multiple newlines, dashes, etc.
         # Pre-compiled patterns for better performance (used in every message)
@@ -646,6 +651,8 @@ class VoiceProcessingCog(commands.Cog):
     
     def _ensure_text_length(self, text: str, max_length: int = 4096) -> str:
         """Ensure text doesn't exceed max_length, truncating if needed"""
+        if not text:
+            return ""
         if len(text) <= max_length:
             return text
         return self._truncate_at_sentence_boundary(text, max_length)
@@ -667,6 +674,8 @@ class VoiceProcessingCog(commands.Cog):
         Returns:
             List of text chunks, each <= max_chunk_size, split at sentence boundaries when possible
         """
+        if not text:
+            return []
         original_length = len(text)
         self.logger.debug(f"Splitting text: original length={original_length}, max_chunk_size={max_chunk_size}")
         
@@ -721,6 +730,8 @@ class VoiceProcessingCog(commands.Cog):
 
     async def _generate_tts(self, text: str, voice: str = None) -> Optional[bytes]:
         """Generate TTS audio"""
+        if not text or not (isinstance(text, str) and text.strip()):
+            return None
         if not await self.circuit_breaker.can_attempt():
             return None
 
@@ -1113,7 +1124,13 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.warning("Failed to connect to voice")
                         if next_gen_task:
                             next_gen_task.cancel()
-                        prepared_item = None  # Clear prepared item on error
+                        # Re-queue prepared item so it isn't lost (pipeline had removed it from queue)
+                        if prepared_item:
+                            try:
+                                state.queue.put_nowait(prepared_item)
+                            except asyncio.QueueFull:
+                                state.stats["dropped"] += 1
+                            prepared_item = None
                         continue
 
                     # Play audio
@@ -1127,6 +1144,11 @@ class VoiceProcessingCog(commands.Cog):
                             await next_gen_task
                         except Exception as e:
                             self.logger.error(f"Pipeline generation error: {e}", exc_info=True)
+                            if prepared_item:
+                                try:
+                                    state.queue.put_nowait(prepared_item)
+                                except asyncio.QueueFull:
+                                    state.stats["dropped"] += 1
                             prepared_item = None  # Clear on error
                     
                     if playback_success:
@@ -1149,6 +1171,11 @@ class VoiceProcessingCog(commands.Cog):
                 except Exception as e:
                     self.logger.error(f"Queue processing error: {e}", exc_info=True)
                     state.stats["errors"] += 1
+                    if prepared_item:
+                        try:
+                            state.queue.put_nowait(prepared_item)
+                        except asyncio.QueueFull:
+                            state.stats["dropped"] += 1
                     prepared_item = None  # Clear prepared item on error
                     await asyncio.sleep(1)
 
@@ -1186,9 +1213,10 @@ class VoiceProcessingCog(commands.Cog):
         if not message.author.voice or not message.author.voice.channel:
             return False
 
-        # Check role
+        # Check role (guard None/empty roles)
+        author_roles = getattr(message.author, "roles", None) or []
         if self.tts_role_id:
-            if not any(role.id == self.tts_role_id for role in message.author.roles):
+            if not any(getattr(r, "id", None) == self.tts_role_id for r in author_roles):
                 return False
 
         return True
@@ -1298,8 +1326,9 @@ class VoiceProcessingCog(commands.Cog):
         """Handle voice state changes"""
         if member.bot:
             return
-
-        guild = member.guild
+        guild = getattr(member, "guild", None)
+        if not guild:
+            return
         
         # User left voice channel
         if before.channel and not after.channel:
@@ -1587,7 +1616,12 @@ class VoiceProcessingCog(commands.Cog):
     async def tts_disconnect(self, inter: disnake.ApplicationCommandInteraction):
         """Force disconnect"""
         await inter.response.defer(ephemeral=True)
-
+        if not self.enabled:
+            await inter.edit_original_response(content="❌ TTS is disabled")
+            return
+        if not inter.guild:
+            await inter.edit_original_response(content="❌ Use this in a server")
+            return
         if not inter.guild.voice_client:
             await inter.edit_original_response(content="❌ Not connected")
             return
@@ -1604,7 +1638,12 @@ class VoiceProcessingCog(commands.Cog):
     async def tts_clear(self, inter: disnake.ApplicationCommandInteraction):
         """Clear queue"""
         await inter.response.defer(ephemeral=True)
-
+        if not self.enabled:
+            await inter.edit_original_response(content="❌ TTS is disabled")
+            return
+        if not inter.guild:
+            await inter.edit_original_response(content="❌ Use this in a server")
+            return
         async with self._state_lock:
             if inter.guild.id in self.guild_states:
                 state = self.guild_states[inter.guild.id]
@@ -1621,7 +1660,12 @@ class VoiceProcessingCog(commands.Cog):
     async def tts_status(self, inter: disnake.ApplicationCommandInteraction):
         """Check voice status"""
         await inter.response.defer(ephemeral=True)
-
+        if not self.enabled:
+            await inter.edit_original_response(content="❌ TTS is disabled")
+            return
+        if not inter.guild:
+            await inter.edit_original_response(content="❌ Use this in a server")
+            return
         if not inter.guild.voice_client:
             await inter.edit_original_response(content="❌ Bot not connected to voice")
             return
@@ -1663,7 +1707,9 @@ class VoiceProcessingCog(commands.Cog):
     async def tts_diagnostics(self, inter: disnake.ApplicationCommandInteraction):
         """Check system diagnostics"""
         await inter.response.defer(ephemeral=True)
-        
+        if not self.enabled:
+            await inter.edit_original_response(content="❌ TTS is disabled")
+            return
         embed = disnake.Embed(title="🔍 TTS System Diagnostics", color=disnake.Color.blue())
         
         # Check FFmpeg
