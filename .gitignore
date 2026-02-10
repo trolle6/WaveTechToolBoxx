@@ -34,6 +34,8 @@ test_*.py
 
 # Local notes and reminders (not for version control)
 things todo and remember in the future.txt
+features_done_and_logic.txt
+CODEBASE_CHECK.md
 
 # DeepSeek prompt files (local development only)
 *DEEPSEEK*.md

@@ -2,15 +2,16 @@
 Owner Utilities - Centralized Reference for Bot Owner
 
 This module provides a single source of truth for owner-only commands.
-Use this to restrict commands to only the bot owner (trolle6).
+Only the bot owner can use commands decorated with owner_check().
+Admins, moderators, and members are rejected.
+
+Identification (in order of use):
+  1. If config has BOT_OWNER_USER_ID (integer), use inter.author.id == that (cannot be impersonated).
+  2. Else use BOT_OWNER_USERNAME from config or fallback "trolle6" (username can be changed by anyone).
 
 USAGE:
-    from .owner_utils import owner_check, OWNER_USERNAME
-    
-    @commands.check(owner_check())
-    async def my_command(self, inter):
-        # Only trolle6 can use this
-        pass
+    from .owner_utils import owner_check, get_owner_mention, is_owner
+    @owner_check()  # or inline: if not is_owner(inter): return
 """
 
 from __future__ import annotations
@@ -18,31 +19,38 @@ from __future__ import annotations
 import disnake
 from disnake.ext import commands
 
-# Centralized owner username - change this to update all owner restrictions
-OWNER_USERNAME = "trolle6"
+OWNER_USERNAME = "trolle6"  # Fallback if BOT_OWNER_USER_ID not set
+
+
+def _resolve_owner_check(inter: "disnake.ApplicationCommandInteraction") -> bool:
+    """True if inter.author is the configured bot owner (ID takes precedence over username)."""
+    config = getattr(inter.bot, "config", None)
+    owner_id = getattr(config, "BOT_OWNER_USER_ID", None) if config else None
+    if owner_id is not None and isinstance(owner_id, int):
+        return inter.author.id == owner_id
+    username = getattr(config, "BOT_OWNER_USERNAME", OWNER_USERNAME) if config else OWNER_USERNAME
+    if isinstance(username, str):
+        return inter.author.name.lower() == username.lower()
+    return False
 
 
 def owner_check():
-    """Check if user is the bot owner (trolle6)"""
+    """Decorator: only the bot owner can use this command. Admins/mods/members are rejected."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        user_username = inter.author.name.lower()
-        is_owner = user_username == OWNER_USERNAME.lower()
-        
-        if not is_owner and hasattr(inter.bot, 'logger'):
+        ok = _resolve_owner_check(inter)
+        if not ok and hasattr(inter.bot, "logger"):
             inter.bot.logger.warning(
                 f"User {inter.author.name} ({inter.author.id}) attempted to use owner-only command"
             )
-        
-        return is_owner
-    
+        return ok
     return commands.check(predicate)
 
 
 def is_owner(inter: "disnake.ApplicationCommandInteraction") -> bool:
-    """Check if the interaction author is the bot owner"""
-    return inter.author.name.lower() == OWNER_USERNAME.lower()
+    """Return True if the interaction author is the bot owner (for inline checks)."""
+    return _resolve_owner_check(inter)
 
 
 def get_owner_mention() -> str:
-    """Get a formatted mention of the owner username"""
-    return f"**{OWNER_USERNAME}**"
+    """Get a formatted mention of the owner (username from config or fallback)."""
+    return f"**{OWNER_USERNAME}**"  # Could be extended to accept bot and use config.BOT_OWNER_USERNAME

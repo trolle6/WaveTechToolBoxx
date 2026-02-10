@@ -89,7 +89,7 @@ from .secret_santa_views import (
     SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
     CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
 )
-from .secret_santa_checks import mod_check, participant_check, admin_check, safe_display_name
+from .secret_santa_checks import participant_check, safe_display_name
 
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
@@ -431,7 +431,7 @@ class SecretSantaCog(commands.Cog):
     def _get_current_event(self) -> Optional[dict]:
         """Get active event with validation. Returns event dict if active, None otherwise"""
         event = self.state.get("current_event")
-        return event if event and event.get("active") else None
+        return event if isinstance(event, dict) and event.get("active") else None
     
     def _get_available_years(self) -> List[int]:
         """Get list of available years from archive directory - excludes backup files (synchronous)"""
@@ -540,12 +540,15 @@ class SecretSantaCog(commands.Cog):
                 return []
             
             user_id = str(inter.author.id)
-            if user_id not in event.get("participants", {}):
+            participants = event.get("participants") or {}
+            if not isinstance(participants, dict) or user_id not in participants:
                 return []
-            
-            wishlists = event.get("wishlists", {})
-            user_wishlist = wishlists.get(user_id, [])
-            
+            wishlists = event.get("wishlists") or {}
+            if not isinstance(wishlists, dict):
+                return []
+            user_wishlist = wishlists.get(user_id)
+            if not isinstance(user_wishlist, list):
+                user_wishlist = []
             if not user_wishlist:
                 return []
             
@@ -642,24 +645,44 @@ class SecretSantaCog(commands.Cog):
             )
             await self._safe_edit_response(inter, embed=embed)
             return None
-        # Safe access - event is validated and assignments exist (checked above)
-        assignments = event.get("assignments", {})
         return assignments.get(user_id)
-    
+
     def _find_santa_for_giftee(self, event: dict, giftee_id: str) -> Optional[int]:
         """Find the Santa (giver) for a given giftee (receiver). Returns santa_id as int, or None"""
-        return next((int(giver) for giver, receiver in event.get("assignments", {}).items() if receiver == giftee_id), None)
+        assignments = event.get("assignments") or {}
+        if not isinstance(assignments, dict):
+            return None
+        for giver, receiver in assignments.items():
+            if receiver == giftee_id:
+                try:
+                    return int(giver)
+                except (TypeError, ValueError):
+                    continue
+        return None
     
-    async def _save_communication(self, event: dict, santa_id: str, giftee_id: str, msg_type: str, 
+    # Comms flow: ask_giftee / reply_santa / _process_reply → _save_communication → event["communications"].
+    # structure: { santa_id: { "giftee_id": giftee_id, "thread": [ { type, message, rewritten, timestamp } ] } }.
+    # On stop, full event (including communications) is archived to archive/YYYY.json. view_comms reads active event only.
+    async def _save_communication(self, event: dict, santa_id: str, giftee_id: str, msg_type: str,
                                   message: str, rewritten: str):
-        """Save communication thread entry"""
+        """Save communication thread entry. comms keyed by santa_id; each has giftee_id and thread list."""
         async with self._lock:
-            comms = event.setdefault("communications", {})
-            thread = comms.setdefault(santa_id, {"giftee_id": giftee_id, "thread": []})
-            thread["thread"].append({
-                "type": msg_type,
-                "message": message,
-                "rewritten": rewritten,
+            comms = event.get("communications")
+            if not isinstance(comms, dict):
+                comms = {}
+                event["communications"] = comms
+            entry = comms.get(santa_id)
+            if not isinstance(entry, dict):
+                entry = {"giftee_id": giftee_id, "thread": []}
+                comms[santa_id] = entry
+            thread_list = entry.get("thread")
+            if not isinstance(thread_list, list):
+                thread_list = []
+                entry["thread"] = thread_list
+            thread_list.append({
+                "type": str(msg_type) if msg_type else "message",
+                "message": str(message) if message is not None else "",
+                "rewritten": str(rewritten) if rewritten is not None else "",
                 "timestamp": time.time()
             })
             await self._save_async()
@@ -1077,21 +1100,18 @@ class SecretSantaCog(commands.Cog):
             return False
 
     async def _process_reply(self, inter: disnake.ModalInteraction, reply: str, santa_id: int, giftee_id: int):
-        """Process a reply from giftee to santa"""
+        """Process a reply from giftee to santa (called from Reply button modal or could be reused elsewhere)."""
+        year = self.state.get("current_year", dt.date.today().year)
         try:
-            # Send reply to santa
-            reply_msg = self._format_dm_reply(reply, self.state['current_year'])
+            reply_msg = self._format_dm_reply(reply, year)
             success = await self._send_dm(santa_id, reply_msg)
 
             if success:
-                # Save communication
                 event = self._get_current_event()
                 if event:
                     await self._save_communication(event, str(santa_id), str(giftee_id), "reply", reply, reply)
-
-                # Success embed for giftee
                 embed = self._success_embed(
-                    title=f"💌 Secret Santa {self.state['current_year']} - REPLY DELIVERED! 💌",
+                    title=f"💌 Secret Santa {year} - REPLY DELIVERED! 💌",
                     description="Your message is now in your Santa's hands! ✨\n\nThey'll be thrilled to get your response. Good hints make for great gifts! 🎁",
                     footer=""
                 )
@@ -1112,11 +1132,10 @@ class SecretSantaCog(commands.Cog):
         """
         Create consistent emoji mapping for all participants.
         Each user gets the same emoji across ALL years based on their user ID hash.
-        This makes it easy to track a specific user's participation across history.
         """
-        # Christmas emoji pool for participants
+        if not isinstance(participants, dict):
+            participants = {}
         emoji_pattern = ["🎁", "🎄", "🎅", "⭐", "❄️", "☃️", "🦌", "🔔", "🍪", "🥛", "🕯️", "✨", "🌟", "🎈", "🧸", "🍭", "🎂", "🎪", "🎨", "🎯"]
-        
         emoji_mapping = {}
         for participant_id in participants.keys():
             # Use hash of user ID to get consistent emoji across all years
@@ -1200,6 +1219,12 @@ class SecretSantaCog(commands.Cog):
         """Secret Santa commands"""
         pass
 
+    # START command – full logic path:
+    # 1. Defer ephemeral → 2. Require guild + message → 3. Message must have guild and same guild as inter
+    # 4. Optional: warn if current_year archive already exists (continue anyway) → 5. Collect participants from message.reactions (safe)
+    # 6. Resolve timezone (param or locale) → 7. Parse shuffle_at / end_at if set; validate future and stop > shuffle
+    # 8. Build new_event dict → 9. Under lock: if event already active return; else state.current_year + state.current_event = new_event; save
+    # 10. Send join DMs to participants → 11. Edit response with success + schedule info → 12. Optional Discord log
     @ss_root.sub_command(name="start", description="Start a Secret Santa event")
     @owner_check()
     async def ss_start(
@@ -1229,10 +1254,13 @@ class SecretSantaCog(commands.Cog):
         if not message:
             await self._safe_edit_response(inter, content="❌ No message provided.")
             return
-        # Get message ID and validate it's in this guild
         msg_id = message.id
-        if message.guild and message.guild.id != inter.guild.id:
-            await self._safe_edit_response(inter, content="❌ Message must be from this server")
+        msg_guild = getattr(message, "guild", None)
+        if not msg_guild:
+            await self._safe_edit_response(inter, content="❌ Message must be from a server channel (not DMs).")
+            return
+        if msg_guild.id != inter.guild.id:
+            await self._safe_edit_response(inter, content="❌ Message must be from this server.")
             return
 
         # Get role ID if provided
@@ -1587,9 +1615,8 @@ class SecretSantaCog(commands.Cog):
 
         # Send assignment DMs
         dm_tasks = []
-        # Safe access - event is validated and participants dict exists
         participants_dict = event.get("participants", {})
-        current_year = self.state['current_year']
+        current_year = self.state.get("current_year", dt.date.today().year)
         for giver, receiver in assignments.items():
             receiver_name = participants_dict.get(str(receiver), f"User {receiver}")
             msg = self._get_assignment_message(current_year, receiver, receiver_name)
@@ -1807,7 +1834,7 @@ class SecretSantaCog(commands.Cog):
             pass
 
     @ss_root.sub_command(name="stop", description="Stop the Secret Santa event")
-    @mod_check()
+    @owner_check()
     async def ss_stop(self, inter: disnake.ApplicationCommandInteraction):
         """Stop event"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -1872,7 +1899,6 @@ class SecretSantaCog(commands.Cog):
                 await self._safe_edit_response(inter, content=f"✅ Event stopped and archived → `{saved_filename}`")
 
     @ss_root.sub_command(name="participants", description="View participants")
-    @mod_check()
     async def ss_participants(self, inter: disnake.ApplicationCommandInteraction):
         """Show participants"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -1901,6 +1927,28 @@ class SecretSantaCog(commands.Cog):
 
         await self._safe_edit_response(inter, embed=embed)
 
+    # -------------------------------------------------------------------------
+    # ASK SANTA / ANSWER GIFTEE — LOGIC FLOW (step-by-step for debugging)
+    # -------------------------------------------------------------------------
+    # (A) Santa asks giftee: /ss ask_giftee [question]
+    #     1. Defer ephemeral.
+    #     2. _validate_participant_with_assignment → event, user_id (santa), receiver_id (giftee).
+    #     3. Optionally AI-rewrite question; format DM text; create SecretSantaReplyView (no IDs stored).
+    #     4. _send_dm(receiver_id, question_msg, view) → giftee gets DM with "Reply to Santa" button.
+    #     5. _save_communication(event, santa_id, giftee_id, "question", raw, rewritten).
+    # (B) Giftee answers via Reply button (on the DM):
+    #     1. Button callback (secret_santa_views.SecretSantaReplyView.reply_button).
+    #     2. Get cog; _get_current_event(); assignments = event.get("assignments") or {}.
+    #     3. Find santa_id: giver where receiver == giftee_id (inter.author.id).
+    #     4. Send SecretSantaReplyModal(santa_id, giftee_id); user types reply and submits.
+    #     5. Modal callback: reply = text_values["reply_text"]; cog._process_reply(inter, reply, santa_id, giftee_id).
+    #     6. _process_reply: _format_dm_reply → _send_dm(santa_id); _save_communication("reply"); followup embed to giftee.
+    # (C) Giftee answers via slash: /ss reply_santa [reply]
+    #     1. Defer; _validate_participant → event, user_id (giftee).
+    #     2. _find_santa_for_giftee(event, user_id) → santa_id (giver who has this user as receiver).
+    #     3. _format_dm_reply → _send_dm(santa_id); _save_communication("reply"); edit response with success/error.
+    # -------------------------------------------------------------------------
+
     @ss_root.sub_command(name="ask_giftee", description="Ask your giftee a question (sent anonymously)")
     async def ss_ask(
         self,
@@ -1926,7 +1974,8 @@ class SecretSantaCog(commands.Cog):
             rewritten_question = question
 
         # Send question with reply button
-        question_msg = self._format_dm_question(rewritten_question, self.state['current_year'])
+        year = self.state.get("current_year", dt.date.today().year)
+        question_msg = self._format_dm_question(rewritten_question, year)
         reply_view = SecretSantaReplyView()
         success = await self._send_dm(int(receiver_id), question_msg, reply_view)
 
@@ -1979,7 +2028,8 @@ class SecretSantaCog(commands.Cog):
             return
 
         # Send reply (no AI rewriting needed - anonymity already protected)
-        reply_msg = self._format_dm_reply(reply, self.state['current_year'])
+        year = self.state.get("current_year", dt.date.today().year)
+        reply_msg = self._format_dm_reply(reply, year)
         success = await self._send_dm(santa_id, reply_msg)
 
         if success:
@@ -2042,12 +2092,14 @@ class SecretSantaCog(commands.Cog):
                 await self._safe_edit_response(inter, content=f"❌ Failed to load archive for {current_year}")
                 return
             
-            # Handle both formats
             if "event" in archive_data:
                 event_data = archive_data["event"]
-                participants = event_data.get("participants", {})
-                assignments = event_data.get("assignments", {})
-                gift_submissions = event_data.get("gift_submissions", {})
+                participants = event_data.get("participants") or {}
+                assignments = event_data.get("assignments") or {}
+                if not isinstance(participants, dict):
+                    participants = {}
+                if not isinstance(assignments, dict):
+                    assignments = {}
             else:
                 # Legacy format
                 await inter.edit_original_response(
@@ -2074,8 +2126,9 @@ class SecretSantaCog(commands.Cog):
             event = event_data  # Use event_data for consistency
             is_archived = True
 
-        # Check if this is updating an existing submission
-        gift_submissions = event.get("gift_submissions", {})
+        gift_submissions = event.get("gift_submissions") or {}
+        if not isinstance(gift_submissions, dict):
+            gift_submissions = {}
         existing_submission = gift_submissions.get(user_id)
         is_update = existing_submission is not None
 
@@ -2097,9 +2150,12 @@ class SecretSantaCog(commands.Cog):
                     "timestamp": dt.datetime.now().isoformat()
                 }
                 
-                # Recalculate statistics
-                total_participants = len(event_data.get("assignments", {}))
-                gifts_exchanged = sum(1 for g in event_data["gift_submissions"].values() if g.get("gift"))
+                assignments_map = event_data.get("assignments") or {}
+                if not isinstance(assignments_map, dict):
+                    assignments_map = {}
+                total_participants = len(assignments_map)
+                gs = event_data.get("gift_submissions") or {}
+                gifts_exchanged = sum(1 for g in (gs.values() if isinstance(gs, dict) else []) if isinstance(g, dict) and (g.get("gift") or ""))
                 completion_percentage = int((gifts_exchanged / total_participants) * 100) if total_participants > 0 else 0
                 
                 if "statistics" not in archive_data:
@@ -2156,7 +2212,7 @@ class SecretSantaCog(commands.Cog):
         )
         embed.add_field(
             name="📅 Year",
-            value=f"**{self.state['current_year']}**",
+            value=f"**{self.state.get('current_year', dt.date.today().year)}**",
             inline=True
         )
         embed.add_field(
@@ -2184,10 +2240,12 @@ class SecretSantaCog(commands.Cog):
         """Edit your own gift submission from an archived year"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
-        
+        # Validate year range (same as delete_year) to avoid bad paths
+        today_year = dt.date.today().year
+        if year < 2020 or year > today_year + 1:
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1})")
+            return
         user_id = str(inter.author.id)
-        
-        # Load archive file for the year
         archive_path = ARCHIVE_DIR / f"{year}.json"
         if not archive_path.exists():
             await inter.edit_original_response(
@@ -2358,13 +2416,16 @@ class SecretSantaCog(commands.Cog):
             return
         event, user_id = result
 
-        # Get or create user's wishlist
         async with self._lock:
-            wishlists = event.setdefault("wishlists", {})
-            user_wishlist = wishlists.setdefault(user_id, [])
-            
-            # Check if already have this item
-            if item.lower() in [w.lower() for w in user_wishlist]:
+            wishlists = event.get("wishlists")
+            if not isinstance(wishlists, dict):
+                wishlists = {}
+                event["wishlists"] = wishlists
+            user_wishlist = wishlists.get(user_id)
+            if not isinstance(user_wishlist, list):
+                user_wishlist = []
+                wishlists[user_id] = user_wishlist
+            if item.lower() in [str(w).lower() for w in user_wishlist]:
                 await self._safe_edit_response(inter, content="❌ This item is already on your wishlist!")
                 return
             
@@ -2377,7 +2438,7 @@ class SecretSantaCog(commands.Cog):
             user_wishlist.append(item)
             await self._save_async()
 
-        year = self.state['current_year']
+        year = self.state.get("current_year", dt.date.today().year)
         wishlist_templates = [
             # Variation A: Wishlist refreshed
             (f"📝 Secret Santa {year} - WISHLIST REFRESHED! 📝",
@@ -2427,13 +2488,15 @@ class SecretSantaCog(commands.Cog):
             return
         event, user_id = result
 
-        wishlists = event.get("wishlists", {})
-        user_wishlist = wishlists.get(user_id, [])
-
+        wishlists = event.get("wishlists") or {}
+        if not isinstance(wishlists, dict):
+            wishlists = {}
+        user_wishlist = wishlists.get(user_id)
+        if not isinstance(user_wishlist, list):
+            user_wishlist = []
         if not user_wishlist:
             await self._safe_edit_response(inter, content="❌ Your wishlist is empty!")
             return
-
         if item_number > len(user_wishlist):
             await self._safe_edit_response(inter, content=f"❌ Invalid item number! You only have {len(user_wishlist)} items.")
             return
@@ -2474,10 +2537,12 @@ class SecretSantaCog(commands.Cog):
         if not result:
             return
         event, user_id = result
-
-        wishlists = event.get("wishlists", {})
-        user_wishlist = wishlists.get(user_id, [])
-
+        wishlists = event.get("wishlists") or {}
+        if not isinstance(wishlists, dict):
+            wishlists = {}
+        user_wishlist = wishlists.get(user_id)
+        if not isinstance(user_wishlist, list):
+            user_wishlist = []
         if not user_wishlist:
             embed = disnake.Embed(
                 title="📋 Your Wishlist",
@@ -2508,14 +2573,17 @@ class SecretSantaCog(commands.Cog):
         if not result:
             return
         event, user_id = result
-
-        wishlists = event.get("wishlists", {})
-        
-        if user_id not in wishlists or not wishlists[user_id]:
+        wishlists = event.get("wishlists") or {}
+        if not isinstance(wishlists, dict):
+            wishlists = {}
+            event["wishlists"] = wishlists
+        if user_id not in wishlists:
             await self._safe_edit_response(inter, content="❌ Your wishlist is already empty!")
             return
-
-        # Clear wishlist
+        current = wishlists.get(user_id)
+        if not isinstance(current, list) or not current:
+            await self._safe_edit_response(inter, content="❌ Your wishlist is already empty!")
+            return
         async with self._lock:
             wishlists[user_id] = []
             await self._save_async()
@@ -2539,13 +2607,16 @@ class SecretSantaCog(commands.Cog):
         if not receiver_id:
             return
         receiver_id = str(receiver_id)
-        # Safe access - event is validated and participants dict exists
-        participants = event.get("participants", {})
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict):
+            participants = {}
         receiver_name = participants.get(receiver_id, f"User {receiver_id}")
-
-        wishlists = event.get("wishlists", {})
-        giftee_wishlist = wishlists.get(receiver_id, [])
-
+        wishlists = event.get("wishlists") or {}
+        if not isinstance(wishlists, dict):
+            wishlists = {}
+        giftee_wishlist = wishlists.get(receiver_id)
+        if not isinstance(giftee_wishlist, list):
+            giftee_wishlist = []
         if not giftee_wishlist:
             embed = disnake.Embed(
                 title=f"📋 {receiver_name}'s Wishlist",
@@ -2566,7 +2637,6 @@ class SecretSantaCog(commands.Cog):
         await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="view_gifts", description="View submitted gifts")
-    @mod_check()
     async def ss_view_gifts(self, inter: disnake.ApplicationCommandInteraction):
         """Show gift submissions"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2576,22 +2646,23 @@ class SecretSantaCog(commands.Cog):
         if not event:
             return
 
-        submissions = event.get("gift_submissions", {})
+        submissions = event.get("gift_submissions") or {}
+        if not isinstance(submissions, dict):
+            submissions = {}
         if not submissions:
             await self._safe_edit_response(inter, content="❌ No gifts submitted yet")
             return
-
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict):
+            participants = {}
+        emoji_mapping = self._get_year_emoji_mapping(participants)
         embed = disnake.Embed(
             title=f"🎁 Gift Submissions ({len(submissions)})",
             color=disnake.Color.green()
         )
-
-        # Create consistent emoji mapping for all participants this year
-        # Safe access - event is validated and participants dict exists
-        participants = event.get("participants", {})
-        emoji_mapping = self._get_year_emoji_mapping(participants)
-        
         for giver_id, submission in list(submissions.items())[:10]:
+            if not isinstance(submission, dict):
+                continue
             giver_name = participants.get(giver_id, f"User {giver_id}")
             receiver_name = submission.get("receiver_name", "Unknown")
             raw_gift = submission.get("gift")
@@ -2621,8 +2692,7 @@ class SecretSantaCog(commands.Cog):
 
         await self._safe_edit_response(inter, embed=embed)
 
-    @ss_root.sub_command(name="view_comms", description="View communications")
-    @mod_check()
+    @ss_root.sub_command(name="view_comms", description="View communications (documented during/after event)")
     async def ss_view_comms(self, inter: disnake.ApplicationCommandInteraction):
         """Show communication threads"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2632,51 +2702,54 @@ class SecretSantaCog(commands.Cog):
         if not event:
             return
 
-        comms = event.get("communications", {})
+        comms = event.get("communications") or {}
+        if not isinstance(comms, dict):
+            comms = {}
         if not comms:
             await self._safe_edit_response(inter, content="❌ No communications yet")
             return
 
-        # Create consistent emoji mapping for all participants this year
-        # Safe access - event is validated and participants dict exists
-        participants = event.get("participants", {})
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict):
+            participants = {}
         emoji_mapping = self._get_year_emoji_mapping(participants)
-        
-        # Use paginator if more than 5 threads, otherwise show all
+
         if len(comms) > 5:
             paginator = CommunicationsPaginator(comms, participants, emoji_mapping, timeout=300)
             embed = paginator.get_embed()
             await inter.edit_original_response(embed=embed, view=paginator)
         else:
-            # Show all threads on one page (no pagination needed)
             embed = disnake.Embed(
                 title=f"💬 Communications ({len(comms)})",
                 color=disnake.Color.blue()
             )
-            
-            # Safe access - event is validated and participants dict exists
-            participants = event.get("participants", {})
             for santa_id, data in comms.items():
-                santa_name = participants.get(santa_id, f"User {santa_id}")
+                if not isinstance(data, dict):
+                    continue
+                santa_name = participants.get(str(santa_id), f"User {santa_id}")
                 giftee_id = data.get("giftee_id")
                 giftee_name = participants.get(str(giftee_id), "Unknown")
-
-                # Get consistent emojis for each person this year
-                santa_emoji = emoji_mapping.get(santa_id, "🎅")
+                santa_emoji = emoji_mapping.get(str(santa_id), "🎅")
                 giftee_emoji = emoji_mapping.get(str(giftee_id), "🎄")
-
-                thread = data.get("thread", [])
-                thread_text = "\n".join([
-                    f"{santa_emoji if msg['type'] == 'question' else giftee_emoji} {msg['message'][:50]}..."
-                    for msg in thread[:3]
-                ])
-
+                thread = data.get("thread") or []
+                if not isinstance(thread, list):
+                    thread = []
+                lines = []
+                for msg in thread[:3]:
+                    if not isinstance(msg, dict):
+                        continue
+                    txt = msg.get("message") or ""
+                    if isinstance(txt, str) and len(txt) > 50:
+                        txt = txt[:50] + "..."
+                    msg_type = msg.get("type") or ""
+                    emoji = santa_emoji if msg_type == "question" else giftee_emoji
+                    lines.append(f"{emoji} {txt}")
+                thread_text = "\n".join(lines) if lines else "No messages"
                 embed.add_field(
                     name=f"💬 {santa_name} → {giftee_name} ({len(thread)} messages)",
-                    value=thread_text or "No messages",
+                    value=thread_text,
                     inline=False
                 )
-            
             embed.set_footer(text=f"Total: {len(comms)} thread(s)")
             await self._safe_edit_response(inter, embed=embed)
 
@@ -2689,19 +2762,17 @@ class SecretSantaCog(commands.Cog):
         """Show event history"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
-
-        # Load all archives (NOTE: Current active event is NOT shown - would reveal secrets!)
+        # Validate year range if provided (consistent with edit_gift / delete_year)
+        today_year = dt.date.today().year
+        if year is not None and (year < 2020 or year > today_year + 1):
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1})")
+            return
         archives = load_all_archives(logger=self.logger)
-
         if not archives:
             await self._safe_edit_response(inter, content="❌ No archived events found")
             return
-
-        # Sort by year
         sorted_years = sorted(archives.keys(), reverse=True)
-
         if year:
-            # Show specific year with pagination
             if year not in archives:
                 available = ", ".join(str(y) for y in sorted_years)
                 await inter.edit_original_response(
@@ -2882,6 +2953,7 @@ class SecretSantaCog(commands.Cog):
         return await self.autocomplete_year_history(inter, string)
 
     @ss_root.sub_command(name="user_history", description="View a specific user's Secret Santa history across all years")
+    @owner_check()
     async def ss_user_history(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -2904,16 +2976,24 @@ class SecretSantaCog(commands.Cog):
         participations = []
         
         for year in sorted(archives.keys()):
-            event_data = archives[year].get("event", {})
-            participants = event_data.get("participants", {})
-            assignments = event_data.get("assignments", {})
-            gifts = event_data.get("gift_submissions", {})
-            
-            # Check if user participated this year
+            archive_entry = archives.get(year)
+            if not isinstance(archive_entry, dict):
+                continue
+            event_data = archive_entry.get("event") or {}
+            if not isinstance(event_data, dict):
+                continue
+            participants = event_data.get("participants") or {}
+            assignments = event_data.get("assignments") or {}
+            gifts = event_data.get("gift_submissions") or {}
+            if not isinstance(participants, dict):
+                participants = {}
+            if not isinstance(assignments, dict):
+                assignments = {}
+            if not isinstance(gifts, dict):
+                gifts = {}
             if user_id not in participants:
                 continue
-            
-            user_name = participants[user_id]
+            user_name = participants.get(user_id, f"User {user_id}")
             
             # Find who they gave to
             gave_to_id = assignments.get(user_id)
@@ -3029,6 +3109,7 @@ class SecretSantaCog(commands.Cog):
         await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="test_emoji_consistency", description="🎨 Test emoji consistency across years for a user")
+    @owner_check()
     async def ss_test_emoji_consistency(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3106,7 +3187,7 @@ class SecretSantaCog(commands.Cog):
         await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="delete_year", description="🗑️ Delete an archive year (CAREFUL!)")
-    @admin_check()
+    @owner_check()
     async def ss_delete_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3222,7 +3303,7 @@ class SecretSantaCog(commands.Cog):
         return await self.autocomplete_year_delete(inter, string)
 
     @ss_root.sub_command(name="restore_year", description="♻️ Restore a year from backups")
-    @admin_check()
+    @owner_check()
     async def ss_restore_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3231,7 +3312,10 @@ class SecretSantaCog(commands.Cog):
         """Restore archive file from backups folder (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
-        
+        today_year = dt.date.today().year
+        if year < 2020 or year > today_year + 1:
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1})")
+            return
         backup_path = BACKUPS_DIR / f"{year}.json"
         archive_path = ARCHIVE_DIR / f"{year}.json"
         
@@ -3366,8 +3450,8 @@ class SecretSantaCog(commands.Cog):
         else:
             await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
     
-    @ss_distribute.sub_command(name="remove", description="Remove a file (moderator only, use browse for easier selection)")
-    @mod_check()
+    @ss_distribute.sub_command(name="remove", description="Remove a file (owner only, use browse for easier selection)")
+    @owner_check()
     async def ss_distribute_remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3398,7 +3482,7 @@ class SecretSantaCog(commands.Cog):
         return []
     
     @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
-    @admin_check()
+    @owner_check()
     async def ss_list_backups(self, inter: disnake.ApplicationCommandInteraction):
         """List all years in the backups folder (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -3466,9 +3550,9 @@ class SecretSantaCog(commands.Cog):
             return
         
         user_id = str(payload.user_id)
-        participants = event.get("participants", {})
-        
-        # Already joined
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict):
+            return
         if user_id in participants:
             return
 
@@ -3510,9 +3594,9 @@ class SecretSantaCog(commands.Cog):
             return
         
         user_id = str(payload.user_id)
-        participants = event.get("participants", {})
-        
-        # Not a participant
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict):
+            return
         if user_id not in participants:
             return
 
@@ -3540,8 +3624,9 @@ class SecretSantaCog(commands.Cog):
                     current = self.state.get("current_event")
                     if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
                         return  # Event was stopped or is different, don't modify
-                    if "participants" in current:
-                        current["participants"].pop(user_id, None)
+                    participants = current.get("participants")
+                    if isinstance(participants, dict):
+                        participants.pop(user_id, None)
                     await self._save_async()
 
                 leave_msg = self._get_leave_message(self.state.get("current_year", dt.date.today().year))

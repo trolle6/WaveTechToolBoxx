@@ -47,13 +47,17 @@ class SecretSantaReplyView(disnake.ui.View):
                 return
             
             # Find who is the user's Santa (dynamic lookup from event data)
-            user_id = str(inter.author.id)  # Convert to string to match dict keys
+            user_id = str(inter.author.id)
+            assignments = event.get("assignments") or {}
             santa_id = None
-            for giver, receiver in event.get("assignments", {}).items():
-                if receiver == user_id:
-                    santa_id = int(giver)
-                    break
-            
+            if isinstance(assignments, dict):
+                for giver, receiver in assignments.items():
+                    if receiver == user_id:
+                        try:
+                            santa_id = int(giver)
+                            break
+                        except (TypeError, ValueError):
+                            continue
             if not santa_id:
                 await inter.response.send_message(content="❌ You don't have a Secret Santa assigned yet", ephemeral=True)
                 return
@@ -93,10 +97,10 @@ class SecretSantaReplyModal(disnake.ui.Modal):
     async def callback(self, inter: disnake.ModalInteraction):
         """Handle modal submission"""
         await inter.response.defer(ephemeral=True)
-        
-        reply = inter.text_values["reply_text"]
-        
-        # Get the cog instance
+        reply = (inter.text_values.get("reply_text") or "").strip()
+        if not reply:
+            await inter.followup.send(content="❌ Please type a reply before sending.", ephemeral=True)
+            return
         cog = inter.bot.get_cog("SecretSantaCog")
         if not cog:
             await inter.followup.send(content="❌ Secret Santa system not available", ephemeral=True)
@@ -411,47 +415,60 @@ class CommunicationsPaginator(disnake.ui.View):
     """Paginated view for communication threads"""
     def __init__(self, comms: Dict[str, dict], participants: dict, emoji_mapping: dict, timeout: float = 300):
         super().__init__(timeout=timeout)
-        self.comms = list(comms.items())
-        self.participants = participants
-        self.emoji_mapping = emoji_mapping
+        self.comms = list((comms or {}).items()) if isinstance(comms, dict) else []
+        self.participants = participants or {}
+        self.emoji_mapping = emoji_mapping or {}
         self.current_page = 0
         self.items_per_page = 5
-        self.total_pages = (len(self.comms) + self.items_per_page - 1) // self.items_per_page
+        self.total_pages = max(1, (len(self.comms) + self.items_per_page - 1) // self.items_per_page)
         self._update_buttons()
-    
+
     def _update_buttons(self):
-        """Update button enabled/disabled state"""
         self.previous_button.disabled = (self.current_page == 0)
         self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
+
+    def _thread_preview_lines(self, data: dict, santa_emoji: str, giftee_emoji: str) -> list:
+        """Safe preview lines from thread list (max 3)."""
+        thread = data.get("thread") if isinstance(data, dict) else None
+        if not isinstance(thread, list):
+            return []
+        lines = []
+        for msg in thread[:3]:
+            if not isinstance(msg, dict):
+                continue
+            txt = msg.get("message") or ""
+            if isinstance(txt, str) and len(txt) > 50:
+                txt = txt[:50] + "..."
+            msg_type = msg.get("type") or ""
+            emoji = santa_emoji if msg_type == "question" else giftee_emoji
+            lines.append(f"{emoji} {txt}")
+        return lines
+
     def get_embed(self) -> disnake.Embed:
         """Generate embed for current page"""
         start_idx = self.current_page * self.items_per_page
         end_idx = min(start_idx + self.items_per_page, len(self.comms))
         page_comms = self.comms[start_idx:end_idx]
-        
         embed = disnake.Embed(
             title=f"💬 Communications ({len(self.comms)})",
             color=disnake.Color.blue()
         )
-        
         for santa_id, data in page_comms:
-            santa_name = self.participants.get(santa_id, f"User {santa_id}")
+            if not isinstance(data, dict):
+                continue
+            santa_name = self.participants.get(str(santa_id), f"User {santa_id}")
             giftee_id = data.get("giftee_id")
             giftee_name = self.participants.get(str(giftee_id), "Unknown")
-            
-            santa_emoji = self.emoji_mapping.get(santa_id, "🎅")
+            santa_emoji = self.emoji_mapping.get(str(santa_id), "🎅")
             giftee_emoji = self.emoji_mapping.get(str(giftee_id), "🎄")
-            
-            thread = data.get("thread", [])
-            thread_text = "\n".join([
-                f"{santa_emoji if msg['type'] == 'question' else giftee_emoji} {msg['message'][:50]}..."
-                for msg in thread[:3]
-            ])
-            
+            thread = data.get("thread") or []
+            if not isinstance(thread, list):
+                thread = []
+            lines = self._thread_preview_lines(data, santa_emoji, giftee_emoji)
+            thread_text = "\n".join(lines) if lines else "No messages"
             embed.add_field(
                 name=f"💬 {santa_name} → {giftee_name} ({len(thread)} messages)",
-                value=thread_text or "No messages",
+                value=thread_text,
                 inline=False
             )
         

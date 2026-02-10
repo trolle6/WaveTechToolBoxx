@@ -43,7 +43,6 @@ import disnake
 from disnake.ext import commands
 
 from .owner_utils import owner_check, get_owner_mention, is_owner
-from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
 
@@ -1157,8 +1156,8 @@ class DistributeZipCog(commands.Cog):
         file = disnake.File(file_path, filename=filename)
         await self._safe_edit_response(inter, embed=embed, file=file)
 
-    @distributezip.sub_command(name="remove", description="Remove a file (moderator only, use browse for easier selection)")
-    @mod_check()
+    @distributezip.sub_command(name="remove", description="Remove a file (owner only, use browse for easier selection)")
+    @owner_check()
     async def remove_file(
         self,
         inter: disnake.ApplicationCommandInteraction,

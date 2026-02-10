@@ -89,9 +89,13 @@ def validate_state_structure(state: dict, logger=None) -> dict:
             logger.error("State is not a dict, using defaults")
         return get_default_state()
     
-    # Ensure required keys exist
-    if "current_year" not in state:
-        state["current_year"] = dt.date.today().year
+    # Ensure required keys exist and current_year is valid (int, 2000-2100)
+    today_year = dt.date.today().year
+    raw_year = state.get("current_year")
+    if not isinstance(raw_year, int) or raw_year < 2000 or raw_year > 2100:
+        if raw_year is not None and logger:
+            logger.warning(f"Invalid current_year in state ({raw_year!r}), resetting to {today_year}")
+        state["current_year"] = today_year
     if "pair_history" not in state:
         state["pair_history"] = {}
     if "current_event" not in state:
@@ -260,6 +264,12 @@ def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
     Returns:
         Filename of the created archive (either {year}.json or {year}_backup_TIMESTAMP.json)
     """
+    # Defensive: ensure year is valid so we never write e.g. 5.json or 99999.json
+    today_year = dt.date.today().year
+    if not isinstance(year, int) or year < 2000 or year > 2100:
+        if logger:
+            logger.warning(f"archive_event: invalid year {year!r}, using {today_year}")
+        year = today_year
     archive_data = {
         "year": year,
         "event": event.copy(),

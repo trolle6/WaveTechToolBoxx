@@ -30,7 +30,24 @@ load_dotenv("config.env", override=True)
 
 
 # ============ CONFIG ============
-# Configuration constants for clarity and maintainability
+# All Discord IDs and bot settings are centralised here and in config.env.
+# Load with: load_dotenv("config.env"); then bot.config = Config() → access as bot.config.DISCORD_* etc.
+#
+# Required (config.env):
+#   DISCORD_TOKEN          - Bot token
+#   DISCORD_GUILD_ID       - Required at load (validation)
+#   DISCORD_CHANNEL_ID     - main: send_discord_message; voice_processing: optional TTS channel restriction
+#   DISCORD_LOG_CHANNEL_ID - DiscordLogHandler, send_to_discord_log, reconnect notifications
+#   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
+#   OPENAI_API_KEY        - TTS, DALL-E, Secret Santa anonymize
+#
+# Optional (CONFIG_DEFAULTS below or in config.env):
+#   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
+#   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
+#   BOT_OWNER_USERNAME     - owner checks (fallback if BOT_OWNER_USER_ID not set)
+#   BOT_OWNER_USER_ID      - (optional) Discord user ID for owner-only commands; if set, used instead of username (cannot be impersonated)
+# Per-event guild_id (not config): Secret Santa and Custom Events store guild_id per event (inter.guild.id).
+#
 REQUIRED_CONFIG_KEYS = {
     "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID",
     "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY"
@@ -49,6 +66,7 @@ CONFIG_DEFAULTS = {
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
     "BOT_OWNER_USERNAME": "trolle6",
+    "BOT_OWNER_USER_ID": None,  # Optional: set to your Discord user ID (integer) for secure owner checks; username can be impersonated
 }
 
 
@@ -83,9 +101,14 @@ class Config:
                 try:
                     self.data[key] = int(val)
                 except ValueError:
-                    # Logger not available yet, use print for early config errors
                     print(f"Warning: Invalid integer for {key}, using default {default}")
                     self.data[key] = default
+            elif key == "BOT_OWNER_USER_ID" and val:
+                try:
+                    self.data[key] = int(val)
+                except ValueError:
+                    print(f"Warning: Invalid BOT_OWNER_USER_ID '{val}', using None")
+                    self.data[key] = None
             else:
                 self.data[key] = val
     
