@@ -26,7 +26,13 @@ def _resolve_owner_check(inter: "disnake.ApplicationCommandInteraction") -> bool
     """True if inter.author is the configured bot owner (ID takes precedence over username)."""
     config = getattr(inter.bot, "config", None)
     owner_id = getattr(config, "BOT_OWNER_USER_ID", None) if config else None
-    if owner_id is not None and isinstance(owner_id, int):
+    # Coerce string IDs from env/config (main.py converts at load, but defensive for edge cases)
+    if owner_id is not None and not isinstance(owner_id, int):
+        try:
+            owner_id = int(owner_id)
+        except (TypeError, ValueError):
+            owner_id = None
+    if owner_id is not None:
         return inter.author.id == owner_id
     username = getattr(config, "BOT_OWNER_USERNAME", OWNER_USERNAME) if config else OWNER_USERNAME
     if isinstance(username, str):
@@ -51,6 +57,9 @@ def is_owner(inter: "disnake.ApplicationCommandInteraction") -> bool:
     return _resolve_owner_check(inter)
 
 
-def get_owner_mention() -> str:
-    """Get a formatted mention of the owner (username from config or fallback)."""
-    return f"**{OWNER_USERNAME}**"  # Could be extended to accept bot and use config.BOT_OWNER_USERNAME
+def get_owner_mention(bot=None) -> str:
+    """Get a formatted mention of the owner (username from config or fallback).
+    Pass inter.bot when available to use BOT_OWNER_USERNAME from config."""
+    config = getattr(bot, "config", None) if bot else None
+    username = getattr(config, "BOT_OWNER_USERNAME", OWNER_USERNAME) if config else OWNER_USERNAME
+    return f"**{username}**" if isinstance(username, str) else f"**{OWNER_USERNAME}**"

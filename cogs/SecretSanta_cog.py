@@ -43,6 +43,9 @@ SAFETY FEATURES:
 - ✅ Atomic file writes (prevents corruption)
 - ✅ Validation on state load
 - ✅ Health monitoring (disk space, permissions, early failure detection)
+- ✅ Non-blocking startup (state loads async in cog_load)
+- ✅ DM retries (429, 5xx, connection errors, timeouts)
+- ✅ Anonymization API retries with exponential backoff
 
 DATA STORAGE:
 - secret_santa_state.json - Active event state
@@ -62,9 +65,9 @@ ALGORITHM:
 
 from __future__ import annotations
 
+import aiohttp
 import asyncio
 import datetime as dt
-import functools
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -75,12 +78,13 @@ import disnake
 from disnake.ext import commands
 
 from .owner_utils import owner_check, get_owner_mention
+from .utils import autocomplete_safety_wrapper
 
 # Import from modular components
 from .secret_santa_storage import (
     ARCHIVE_DIR, BACKUPS_DIR, STATE_FILE,
     load_state_with_fallback, save_state, load_all_archives, archive_event,
-    load_json, save_json
+    load_json, save_json, get_default_state
 )
 from .secret_santa_assignments import (
     load_history_from_archives, validate_assignment_possibility, make_assignments
@@ -96,7 +100,17 @@ BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
 # How often to re-check for scheduled shuffle/stop: when idle we sleep this long; when we have a
 # When idle (no schedule), re-check this often. When a schedule exists, we sleep until that time but at most this long.
 # No per-tick logging — only log when actually running a scheduled shuffle/stop.
-SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 900  # 15 minutes
+SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 300  # 5 minutes - re-check often to hit scheduled shuffle/stop
+# DM rate limiting: Discord throttles DMs. Space them out to avoid 429.
+DM_DELAY_SECONDS = 1.2  # Delay between each DM to stay under rate limits
+DM_MAX_RETRIES = 4  # Retry on 429, 5xx, connection errors (1 initial + 3 retries)
+DM_FETCH_TIMEOUT = 10  # Timeout for fetch_user (seconds)
+DM_SEND_TIMEOUT = 15  # Timeout for user.send (seconds)
+
+# Anonymization API
+ANONYMIZE_RETRY_MAX = 3  # Retries for OpenAI API (429, 5xx, connection)
+ANONYMIZE_RETRY_BASE_DELAY = 1.0  # Exponential backoff base
+ANONYMIZE_TIMEOUT = 20  # Request timeout (seconds)
 
 # Discord locale (language) -> IANA timezone for schedule parsing when user doesn't set schedule_timezone.
 # Discord doesn't provide timezone, so this is a best-effort guess from their app language.
@@ -135,31 +149,6 @@ DISCORD_LOCALE_TO_IANA: Dict[str, str] = {
 }
 
 
-def autocomplete_safety_wrapper(func):
-    """Decorator to ensure autocomplete functions always return a list"""
-    @functools.wraps(func)
-    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
-        try:
-            result = await func(self, inter, string)
-            # Ensure result is always a list
-            if isinstance(result, list):
-                return [str(item) for item in result]  # Ensure all items are strings
-            elif result is None:
-                return []
-            elif isinstance(result, str):
-                self.logger.error(f"{func.__name__} returned string: '{result}'")
-                return []
-            else:
-                try:
-                    return [str(item) for item in list(result)]
-                except Exception:
-                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
-                    return []
-        except Exception as e:
-            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
-            return []
-    return wrapper
-
 # Log the paths for debugging
 import logging
 _init_logger = logging.getLogger("bot.santa.init")
@@ -178,11 +167,8 @@ class SecretSantaCog(commands.Cog):
         self.bot = bot
         self.logger = bot.logger.getChild("santa")
 
-        # Load state with multi-layer fallback and validation
-        # 1. Try main state file → 2. Try backup → 3. Use defaults
-        # Run in executor to avoid blocking event loop during initialization
-        self.state = load_state_with_fallback(logger=self.logger)
-
+        # Placeholder until cog_load loads real state (avoids blocking event loop at startup)
+        self.state = get_default_state()
         self._lock = asyncio.Lock()
         self._backup_task: Optional[asyncio.Task] = None
         self._scheduled_shuffle_task: Optional[asyncio.Task] = None
@@ -261,6 +247,8 @@ class SecretSantaCog(commands.Cog):
                     kwargs['view'] = view
                 if file is not None:
                     kwargs['file'] = file
+                if not kwargs:
+                    return True  # Nothing to edit, consider success
                 
                 await asyncio.wait_for(
                     inter.edit_original_response(**kwargs),
@@ -621,8 +609,8 @@ class SecretSantaCog(commands.Cog):
         return self._create_embed(title, description, disnake.Color.green(), **({"footer": footer} if footer else {}))
     
     def _truncate_text(self, text: Optional[str], max_length: int = 100) -> str:
-        """Truncate text with ellipsis if needed. Handles None values."""
-        if not text:
+        """Truncate text with ellipsis if needed. Handles None and non-string safely."""
+        if text is None or not isinstance(text, str):
             return ""
         return f"{text[:max_length]}..." if len(text) > max_length else text
     
@@ -652,8 +640,9 @@ class SecretSantaCog(commands.Cog):
         assignments = event.get("assignments") or {}
         if not isinstance(assignments, dict):
             return None
+        giftee_str = str(giftee_id)
         for giver, receiver in assignments.items():
-            if receiver == giftee_id:
+            if str(receiver) == giftee_str:
                 try:
                     return int(giver)
                 except (TypeError, ValueError):
@@ -692,7 +681,7 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: Curious
             lambda q: (
-                f"❓ **Secret Santa {year} - YOUR SANTA IS CURIOUS!** ❓\n\n"
+                f"❓ **Secret Santa** `::{year}::` **– YOUR SANTA IS CURIOUS!** ❓\n\n"
                 f"Ooh, your Santa has a question for you! They're wondering:\n\n"
                 f"*\"{q}\"*\n\n"
                 f"---\n\n"
@@ -702,7 +691,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation B: Clue Request
             lambda q: (
-                f"🔍 **Secret Santa {year} - CLUE REQUEST!** 🔍\n\n"
+                f"🔍 **Secret Santa** `::{year}::` **– CLUE REQUEST!** 🔍\n\n"
                 f"Your Santa's on a treasure hunt for the ideal gift! They need a little direction:\n\n"
                 f"*\"{q}\"*\n\n"
                 f"---\n\n"
@@ -712,7 +701,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation C: Thinking of you
             lambda q: (
-                f"💭 **Secret Santa {year} - YOUR SANTA IS THINKING OF YOU!** 💭\n\n"
+                f"💭 **Secret Santa** `::{year}::` **– YOUR SANTA IS THINKING OF YOU!** 💭\n\n"
                 f"Your Santa's brainstorming gift ideas and would love your input:\n\n"
                 f"*\"{q}\"*\n\n"
                 f"---\n\n"
@@ -728,7 +717,7 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: Wrote back
             lambda r: (
-                f"🎅 **Secret Santa {year} - YOUR GIFTEE WROTE BACK!** 🎅\n\n"
+                f"🎅 **Secret Santa** `::{year}::` **– YOUR GIFTEE WROTE BACK!** 🎅\n\n"
                 f"Great news! Your giftee responded:\n\n"
                 f"*\"{r}\"*\n\n"
                 f"---\n\n"
@@ -738,7 +727,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation B: Message incoming
             lambda r: (
-                f"💌 **Secret Santa {year} - MESSAGE INCOMING!** 💌\n\n"
+                f"💌 **Secret Santa** `::{year}::` **– MESSAGE INCOMING!** 💌\n\n"
                 f"Your giftee sent a reply! Here's what they said:\n\n"
                 f"*\"{r}\"*\n\n"
                 f"---\n\n"
@@ -748,7 +737,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation C: Plot thickens
             lambda r: (
-                f"✨ **Secret Santa {year} - THE PLOT THICKENS!** ✨\n\n"
+                f"✨ **Secret Santa** `::{year}::` **– THE PLOT THICKENS!** ✨\n\n"
                 f"Interesting! Your giftee just shared this:\n\n"
                 f"*\"{r}\"*\n\n"
                 f"---\n\n"
@@ -764,21 +753,21 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: Welcome aboard
             lambda y: (
-                f"🎉 **Secret Santa {y} - WELCOME ABOARD!** 🎉\n\n"
+                f"🎉 **Secret Santa** `::{y}::` **– WELCOME ABOARD!** 🎉\n\n"
                 f"You're officially on the nice list! 🎅\n\n"
                 f"Get ready for some holiday magic! We'll message you here once you've been matched with your giftee.\n\n"
                 f"In the meantime, why not add some wishlist ideas? It helps your own Santa out! 🎄"
             ),
             # Variation B: So glad you're here
             lambda y: (
-                f"✨ **Secret Santa {y} - SO GLAD YOU'RE HERE!** ✨\n\n"
+                f"✨ **Secret Santa** `::{y}::` **– SO GLAD YOU'RE HERE!** ✨\n\n"
                 f"Welcome to this year's Secret Santa adventure!\n\n"
                 f"We'll DM you with your special assignment once the shuffle happens. The magic begins soon! ❄️\n\n"
                 f"Pro tip: Add a few wishlist items now to give your Santa a head start! 🎁"
             ),
             # Variation C: You're in
             lambda y: (
-                f"❤️ **Secret Santa {y} - YOU'RE IN!** ❤️\n\n"
+                f"❤️ **Secret Santa** `::{y}::` **– YOU'RE IN!** ❤️\n\n"
                 f"Yay! You've joined the holiday fun!\n\n"
                 f"Keep an eye on your DMs - we'll send your giftee assignment here when everything's ready.\n\n"
                 f"Why not sprinkle some hints on your wishlist? Your Santa will thank you! 🤫"
@@ -807,26 +796,26 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Template 1: Mission-focused
             lambda opening, name: (
-                f"🎯 **Secret Santa {year} - YOUR SPECIAL MISSION!** 🎯\n\n"
+                f"🎯 **Secret Santa** `::{year}::` **– YOUR SPECIAL MISSION!** 🎯\n\n"
                 f"{opening}\n\n"
                 f"---\n\n"
-                f"**Your Giftee:** {name}\n\n"
+                f"`:: Giftee ::` {name}\n\n"
                 f"Let the gift planning begin! Check their wishlist with `/ss giftee` and remember... shhh, it's a secret! 🤫"
             ),
             # Template 2: Adventure-focused
             lambda opening, name: (
-                f"🎁 **Secret Santa {year} - YOUR GIFTING ADVENTURE!** 🎁\n\n"
+                f"🎁 **Secret Santa** `::{year}::` **– YOUR GIFTING ADVENTURE!** 🎁\n\n"
                 f"{opening}\n\n"
                 f"---\n\n"
-                f"**Time to spoil:** {name}\n\n"
+                f"`:: Giftee ::` {name}\n\n"
                 f"Ready to make their holiday magical? Start by checking `/ss giftee` to see what they're hoping for! The journey begins now! ✨"
             ),
             # Template 3: Magic-focused
             lambda opening, name: (
-                f"✨ **Secret Santa {year} - THE MAGIC BEGINS!** ✨\n\n"
+                f"✨ **Secret Santa** `::{year}::` **– THE MAGIC BEGINS!** ✨\n\n"
                 f"{opening}\n\n"
                 f"---\n\n"
-                f"**Your lucky giftee:** {name}\n\n"
+                f"`:: Giftee ::` {name}\n\n"
                 f"Time to work your Santa magic! Peek at their wishlist with `/ss giftee` and start planning something amazing. Keep it secret, keep it safe! 🎄"
             )
         ]
@@ -840,22 +829,22 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: And that's a wrap
             lambda y: (
-                f"✨ **Secret Santa {y} - AND THAT'S A WRAP!** ✨\n\n"
+                f"✨ **Secret Santa** `::{y}::` **– AND THAT'S A WRAP!** ✨\n\n"
                 f"A huge, heartfelt thank you to everyone who participated! 🎁\n\n"
                 f"Because of all of you, this holiday season just got a whole lot warmer and brighter. The joy you've shared is the real gift.\n\n"
                 f"Until next year! Stay merry and bright! 🎄❤️"
             ),
             # Variation B: Mission complete
             lambda y: (
-                f"🎄 **Secret Santa {y} - MISSION COMPLETE!** 🎄\n\n"
+                f"🎄 **Secret Santa** `::{y}::` **– MISSION COMPLETE!** 🎄\n\n"
                 f"And just like that, another wonderful Secret Santa comes to a close.\n\n"
                 f"Thank you for spreading so much joy and holiday magic. You've made someone's season truly special.\n\n"
                 f"Wishing you all the warmth and happiness this holiday brings! ❤️"
             ),
             # Variation C: Thanks for the magic
             lambda y: (
-                f"🌟 **Secret Santa {y} - THANKS FOR THE MAGIC!** 🌟\n\n"
-                f"The final sleigh bell has rung! Secret Santa {y} is complete.\n\n"
+                f"🌟 **Secret Santa** `::{y}::` **– THANKS FOR THE MAGIC!** 🌟\n\n"
+                f"The final sleigh bell has rung! Secret Santa `::{y}::` is complete.\n\n"
                 f"What an amazing gift-giving journey it's been! Thank you for your kindness, creativity, and holiday spirit.\n\n"
                 f"May your holidays be as bright as the smiles you've created! ✨🎅"
             )
@@ -865,7 +854,7 @@ class SecretSantaCog(commands.Cog):
     def _get_leave_message(self, year: int) -> str:
         """Get the leave message for participants"""
         return (
-            f"👋 **Secret Santa {year} - WE'LL MISS YOU!** 👋\n\n"
+            f"👋 **Secret Santa** `::{year}::` **– WE'LL MISS YOU!** 👋\n\n"
             f"You've left this year's Secret Santa.\n\n"
             f"Your spot has been cleared and you won't be matched with anyone.\n\n"
             f"Changed your mind? You can always rejoin before the shuffle happens! ❤️"
@@ -874,7 +863,19 @@ class SecretSantaCog(commands.Cog):
     # State loading now uses load_state_with_fallback from secret_santa_storage module
 
     async def cog_load(self):
-        """Initialize cog"""
+        """Initialize cog - load state from disk (non-blocking), then start tasks"""
+        # Load state in executor to avoid blocking event loop during startup (file I/O)
+        loop = asyncio.get_event_loop()
+        loaded_state = await loop.run_in_executor(
+            self._executor,
+            lambda: load_state_with_fallback(logger=self.logger)
+        )
+        if isinstance(loaded_state, dict):
+            self.state.clear()
+            self.state.update(loaded_state)
+        else:
+            self.logger.warning("Loaded state was not a dict, keeping default")
+
         self._backup_task = asyncio.create_task(self._backup_loop())
         self._scheduled_shuffle_task = asyncio.create_task(self._scheduled_shuffle_checker())
         self.logger.info("Secret Santa cog loaded")
@@ -955,8 +956,8 @@ class SecretSantaCog(commands.Cog):
 
     async def _scheduled_shuffle_checker(self):
         """Background task that checks for scheduled shuffles and stops, and executes them"""
-        try:
-            while True:
+        while True:
+            try:
                 # Check first, then sleep – so we don't miss a schedule that's already due
                 current_time = time.time()
                 event = self._get_current_event()
@@ -971,6 +972,11 @@ class SecretSantaCog(commands.Cog):
                         int(scheduled_shuffle_time),
                         scheduler_id,
                     )
+                    if hasattr(self.bot, 'send_to_discord_log'):
+                        await self.bot.send_to_discord_log(
+                            f"🎲 **Scheduled shuffle running now** – assignments will be sent via DM shortly.",
+                            "INFO",
+                        )
 
                     # Clear the schedule first to prevent double execution
                     async with self._lock:
@@ -981,19 +987,6 @@ class SecretSantaCog(commands.Cog):
                     # Execute the shuffle (without interaction, so we pass None for inter)
                     try:
                         await self._execute_shuffle_internal(scheduler_id=scheduler_id)
-                        
-                        # Notify the scheduler
-                        if scheduler_id:
-                            year = self.state.get('current_year', dt.date.today().year)
-                            notification_msg = (
-                                f"🎲 **Secret Santa {year} - THE CARDS HAVE BEEN DEALT!** 🎲\n\n"
-                                f"The shuffle is complete! Everyone has been matched with their giftee!\n\n"
-                                f"The magic is officially in motion... ✨\n\n"
-                                f"All Santas should now have a DM with their special assignment. The gift-giving adventure begins!"
-                            )
-                            success = await self._send_dm(scheduler_id, notification_msg)
-                            if not success:
-                                self.logger.debug(f"Could not send shuffle notification to scheduler {scheduler_id} (DMs may be disabled)")
                     except Exception as e:
                         self.logger.error(f"Error executing scheduled shuffle: {e}", exc_info=True)
                         # Try to notify scheduler about the error
@@ -1069,35 +1062,158 @@ class SecretSantaCog(commands.Cog):
                     sleep_seconds = SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS
                 sleep_seconds = max(0.0, sleep_seconds)
                 await asyncio.sleep(sleep_seconds)
-                
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            self.logger.error(f"Scheduled events checker error: {e}", exc_info=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.logger.error(f"Scheduled events checker error: {e}", exc_info=True)
+                await asyncio.sleep(SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS)
 
     async def _send_dm(self, user_id: int, message: str, view: disnake.ui.View = None) -> bool:
-        """Send DM to user with optional view"""
-        try:
-            user = await self.bot.fetch_user(user_id)
-            await user.send(message, view=view)
-            return True
-        except disnake.Forbidden as e:
-            # User has DMs disabled or blocked the bot (error code 50007)
-            # This is expected and common - only log at debug level
-            error_code = getattr(e, 'code', None)
-            if error_code == 50007:
-                self.logger.debug(f"User {user_id} has DMs disabled (50007) - skipping DM")
-            else:
-                self.logger.debug(f"User {user_id} blocked DM (Forbidden: {error_code})")
+        """
+        Send DM to user with optional view. Retries on 429, 5xx, and connection errors.
+        Uses timeouts to prevent hanging; respects Retry-After for rate limits.
+        """
+        if not message or not str(message).strip():
+            self.logger.debug(f"Empty DM message for user {user_id}, skipping")
+            return True  # Nothing to send, consider success
+
+        for attempt in range(DM_MAX_RETRIES):
+            try:
+                user = await asyncio.wait_for(
+                    self.bot.fetch_user(user_id),
+                    timeout=DM_FETCH_TIMEOUT
+                )
+                await asyncio.wait_for(
+                    user.send(message, view=view),
+                    timeout=DM_SEND_TIMEOUT
+                )
+                return True
+            except disnake.Forbidden as e:
+                error_code = getattr(e, 'code', None)
+                if error_code == 50007:
+                    self.logger.warning(f"User {user_id} has DMs disabled (50007) - DM not delivered")
+                else:
+                    self.logger.warning(f"User {user_id} blocked DM (Forbidden: {error_code})")
+                return False
+            except disnake.HTTPException as e:
+                status = getattr(e, 'status', None)
+                retry_after = getattr(e, 'retry_after', 2.0)
+                if status == 429 and attempt < DM_MAX_RETRIES - 1:
+                    self.logger.warning(
+                        f"Rate limited sending DM to {user_id}, waiting {retry_after}s "
+                        f"(attempt {attempt + 1}/{DM_MAX_RETRIES})"
+                    )
+                    await asyncio.sleep(min(retry_after, 60.0))
+                    continue
+                if status and status >= 500 and attempt < DM_MAX_RETRIES - 1:
+                    wait = min(2 ** attempt, 10.0)
+                    self.logger.warning(
+                        f"Discord server error {status} sending DM to {user_id}, retrying in {wait}s "
+                        f"(attempt {attempt + 1}/{DM_MAX_RETRIES})"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                self.logger.warning(f"HTTP error sending DM to {user_id}: {e}")
+                return False
+            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+                if attempt < DM_MAX_RETRIES - 1:
+                    wait = min(2 ** attempt, 10.0)
+                    self.logger.warning(
+                        f"Connection/timeout sending DM to {user_id}, retrying in {wait}s "
+                        f"(attempt {attempt + 1}/{DM_MAX_RETRIES}): {e}"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                self.logger.warning(f"Connection error sending DM to {user_id} after retries: {e}")
+                return False
+            except disnake.NotFound:
+                self.logger.warning(f"User {user_id} not found - DM not delivered")
+                return False
+            except Exception as e:
+                self.logger.warning(f"Unexpected error sending DM to {user_id}: {e}")
+                return False
+        return False
+
+    async def _send_dms_to_participants(
+        self,
+        items: list[tuple[int, str]],
+        view: disnake.ui.View = None,
+    ) -> list[int]:
+        """
+        Send DMs to participants with rate limiting. Returns list of user_ids who failed to receive.
+        Spacing avoids Discord 429; each failure is logged.
+        """
+        failed: list[int] = []
+        for user_id, message in items:
+            success = await self._send_dm(user_id, message, view=view)
+            if not success:
+                failed.append(user_id)
+            await asyncio.sleep(DM_DELAY_SECONDS)
+        return failed
+
+    def _get_fallback_channel(self, guild_id: Optional[int] = None) -> Optional[disnake.TextChannel]:
+        """Get channel for fallback messages (when DM fails). Prefers DISCORD_CHANNEL_ID."""
+        channel_id = getattr(self.bot.config, "DISCORD_CHANNEL_ID", None)
+        if channel_id:
+            try:
+                ch = self.bot.get_channel(int(channel_id))
+                if ch and isinstance(ch, disnake.TextChannel):
+                    if guild_id is None or ch.guild.id == guild_id:
+                        return ch
+            except (ValueError, TypeError):
+                pass
+        if guild_id:
+            guild = self.bot.get_guild(guild_id)
+            if guild:
+                for ch in guild.text_channels:
+                    if ch.permissions_for(guild.me).send_messages:
+                        return ch
+        return None
+
+    async def _post_fallback_for_failed_dms(
+        self,
+        guild_id: Optional[int],
+        failed_user_ids: list[int],
+        message_type: str,
+        year: int,
+    ) -> bool:
+        """Post in channel when DMs fail so users still get notified. Returns True if posted."""
+        if not failed_user_ids:
             return False
-        except disnake.HTTPException as e:
-            # Other HTTP errors (rate limits, etc.) - log as warning
-            self.logger.warning(f"HTTP error sending DM to {user_id}: {e}")
+        channel = self._get_fallback_channel(guild_id)
+        if not channel:
+            self.logger.warning(f"Cannot post fallback: no channel for guild {guild_id}")
             return False
-        except Exception as e:
-            # Unexpected errors - log as warning
-            self.logger.warning(f"Unexpected error sending DM to {user_id}: {e}")
-            return False
+        mentions = " ".join(f"<@{uid}>" for uid in failed_user_ids)
+        if message_type == "assignment":
+            text = (
+                f"🎄 **Secret Santa {year} – Assignment Fallback** 🎄\n\n"
+                f"We couldn't send your assignment via DM. {mentions}\n\n"
+                f"**You can still see your giftee:** Use `/ss giftee` in this server to view their wishlist. Your assignment is saved!"
+            )
+        else:
+            text = (
+                f"🛑 **Secret Santa {year} – Event Ended** 🛑\n\n"
+                f"We couldn't send you the wrap-up message via DM. {mentions}\n\n"
+                f"Thanks for participating! The event has ended."
+            )
+        for attempt in range(3):
+            try:
+                await asyncio.wait_for(channel.send(text[:2000]), timeout=10.0)
+                self.logger.info(f"Posted fallback for {len(failed_user_ids)} users in #{channel.name}")
+                return True
+            except (disnake.HTTPException, ConnectionError, asyncio.TimeoutError) as e:
+                if attempt < 2:
+                    wait = min(2 ** attempt, 5.0)
+                    self.logger.warning(f"Fallback post failed, retrying in {wait}s: {e}")
+                    await asyncio.sleep(wait)
+                else:
+                    self.logger.error(f"Failed to post fallback in channel after retries: {e}")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Failed to post fallback in channel: {e}")
+                return False
+        return False
 
     async def _process_reply(self, inter: disnake.ModalInteraction, reply: str, santa_id: int, giftee_id: int):
         """Process a reply from giftee to santa (called from Reply button modal or could be reused elsewhere)."""
@@ -1138,11 +1254,13 @@ class SecretSantaCog(commands.Cog):
         emoji_pattern = ["🎁", "🎄", "🎅", "⭐", "❄️", "☃️", "🦌", "🔔", "🍪", "🥛", "🕯️", "✨", "🌟", "🎈", "🧸", "🍭", "🎂", "🎪", "🎨", "🎯"]
         emoji_mapping = {}
         for participant_id in participants.keys():
-            # Use hash of user ID to get consistent emoji across all years
-            # Same user = same emoji, always!
-            user_hash = hash(int(participant_id) if participant_id.isdigit() else participant_id)
+            pid_str = str(participant_id)
+            try:
+                user_hash = hash(int(pid_str) if pid_str.isdigit() else participant_id)
+            except (ValueError, TypeError):
+                user_hash = hash(participant_id)
             emoji_index = user_hash % len(emoji_pattern)
-            emoji_mapping[participant_id] = emoji_pattern[emoji_index]
+            emoji_mapping[pid_str] = emoji_pattern[emoji_index]
         
         return emoji_mapping
 
@@ -1155,49 +1273,92 @@ class SecretSantaCog(commands.Cog):
             "Content-Type": "application/json"
         }
 
+    def _normalize_anonymize_input(self, text: str) -> str:
+        """Ensure text is safe for API: non-empty, UTF-8, no null bytes."""
+        if not text or not isinstance(text, str):
+            return ""
+        text = text.replace("\x00", " ").strip()
+        try:
+            text.encode("utf-8").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        return text[:4000]  # Cap length to avoid token limits
+
     async def _anonymize_text(self, text: str, message_type: str = "question") -> str:
-        """Use OpenAI to rewrite text for anonymity"""
+        """
+        Use OpenAI to rewrite text for anonymity. Retries on 429, 5xx, connection errors.
+        Falls back to original text on any failure - never breaks the user flow.
+        """
+        text = self._normalize_anonymize_input(text)
+        if not text:
+            return ""
         headers = self._get_openai_headers()
         if not headers:
             return text
-        
-        try:
-            # Single prompt template (question/reply use same logic)
-            base_prompt = "Rewrite this Secret Santa {type} with MINIMAL changes - just enough to obscure writing style. "
-            base_prompt += "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
-            base_prompt += "Preserve the exact same meaning, tone, personality, slang, and emotion. "
-            base_prompt += "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
-            base_prompt += f"Original: {text}\n\nRewritten:"
-            
-            prompt = base_prompt.format(type=message_type)
-            
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 150,  # Allow longer responses to preserve original length
-                "temperature": 0.2  # Very low temperature for minimal changes
-            }
-            
-            # Use reasonable timeout for anonymization
-            session = await self.bot.http_mgr.get_session(timeout=20)
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                json=payload,
-                headers=headers
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    rewritten = result["choices"][0]["message"]["content"].strip()
-                    # Remove common AI response prefixes
-                    rewritten = rewritten.replace("Rewritten:", "").strip()
-                    return rewritten if rewritten else text
-                else:
+
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "Rewrite this Secret Santa {type} with MINIMAL changes - just enough to obscure writing style. "
+                    "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
+                    "Preserve the exact same meaning, tone, personality, slang, and emotion. "
+                    "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
+                    "Original: {text}\n\nRewritten:"
+                ).format(type=message_type, text=text)
+            }],
+            "max_tokens": 150,
+            "temperature": 0.2
+        }
+        last_error = None
+        for attempt in range(ANONYMIZE_RETRY_MAX):
+            try:
+                session = await self.bot.http_mgr.get_session(timeout=ANONYMIZE_TIMEOUT)
+                async with session.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=ANONYMIZE_TIMEOUT)
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        try:
+                            rewritten = result["choices"][0]["message"]["content"].strip()
+                        except (KeyError, TypeError, IndexError):
+                            return text
+                        rewritten = rewritten.replace("Rewritten:", "").strip()
+                        return rewritten if rewritten else text
+                    if resp.status in (429, 500, 502, 503) and attempt < ANONYMIZE_RETRY_MAX - 1:
+                        delay = ANONYMIZE_RETRY_BASE_DELAY * (2 ** attempt)
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                delay = min(float(retry_after), 30.0)
+                            except (ValueError, TypeError):
+                                pass
+                        self.logger.debug(
+                            f"Anonymization API {resp.status}, retrying in {delay:.1f}s "
+                            f"(attempt {attempt + 1}/{ANONYMIZE_RETRY_MAX})"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
                     self.logger.debug(f"Anonymization failed: {resp.status}")
                     return text
-                    
-        except Exception as e:
-            self.logger.debug(f"Anonymization error: {e}")
-            return text
+            except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
+                last_error = e
+                if attempt < ANONYMIZE_RETRY_MAX - 1:
+                    delay = ANONYMIZE_RETRY_BASE_DELAY * (2 ** attempt)
+                    self.logger.debug(
+                        f"Anonymization connection error, retrying in {delay:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+            except Exception as e:
+                last_error = e
+                self.logger.debug(f"Anonymization error: {e}")
+                break
+        return text
 
     def _archive_event(self, event: Dict[str, Any], year: int) -> str:
         """Archive event using the storage module"""
@@ -1243,6 +1404,10 @@ class SecretSantaCog(commands.Cog):
         end_at: Optional[str] = commands.Param(
             default=None,
             description="Optional: Date and time to auto-stop (e.g. 2025-12-31 23:59 or Dec 31 11:59 PM)"
+        ),
+        debug: bool = commands.Param(
+            default=False,
+            description="Debug mode: skip archive-exists warning (for testing algorithm with 2021-2025 history when current year already archived)"
         )
     ):
         """Start new Secret Santa event (optionally schedule automatic shuffle)"""
@@ -1268,9 +1433,10 @@ class SecretSantaCog(commands.Cog):
 
         # SAFETY WARNING: Check if current year is already archived
         # Prevents accidental data loss if you test on wrong server or run twice
+        # Debug mode: skip this warning so you can test algorithm with 2021–2025 history
         current_year = dt.date.today().year
         existing_archive = ARCHIVE_DIR / f"{current_year}.json"
-        if existing_archive.exists():
+        if existing_archive.exists() and not debug:
             embed = disnake.Embed(
                 title="⚠️ Year Already Archived",
                 description=f"An archive already exists for {current_year}!\n\n"
@@ -1290,16 +1456,15 @@ class SecretSantaCog(commands.Cog):
             embed.set_footer(text="✅ Your existing archive is safe and won't be overwritten!")
             await self._safe_edit_response(inter, embed=embed)
             
-            # Log this warning
             self.logger.warning(f"Starting new event for {current_year} but archive already exists!")
             if hasattr(self.bot, 'send_to_discord_log'):
                 await self.bot.send_to_discord_log(
                     f"⚠️ {safe_display_name(inter.author)} is starting a new Secret Santa {current_year} event, but {current_year}.json archive already exists!",
                     "WARNING"
                 )
-            
-            # Don't block - let user continue immediately, warning is already shown
-            # The warning embed is sufficient, no need to force a delay
+
+        if existing_archive.exists() and debug:
+            self.logger.info(f"Debug start: skipping archive warning, will use history from other years (excluding {current_year})")
 
         # Collect participants from the message reactions (may be empty if no one reacted yet)
         participants = {}
@@ -1324,7 +1489,8 @@ class SecretSantaCog(commands.Cog):
             try:
                 tz_info = ZoneInfo(schedule_timezone)
             except Exception:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content=f"❌ Invalid timezone: `{schedule_timezone}`.\n\n"
                             "Use a valid IANA name, e.g. `Europe/Stockholm`, `America/New_York`, `UTC`."
                 )
@@ -1347,7 +1513,8 @@ class SecretSantaCog(commands.Cog):
         if shuffle_at:
             scheduled_timestamp = self._parse_datetime_combined(shuffle_at, tz_info=tz_info)
             if not scheduled_timestamp:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content="❌ Invalid shuffle date/time. Use one string with both date and time.\n\n"
                            "**Examples:**\n"
                            "• `2025-12-25 14:30`\n"
@@ -1357,7 +1524,8 @@ class SecretSantaCog(commands.Cog):
                 return
             current_time = time.time()
             if scheduled_timestamp <= current_time:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content="❌ Scheduled shuffle time must be in the future!\n\n"
                            f"Current time: <t:{int(current_time)}:F>\n"
                            f"Your time: <t:{int(scheduled_timestamp)}:F>"
@@ -1369,7 +1537,8 @@ class SecretSantaCog(commands.Cog):
         if end_at:
             scheduled_stop_timestamp = self._parse_datetime_combined(end_at, tz_info=tz_info)
             if not scheduled_stop_timestamp:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content="❌ Invalid end date/time. Use one string with both date and time.\n\n"
                            "**Examples:**\n"
                            "• `2025-12-31 23:59`\n"
@@ -1379,14 +1548,16 @@ class SecretSantaCog(commands.Cog):
                 return
             current_time = time.time()
             if scheduled_stop_timestamp <= current_time:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content="❌ Scheduled stop time must be in the future!\n\n"
                            f"Current time: <t:{int(current_time)}:F>\n"
                            f"Your time: <t:{int(scheduled_stop_timestamp)}:F>"
                 )
                 return
             if scheduled_timestamp and scheduled_stop_timestamp <= scheduled_timestamp:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content="❌ Scheduled stop time must be after shuffle time!\n\n"
                            f"Shuffle: <t:{int(scheduled_timestamp)}:F>\n"
                            f"Stop: <t:{int(scheduled_stop_timestamp)}:F>"
@@ -1429,12 +1600,11 @@ class SecretSantaCog(commands.Cog):
             self.state["current_event"] = new_event
             await self._save_async()
 
-        # Send confirmation DMs
+        # Send confirmation DMs (rate-limited to avoid Discord 429)
         join_msg = self._get_join_message(current_year)
-        dm_tasks = [self._send_dm(int(uid), join_msg) for uid in participants]
-
-        results = await asyncio.gather(*dm_tasks, return_exceptions=True)
-        successful = sum(1 for r in results if r is True)
+        dm_items = [(int(uid), join_msg) for uid in participants]
+        failed = await self._send_dms_to_participants(dm_items)
+        successful = len(participants) - len(failed)
 
         # Build response message
         response_msg = (
@@ -1442,6 +1612,8 @@ class SecretSantaCog(commands.Cog):
             f"• Participants: {len(participants)}\n"
             f"• DMs sent: {successful}/{len(participants)}"
         )
+        if debug:
+            response_msg += f"\n• 🔧 Debug: archive warning skipped (shuffle will use history from other archived years)"
         if role:
             response_msg += f"\n• Role: {role.mention}"
         
@@ -1460,7 +1632,7 @@ class SecretSantaCog(commands.Cog):
         if (scheduled_timestamp or scheduled_stop_timestamp) and not schedule_timezone and not used_locale_tz:
             response_msg += "\n\n⏰ _Times are in **server (UTC)**. Discord shows them above in your local time. Set `schedule_timezone` (e.g. Europe/Stockholm) or use a Discord language we can map to a timezone._"
         
-        await inter.edit_original_response(response_msg)
+        await self._safe_edit_response(inter, content=response_msg)
         
         # Notify Discord log channel
         log_msg = f"Secret Santa {current_year} event started by {safe_display_name(inter.author)} - {len(participants)} participants joined"
@@ -1521,11 +1693,14 @@ class SecretSantaCog(commands.Cog):
             elif event.get("guild_id"):
                 guild = self.bot.get_guild(event["guild_id"])
 
-            # HISTORY LOADING: Load all past Secret Santa events from archive files
+            # HISTORY LOADING: Load all past Secret Santa events from archive files (run in executor - sync file I/O)
             # CRITICAL: Exclude current year from history - we're creating a NEW event for this year
-            # The current year's archive should only be used for history when creating events for FUTURE years
             current_year = self.state.get('current_year', dt.date.today().year)
-            history, available_years = load_history_from_archives(ARCHIVE_DIR, exclude_years=[current_year], logger=self.logger)
+            loop = asyncio.get_event_loop()
+            history, available_years = await loop.run_in_executor(
+                self._executor,
+                lambda: load_history_from_archives(ARCHIVE_DIR, exclude_years=[current_year], logger=self.logger)
+            )
             
             self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
             self.logger.info(f"Available history years: {available_years}")
@@ -1542,11 +1717,17 @@ class SecretSantaCog(commands.Cog):
                     exclude_years = available_years[:attempt]
                     fallback_used = True
                     self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
-                    history, _ = load_history_from_archives(ARCHIVE_DIR, exclude_years=exclude_years, logger=self.logger)
+                    # Use default arg to capture exclude_years at definition time (closure safety)
+                    exclude_copy = list(exclude_years)
+                    history, _ = await loop.run_in_executor(
+                        self._executor,
+                        lambda ex=exclude_copy: load_history_from_archives(ARCHIVE_DIR, exclude_years=ex, logger=self.logger)
+                    )
                     
                     if inter:
                         years_str = ", ".join(map(str, exclude_years))
-                        await inter.edit_original_response(
+                        await self._safe_edit_response(
+                            inter,
                             content=f"⚠️ Initial assignment difficult... trying fallback (excluding {years_str})..."
                         )
                 
@@ -1565,7 +1746,11 @@ class SecretSantaCog(commands.Cog):
                     continue
                 
                 try:
-                    assignments = make_assignments(participants, history, logger=self.logger)
+                    assignments = await loop.run_in_executor(
+                        self._executor,
+                        lambda: make_assignments(participants, history, logger=self.logger)
+                    )
+                    self.logger.info("Assignment algorithm succeeded")
                     break
                 except ValueError as e:
                     if attempt == len(available_years):
@@ -1593,6 +1778,7 @@ class SecretSantaCog(commands.Cog):
             event.pop("scheduled_shuffle_time", None)
             event.pop("scheduled_by_user_id", None)
             await self._save_async()
+            self.logger.info("Assignments saved, releasing lock before DMs")
         
         # Release lock before sending DMs (they can take time, don't block other operations)
         # Assignments are already saved, so concurrent shuffle attempts will see them and fail
@@ -1613,21 +1799,30 @@ class SecretSantaCog(commands.Cog):
                     except Exception as e:
                         self.logger.error(f"Unexpected error adding role to user {user_id}: {e}", exc_info=True)
 
-        # Send assignment DMs
-        dm_tasks = []
+        # Send assignment DMs with rate limiting (avoids 429) and track failures
         participants_dict = event.get("participants", {})
         current_year = self.state.get("current_year", dt.date.today().year)
+        dm_items = []
         for giver, receiver in assignments.items():
             receiver_name = participants_dict.get(str(receiver), f"User {receiver}")
-            msg = self._get_assignment_message(current_year, receiver, receiver_name)
-            dm_tasks.append(self._send_dm(giver, msg))
-
-        await asyncio.gather(*dm_tasks)
+            msg = self._get_assignment_message(current_year, int(receiver) if isinstance(receiver, str) else receiver, receiver_name)
+            dm_items.append((int(giver) if isinstance(giver, str) else giver, msg))
+        self.logger.info(f"Sending assignment DMs to {len(dm_items)} participants")
+        failed = await self._send_dms_to_participants(dm_items)
+        self.logger.info(f"DM send complete: {len(failed)} failed of {len(dm_items)}")
+        guild_id = event.get("guild_id")
+        if failed:
+            await self._post_fallback_for_failed_dms(guild_id, failed, "assignment", current_year)
+            if hasattr(self.bot, 'send_to_discord_log'):
+                await self.bot.send_to_discord_log(
+                    f"Secret Santa: {len(failed)} participant(s) did not receive assignment DM – fallback posted in channel",
+                    "WARNING",
+                )
 
         # Build success message
         response_msg = f"✅ Assignments complete!\n"
         response_msg += f"• {len(assignments)} pairs created\n"
-        response_msg += f"• DMs sent to all participants\n"
+        response_msg += f"• DMs sent to all participants" + (f" ({len(failed)} got fallback in channel)" if failed else "") + "\n"
         response_msg += f"• History respected (no repeated pairings!)\n"
         
         if fallback_used:
@@ -1638,12 +1833,18 @@ class SecretSantaCog(commands.Cog):
         if inter:
             await self._safe_edit_response(inter, content=response_msg)
         
-        # Notify Discord log channel
+        # Notify Discord log channel (DM stats: e.g. "5/5 DMs sent" or "4/5 DMs sent (1 fallback)")
+        total_dms = len(dm_items)
+        success_dms = total_dms - len(failed)
+        dm_stats = f"{success_dms}/{total_dms} DMs sent"
+        if failed:
+            dm_stats += f" ({len(failed)} fallback in channel)"
+        self.logger.info(f"Shuffle complete: {dm_stats}")
         executor_name = safe_display_name(inter.author) if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
         if hasattr(self.bot, 'send_to_discord_log'):
-            log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs created"
+            log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs, {dm_stats}"
             if fallback_used:
-                log_msg += f" (fallback: excluded years {', '.join(map(str, exclude_years))})"
+                log_msg += f" (history fallback: excluded {', '.join(map(str, exclude_years))})"
             await self.bot.send_to_discord_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")
         
         return True, None
@@ -1680,19 +1881,27 @@ class SecretSantaCog(commands.Cog):
         # Release lock before sending DMs (they can take time)
         # Event is already cleared, so concurrent stops will see no event and fail
         
-        # Send thank you message to all participants (safe uid conversion)
+        # Send thank you message to all participants with rate limiting and fallback
         participants = event.get("participants", {}) or {}
         if participants:
             end_msg = self._get_event_end_message(year)
-            dm_tasks = []
+            dm_items = []
             for uid in participants:
                 try:
-                    dm_tasks.append(self._send_dm(int(uid), end_msg))
+                    dm_items.append((int(uid), end_msg))
                 except (ValueError, TypeError):
                     continue
-            if dm_tasks:
-                await asyncio.gather(*dm_tasks, return_exceptions=True)
-        
+            if dm_items:
+                failed = await self._send_dms_to_participants(dm_items)
+                guild_id = event.get("guild_id")
+                if failed:
+                    await self._post_fallback_for_failed_dms(guild_id, failed, "stop", year)
+                    if hasattr(self.bot, 'send_to_discord_log'):
+                        await self.bot.send_to_discord_log(
+                            f"Secret Santa stop: {len(failed)} participant(s) did not receive DM – fallback posted in channel",
+                            "WARNING",
+                        )
+
         # Notify Discord log channel
         if hasattr(self.bot, 'send_to_discord_log'):
             participants_count = len(event.get("participants", {}))
@@ -2080,7 +2289,8 @@ class SecretSantaCog(commands.Cog):
             # No active event - check if archive exists for current year
             archive_path = ARCHIVE_DIR / f"{current_year}.json"
             if not archive_path.exists():
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content=f"❌ No active Secret Santa event, and no archive found for {current_year}.\n\n"
                            f"💡 If you want to edit a gift from a past year, use `/ss edit_gift [year]`"
                 )
@@ -2102,14 +2312,16 @@ class SecretSantaCog(commands.Cog):
                     assignments = {}
             else:
                 # Legacy format
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content=f"❌ Archive for {current_year} is in legacy format. Use `/ss edit_gift {current_year}` instead."
                 )
                 return
             
             # Check if user participated
             if user_id not in participants:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content=f"❌ You didn't participate in Secret Santa {current_year}."
                 )
                 return
@@ -2117,7 +2329,8 @@ class SecretSantaCog(commands.Cog):
             # Check if user has assignment
             receiver_id = assignments.get(user_id)
             if not receiver_id:
-                await inter.edit_original_response(
+                await self._safe_edit_response(
+                    inter,
                     content=f"❌ No assignment found for you in {current_year} archive."
                 )
                 return
@@ -2342,9 +2555,13 @@ class SecretSantaCog(commands.Cog):
                     archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
                     archive_data["statistics"]["completion_percentage"] = completion_percentage
             
-            # Save updated archive
+            # Save updated archive (run in executor to avoid blocking event loop)
             async with self._lock:
-                save_json(archive_path, archive_data, self.logger)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    self._executor,
+                    lambda: save_json(archive_path, archive_data, self.logger)
+                )
             
             # Create success embed
             receiver_name = user_assignment.get("receiver_name", "Unknown")
@@ -2501,10 +2718,16 @@ class SecretSantaCog(commands.Cog):
             await self._safe_edit_response(inter, content=f"❌ Invalid item number! You only have {len(user_wishlist)} items.")
             return
 
-        # Remove item
-        removed_item = user_wishlist.pop(item_number - 1)
-
+        # Remove item (inside lock to prevent race with concurrent wishlist operations)
         async with self._lock:
+            wishlists = event.get("wishlists") or {}
+            if not isinstance(wishlists, dict):
+                wishlists = {}
+            user_wishlist = wishlists.get(user_id)
+            if not isinstance(user_wishlist, list) or item_number > len(user_wishlist):
+                await self._safe_edit_response(inter, content="❌ Wishlist changed, please try again.")
+                return
+            removed_item = user_wishlist.pop(item_number - 1)
             await self._save_async()
 
         embed = self._success_embed(

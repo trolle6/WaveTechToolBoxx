@@ -10,6 +10,9 @@ FEATURES:
 - ⚡ LRU caching for TTS audio and pronunciations
 - 🔧 Circuit breaker for API failure protection
 - 🚦 Rate limiting
+- 🔄 API retry with exponential backoff (429, 5xx) and Retry-After support
+- 🛡️ Defensive validation (voice, UTF-8, empty responses)
+- 🔌 Robust voice connection with edge-case handling
 
 COMMANDS:
 - /tts stats - View performance metrics
@@ -81,6 +84,12 @@ MESSAGE_EXPIRY_TIME = 60  # 1 minute - TTS items expire after this time
 CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5  # Open circuit after this many failures
 CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # Try recovery after this many seconds
 CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
+
+# API Retry Configuration (professional: exponential backoff, Retry-After support)
+TTS_API_RETRY_MAX_ATTEMPTS = 3  # Total attempts (1 initial + 2 retries)
+TTS_API_RETRY_BASE_DELAY = 1.0  # Base delay in seconds
+TTS_API_RETRY_MAX_DELAY = 30.0  # Cap delay (e.g. from Retry-After)
+MIN_VALID_AUDIO_SIZE = 100  # Reject API responses smaller than this (likely errors)
 
 # Audio Processing - MP3 + FFmpegPCMAudio + PCMVolumeTransformer (avoids Opus re-encode)
 AUDIO_VOLUME_MULTIPLIER = 0.7  # 70% volume for clarity without clipping
@@ -520,7 +529,10 @@ class VoiceProcessingCog(commands.Cog):
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()
-                    improved = result["choices"][0]["message"]["content"].strip()
+                    try:
+                        improved = result["choices"][0]["message"]["content"].strip()
+                    except (KeyError, TypeError, IndexError):
+                        return text
                     improved = improved.replace("Improved:", "").strip()
                     final_text = improved if improved else text
                     await self.pronunciation_cache.set(text, final_text)
@@ -591,6 +603,7 @@ class VoiceProcessingCog(commands.Cog):
         
         Converts rendered Discord emojis (like <:saul-1:123456>) to their names (like "saul-1")
         so TTS can speak them. Removes other Discord formatting (mentions, URLs, etc.).
+        Safe against None, invalid types, and malformed input.
         
         Args:
             text: Text to clean
@@ -598,7 +611,7 @@ class VoiceProcessingCog(commands.Cog):
         
         OpenAI TTS API supports up to 4096 characters per request.
         """
-        if text is None:
+        if text is None or not isinstance(text, str):
             return ""
         original_length = len(text)
         # Normalize excessive formatting: multiple newlines, dashes, etc.
@@ -674,7 +687,7 @@ class VoiceProcessingCog(commands.Cog):
         Returns:
             List of text chunks, each <= max_chunk_size, split at sentence boundaries when possible
         """
-        if not text:
+        if not text or not isinstance(text, str):
             return []
         original_length = len(text)
         self.logger.debug(f"Splitting text: original length={original_length}, max_chunk_size={max_chunk_size}")
@@ -728,14 +741,40 @@ class VoiceProcessingCog(commands.Cog):
         key_str = f"opus:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
+    def _normalize_text_for_api(self, text: str) -> str:
+        """
+        Ensure text is valid for API: UTF-8 safe, no null bytes, trimmed.
+        Prevents API rejections from malformed Unicode.
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        # Replace null bytes and other problematic control chars
+        text = text.replace("\x00", " ").replace("\r", "")
+        # Ensure valid UTF-8 (replace invalid sequences with replacement char)
+        try:
+            text.encode("utf-8").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        return text.strip()
+
     async def _generate_tts(self, text: str, voice: str = None) -> Optional[bytes]:
-        """Generate TTS audio"""
-        if not text or not (isinstance(text, str) and text.strip()):
+        """
+        Generate TTS audio with retry logic, defensive validation, and proper error handling.
+        
+        Professional patterns: exponential backoff for 429/5xx, Retry-After header support,
+        voice validation, UTF-8 normalization, empty response validation.
+        """
+        text = self._normalize_text_for_api(text)
+        if not text:
             return None
         if not await self.circuit_breaker.can_attempt():
+            self.logger.debug("Circuit breaker open, skipping TTS request")
             return None
 
         voice = voice or self.default_voice
+        if voice not in self.available_voices:
+            self.logger.warning(f"Invalid voice '{voice}', using default")
+            voice = self.default_voice
         cache_key = self._cache_key(text, voice)
 
         # Check cache
@@ -744,60 +783,100 @@ class VoiceProcessingCog(commands.Cog):
             self.total_cached += 1
             return cached
 
-        # Make API request
-        self.total_requests += 1
-
         headers = self._get_openai_headers()
-
         payload = {
-            "model": "tts-1-hd",  # Higher quality
+            "model": "tts-1-hd",
             "input": text,
             "voice": voice,
-            "response_format": "mp3",  # MP3: single decode in FFmpeg, then library encodes to Opus once (no Opus→Opus re-encode)
-            "speed": TTS_SPEED  # 1.0 = natural speed
+            "response_format": "mp3",
+            "speed": TTS_SPEED
         }
-        
-        # Log what we're sending to API (first 200 chars for debugging)
-        self.logger.debug(f"Sending to TTS API: length={len(text)}, preview={text[:200]}...")
+        self.logger.debug(f"Sending to TTS API: length={len(text)}, voice={voice}")
 
-        try:
-            # Dynamic timeout calculation: scales with text length to handle long messages
-            # Base timeout + proportional time per 100 chars, clamped to reasonable bounds
-            text_timeout = (len(text) / 100 * TTS_API_TIMEOUT_PER_100_CHARS) + TTS_API_TIMEOUT_BASE
-            tts_timeout = max(TTS_API_TIMEOUT_BASE, min(TTS_API_TIMEOUT_MAX, text_timeout))
-            self.logger.debug(f"TTS API timeout: {tts_timeout:.1f}s (text_length={len(text)}, calculated={text_timeout:.1f})")
-            session = await self.bot.http_mgr.get_session()
-            
-            # Use request-level timeout to override session timeout
-            request_timeout = aiohttp.ClientTimeout(total=tts_timeout)
-            async with session.post(self.tts_url, json=payload, headers=headers, timeout=request_timeout) as resp:
-                if resp.status == 200:
-                    audio = await resp.read()
-                    await self.cache.set(cache_key, audio)
-                    await self.circuit_breaker.record_success()
-                    return audio
-                elif resp.status == 429:
-                    self.logger.warning("Rate limited by TTS API")
+        text_timeout = (len(text) / 100 * TTS_API_TIMEOUT_PER_100_CHARS) + TTS_API_TIMEOUT_BASE
+        tts_timeout = max(TTS_API_TIMEOUT_BASE, min(TTS_API_TIMEOUT_MAX, text_timeout))
+
+        last_error: Optional[Exception] = None
+        for attempt in range(TTS_API_RETRY_MAX_ATTEMPTS):
+            try:
+                self.total_requests += 1
+                session = await self.bot.http_mgr.get_session()
+                request_timeout = aiohttp.ClientTimeout(total=tts_timeout)
+                async with session.post(
+                    self.tts_url, json=payload, headers=headers, timeout=request_timeout
+                ) as resp:
+                    if resp.status == 200:
+                        audio = await resp.read()
+                        if not audio or len(audio) < MIN_VALID_AUDIO_SIZE:
+                            self.logger.error(
+                                f"TTS API returned empty or too-small response: {len(audio) if audio else 0} bytes"
+                            )
+                            await self.circuit_breaker.record_failure()
+                            self.total_failed += 1
+                            return None
+                        await self.cache.set(cache_key, audio)
+                        await self.circuit_breaker.record_success()
+                        return audio
+
+                    # Retryable status codes
+                    if resp.status in (429, 500, 502, 503):
+                        error_body = await resp.text()
+                        retry_after = None
+                        if resp.status == 429 and "Retry-After" in resp.headers:
+                            try:
+                                retry_after = float(resp.headers["Retry-After"])
+                                retry_after = min(retry_after, TTS_API_RETRY_MAX_DELAY)
+                            except (ValueError, TypeError):
+                                pass
+                        delay = retry_after or (
+                            TTS_API_RETRY_BASE_DELAY * (2 ** attempt)
+                        )
+                        if attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
+                            self.logger.warning(
+                                f"TTS API {resp.status}: {error_body[:200]}. "
+                                f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        self.logger.error(f"TTS API error {resp.status} after retries: {error_body[:300]}")
+                    else:
+                        error_body = await resp.text()
+                        self.logger.error(f"TTS API error {resp.status}: {error_body[:300]}")
                     await self.circuit_breaker.record_failure()
                     self.total_failed += 1
                     return None
-                else:
-                    error = await resp.text()
-                    self.logger.error(f"TTS API error {resp.status}: {error}")
-                    await self.circuit_breaker.record_failure()
-                    self.total_failed += 1
-                    return None
 
-        except asyncio.TimeoutError:
-            self.logger.error("TTS request timeout")
+            except asyncio.TimeoutError as e:
+                last_error = e
+                self.logger.warning(f"TTS request timeout (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})")
+                if attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
+                    delay = TTS_API_RETRY_BASE_DELAY * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    continue
+                self.logger.error("TTS request timeout after retries")
+            except (aiohttp.ClientError, aiohttp.ClientConnectorError, ConnectionError) as e:
+                last_error = e
+                self.logger.warning(
+                    f"TTS connection error: {e} (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})"
+                )
+                if attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
+                    delay = TTS_API_RETRY_BASE_DELAY * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    continue
+                self.logger.error(f"TTS connection error after retries: {e}", exc_info=True)
+            except Exception as e:
+                last_error = e
+                self.logger.error(f"TTS request error: {e}", exc_info=True)
+                break
+
             await self.circuit_breaker.record_failure()
             self.total_failed += 1
             return None
-        except Exception as e:
-            self.logger.error(f"TTS request error: {e}", exc_info=True)
+
+        if last_error:
             await self.circuit_breaker.record_failure()
             self.total_failed += 1
-            return None
+        return None
 
     # ============ AUDIO PLAYBACK ============
     async def _play_audio(self, vc: disnake.VoiceClient, audio_data: bytes) -> bool:
@@ -823,10 +902,14 @@ class VoiceProcessingCog(commands.Cog):
                     vc.stop()
                     await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL * 2)  # Brief pause after stopping
 
-            # Create temp file (MP3)
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
-                f.write(audio_data)
-                temp_file = f.name
+            # Create temp file (MP3) - delete=False so we control cleanup; always cleanup in finally/after
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+                    f.write(audio_data)
+                    temp_file = f.name
+            except OSError as e:
+                self.logger.error(f"Failed to create temp file for TTS playback: {e}")
+                return False
 
             # MP3 → FFmpeg decodes to PCM 48kHz stereo → PCMVolumeTransformer applies volume → library encodes to Opus once.
             # No Opus re-encode = no slow/double-voice artifacts.
@@ -948,52 +1031,79 @@ class VoiceProcessingCog(commands.Cog):
 
     # ============ VOICE CONNECTION ============
     async def _connect_to_voice(self, channel: disnake.VoiceChannel, timeout: int = 10) -> Optional[disnake.VoiceClient]:
-        """Connect to voice channel with retry"""
+        """
+        Connect to voice channel with retries and robust edge-case handling.
+        
+        Handles: already-connected, stale clients, ClientException, OSError.
+        Professional pattern: verify channel still exists and has humans before connecting.
+        """
         guild = channel.guild
+        if not guild:
+            return None
 
-        # Check if already connected to this channel
-        if (vc := guild.voice_client) and vc.is_connected() and vc.channel.id == channel.id:
-            return vc
+        vc = guild.voice_client
 
-        # Cleanup existing connection if needed
-        if vc:
-            if vc.is_connected():
+        # Already connected to this exact channel - verify and return
+        if vc and vc.is_connected():
+            ch = getattr(vc, "channel", None)
+            if ch and ch.id == channel.id:
+                return vc
+            # Connected elsewhere - disconnect first
+            try:
                 await vc.disconnect()
-            else:
-                try:
-                    vc.cleanup()
-                except Exception:
-                    pass
-                await asyncio.sleep(VOICE_CLEANUP_DELAY)
+            except Exception as e:
+                self.logger.debug(f"Disconnect during reconnect: {e}")
+            await asyncio.sleep(VOICE_CLEANUP_DELAY)
 
-        # Connect with retry
-        for attempt in range(3):
+        # Cleanup stale/invalid voice client (e.g. not connected but not cleaned)
+        if vc and not vc.is_connected():
+            try:
+                vc.cleanup()
+            except Exception:
+                pass
+            vc = None
+            await asyncio.sleep(VOICE_CLEANUP_DELAY)
+
+        max_attempts = 4  # Extra attempt for stubborn "already connected" cases
+        for attempt in range(max_attempts):
             try:
                 vc = await asyncio.wait_for(
                     channel.connect(timeout=timeout, reconnect=False),
                     timeout=timeout + 5
                 )
-                self.logger.info(f"Connected to {channel.name}")
-                
-                # Self-deafen
+                self.logger.info(f"Connected to {channel.name} (attempt {attempt + 1})")
                 try:
                     await guild.change_voice_state(channel=channel, self_deaf=True)
                 except Exception:
                     pass
-                
                 return vc
             except disnake.ClientException as e:
-                if "already connected" in str(e).lower() and (vc := guild.voice_client):
-                    if vc.is_connected() and vc.channel.id == channel.id:
-                        return vc
-                    await vc.disconnect(force=True)
-                    await asyncio.sleep(VOICE_CLEANUP_DELAY * 1.67)  # Slightly longer after force disconnect
+                err_lower = str(e).lower()
+                if "already connected" in err_lower:
+                    vc = guild.voice_client
+                    if vc and vc.is_connected():
+                        ch = getattr(vc, "channel", None)
+                        if ch and ch.id == channel.id:
+                            return vc
+                    try:
+                        if vc:
+                            await vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(VOICE_CLEANUP_DELAY * 2)
+                else:
+                    self.logger.warning(f"Voice ClientException: {e}")
+                    if attempt == max_attempts - 1:
+                        return None
+            except (OSError, asyncio.TimeoutError) as e:
+                self.logger.warning(f"Voice connection error: {e}")
+                if attempt == max_attempts - 1:
+                    return None
             except Exception as e:
-                if attempt == 2:
-                    self.logger.error(f"Connection failed after {attempt + 1} attempts: {e}")
+                self.logger.error(f"Voice connection failed: {e}", exc_info=True)
+                if attempt == max_attempts - 1:
                     return None
             await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
-        
         return None
 
     # ============ STATE MANAGEMENT ============
@@ -1231,7 +1341,8 @@ class VoiceProcessingCog(commands.Cog):
         if not await self.rate_limiter.check(str(message.author.id)):
             return
 
-        # Name announcement (with 2-hour cooldown)
+        # Name announcement: check if this session warrants "X says:" prefix (2-hour cooldown)
+        # We only record the announcement AFTER we successfully queue, so empty/filtered messages don't consume it
         guild_id = message.guild.id
         user_id = message.author.id
         current_time = time.time()
@@ -1239,15 +1350,9 @@ class VoiceProcessingCog(commands.Cog):
         async with self._announcement_lock:
             if guild_id not in self._announced_users:
                 self._announced_users[guild_id] = {}
-            
             last_announcement = self._announced_users[guild_id].get(user_id, 0)
             time_since_announcement = current_time - last_announcement
-            
-            # Announce if never announced, or if 2 hours have passed since last announcement
             is_first_message = (last_announcement == 0) or (time_since_announcement >= NAME_ANNOUNCEMENT_COOLDOWN)
-            
-            if is_first_message:
-                self._announced_users[guild_id][user_id] = current_time
 
         # Log original message length (content can be None for embed-only messages)
         raw_content = message.content or ""
@@ -1309,6 +1414,13 @@ class VoiceProcessingCog(commands.Cog):
                 break
 
         self.logger.info(f"Message processing complete: {original_content_length} chars → {len(text_chunks)} chunks → {chunks_queued} queued")
+
+        # Record name announcement only when we actually queued (so empty/filtered messages don't consume it)
+        if chunks_queued > 0 and is_first_message:
+            async with self._announcement_lock:
+                if guild_id not in self._announced_users:
+                    self._announced_users[guild_id] = {}
+                self._announced_users[guild_id][user_id] = current_time
 
         # Start processor if not already running and we queued at least one chunk
         if chunks_queued > 0:
@@ -1459,15 +1571,14 @@ class VoiceProcessingCog(commands.Cog):
             except Exception:
                 pass
 
-        # Cleanup orphaned states (more efficient: single guild lookup)
+        # Cleanup orphaned states (release lock before _remove_state to avoid deadlock)
         async with self._state_lock:
-            orphaned = []
-            for gid in list(self.guild_states.keys()):
-                guild = self.bot.get_guild(gid)
-                if not guild or not guild.voice_client:
-                    orphaned.append(gid)
-            for gid in orphaned:
-                await self._remove_state(gid)
+            orphaned = [
+                gid for gid in list(self.guild_states.keys())
+                if not (guild := self.bot.get_guild(gid)) or not guild.voice_client
+            ]
+        for gid in orphaned:
+            await self._remove_state(gid)
 
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self.logger.info("Voice cog loaded")
@@ -1636,7 +1747,7 @@ class VoiceProcessingCog(commands.Cog):
     @tts_cmd.sub_command(name="clear", description="Clear TTS queue")
     @manage_guild_check()
     async def tts_clear(self, inter: disnake.ApplicationCommandInteraction):
-        """Clear queue"""
+        """Clear queue - drains until empty (reliable for async queues)"""
         await inter.response.defer(ephemeral=True)
         if not self.enabled:
             await inter.edit_original_response(content="❌ TTS is disabled")
@@ -1647,12 +1758,16 @@ class VoiceProcessingCog(commands.Cog):
         async with self._state_lock:
             if inter.guild.id in self.guild_states:
                 state = self.guild_states[inter.guild.id]
-                while not state.queue.empty():
+                cleared = 0
+                while True:
                     try:
                         state.queue.get_nowait()
+                        cleared += 1
                     except asyncio.QueueEmpty:
                         break
-                await inter.edit_original_response(content="✅ Queue cleared")
+                await inter.edit_original_response(
+                    content=f"✅ Queue cleared ({cleared} item{'s' if cleared != 1 else ''} removed)"
+                )
             else:
                 await inter.edit_original_response(content="❌ No active queue")
 

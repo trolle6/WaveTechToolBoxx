@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Secret Santa Deployment Script
-Ensures consistent deployment between environments
+WaveTechToolBox Deployment Script
+
+Validates Python version, dependencies, environment, and file structure
+before deployment. Run before starting the bot in production.
 """
 
 import os
-import sys
 import subprocess
-import json
+import sys
 from pathlib import Path
 
 def check_python_version():

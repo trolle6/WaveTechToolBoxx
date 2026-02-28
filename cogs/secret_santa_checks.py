@@ -8,27 +8,28 @@ RESPONSIBILITIES:
 
 from __future__ import annotations
 
+from typing import Optional
+
 import disnake
 from disnake.ext import commands
 
 
+def _get_member_from_inter(inter: disnake.ApplicationCommandInteraction) -> Optional[disnake.Member]:
+    """Resolve Member from interaction (guild-only). Returns None in DMs or if member not found."""
+    if not inter.guild:
+        return None
+    if isinstance(inter.author, disnake.Member):
+        return inter.author
+    return inter.guild.get_member(inter.author.id)
+
+
 def mod_check():
-    """Check if user is mod or admin"""
+    """Check if user is mod or admin."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        # Mod checks only work in guilds (not DMs)
-        if not inter.guild:
+        member = _get_member_from_inter(inter)
+        if not member:
             return False
-        
-        # In DMs, inter.author is a User, not a Member
-        # We need to get the Member from the guild
-        if isinstance(inter.author, disnake.Member):
-            member = inter.author
-        else:
-            # Try to get member from guild
-            member = inter.guild.get_member(inter.author.id)
-            if not member:
-                return False
-        
+
         # Check administrator permission
         if member.guild_permissions.administrator:
             return True
@@ -48,43 +49,19 @@ def mod_check():
 
 
 def admin_check():
-    """Check if user is administrator (guild-only, fails in DMs)"""
+    """Check if user is administrator (guild-only, fails in DMs)."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        # Admin checks only work in guilds (not DMs)
-        if not inter.guild:
-            return False
-        
-        # Get Member object
-        if isinstance(inter.author, disnake.Member):
-            member = inter.author
-        else:
-            member = inter.guild.get_member(inter.author.id)
-            if not member:
-                return False
-        
-        # Check administrator permission
-        return member.guild_permissions.administrator
+        member = _get_member_from_inter(inter)
+        return member.guild_permissions.administrator if member else False
 
     return commands.check(predicate)
 
 
 def manage_guild_check():
-    """Check if user has manage_guild permission (guild-only, fails in DMs)"""
+    """Check if user has manage_guild permission (guild-only, fails in DMs)."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        # Manage guild checks only work in guilds (not DMs)
-        if not inter.guild:
-            return False
-        
-        # Get Member object
-        if isinstance(inter.author, disnake.Member):
-            member = inter.author
-        else:
-            member = inter.guild.get_member(inter.author.id)
-            if not member:
-                return False
-        
-        # Check manage_guild permission
-        return member.guild_permissions.manage_guild
+        member = _get_member_from_inter(inter)
+        return member.guild_permissions.manage_guild if member else False
 
     return commands.check(predicate)
 
@@ -98,21 +75,25 @@ def participant_check():
                 return False
 
             event = cog.state.get("current_event")
-            if not event or not event.get("active"):
+            if not event or not isinstance(event, dict) or not event.get("active"):
                 return False
-
-            return str(inter.author.id) in event.get("participants", {})
+            participants = event.get("participants") or {}
+            if not isinstance(participants, dict):
+                return False
+            return str(inter.author.id) in participants
         except Exception:
             return False
 
     return commands.check(predicate)
 
 
-def safe_display_name(author: disnake.User | disnake.Member) -> str:
+def safe_display_name(author: disnake.User | disnake.Member | None) -> str:
     """
     Safely get display_name from User or Member object.
-    Returns display_name for Member, name for User.
+    Returns display_name for Member, name for User, or fallback for None.
     """
+    if author is None:
+        return "Unknown"
     if isinstance(author, disnake.Member):
-        return author.display_name
-    return author.name
+        return author.display_name or author.name or "Unknown"
+    return getattr(author, "name", None) or "Unknown"

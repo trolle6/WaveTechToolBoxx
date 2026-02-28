@@ -277,6 +277,8 @@ class DALLECog(commands.Cog):
                             self.logger.error(f"Failed to parse JSON response: {json_err}")
                             if attempt < self.max_retries - 1:
                                 continue
+                            async with self._stats_lock:
+                                self.stats["failed"] += 1
                             return {"success": False, "error": "Invalid API response format"}
                         
                         async with self._stats_lock:
@@ -290,6 +292,8 @@ class DALLECog(commands.Cog):
                             self.logger.warning(f"Rate limited, waiting {wait}s")
                             await asyncio.sleep(wait)
                             continue
+                        async with self._stats_lock:
+                            self.stats["failed"] += 1
                         return {"success": False, "error": f"Rate limited. Try again in {retry_after}s"}
 
                     elif resp.status == 400:
@@ -301,11 +305,17 @@ class DALLECog(commands.Cog):
                             error_msg = "Bad request (could not parse error message)"
                         
                         if "content_policy" in error_msg.lower():
+                            async with self._stats_lock:
+                                self.stats["failed"] += 1
                             return {"success": False, "error": "🚫 Content policy violation"}
+                        async with self._stats_lock:
+                            self.stats["failed"] += 1
                         return {"success": False, "error": f"Invalid request: {error_msg}"}
 
                     elif resp.status == 401:
                         self.logger.error("API authentication failed - check OPENAI_API_KEY")
+                        async with self._stats_lock:
+                            self.stats["failed"] += 1
                         return {"success": False, "error": "🔒 API authentication failed"}
 
                     else:
@@ -313,12 +323,16 @@ class DALLECog(commands.Cog):
                         if attempt < self.max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                             continue
+                        async with self._stats_lock:
+                            self.stats["failed"] += 1
                         return {"success": False, "error": f"API error {resp.status}"}
 
             except asyncio.TimeoutError:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
+                async with self._stats_lock:
+                    self.stats["failed"] += 1
                 return {"success": False, "error": "⏰ Request timeout"}
 
             except Exception as e:
@@ -326,8 +340,11 @@ class DALLECog(commands.Cog):
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
+                async with self._stats_lock:
+                    self.stats["failed"] += 1
                 return {"success": False, "error": f"Unexpected error: {str(e)[:50]}"}
 
+        # Fallback (should not be reached - all retries return above)
         async with self._stats_lock:
             self.stats["failed"] += 1
         return {"success": False, "error": "Max retries exceeded"}
@@ -368,9 +385,9 @@ class DALLECog(commands.Cog):
                         self.stats["total_time"] += elapsed
 
                     # Cache if successful
-                    if result.get("success") and result.get("data"):
+                    image_url = self._extract_image_url(result) if result.get("success") else None
+                    if image_url:
                         cache_key = self._cache_key(job.prompt, job.size, job.quality)
-                        image_url = result["data"]["data"][0]["url"]
                         await self.cache.set(cache_key, image_url)
 
                     # Send result
@@ -382,6 +399,12 @@ class DALLECog(commands.Cog):
                     raise
                 except Exception as e:
                     self.logger.error(f"Queue processing error: {e}", exc_info=True)
+                    try:
+                        await self._send_result(
+                            job, {"success": False, "error": "An error occurred during generation"}, 0.0
+                        )
+                    except Exception:
+                        pass
                     await asyncio.sleep(1)
                 finally:
                     self.is_processing = False
@@ -390,6 +413,27 @@ class DALLECog(commands.Cog):
             pass
 
     # ============ RESULT HANDLING ============
+    def _extract_image_url(self, result: Dict) -> Optional[str]:
+        """Safely extract image URL from our result wrapper. Returns None if structure is invalid.
+
+        result = {"success": True, "data": <api_response>}
+        api_response = {"created": ..., "data": [{"url": "...", ...}]}  (OpenAI Images API)
+        """
+        try:
+            api_response = result.get("data")
+            if not isinstance(api_response, dict):
+                return None
+            images = api_response.get("data")
+            if not isinstance(images, list) or len(images) == 0:
+                return None
+            first = images[0]
+            if not isinstance(first, dict):
+                return None
+            url = first.get("url")
+            return str(url) if url else None
+        except (KeyError, IndexError, TypeError):
+            return None
+
     async def _send_result(self, job: GenerationJob, result: Dict, elapsed: float):
         """Send generation result"""
         try:
@@ -398,7 +442,12 @@ class DALLECog(commands.Cog):
                 await job.interaction.edit_original_response(embed=embed)
                 return
 
-            image_url = result["data"]["data"][0]["url"]
+            image_url = self._extract_image_url(result)
+            if not image_url:
+                embed = self._create_error_embed("Invalid API response format", elapsed)
+                await job.interaction.edit_original_response(embed=embed)
+                return
+
             embed = self._create_success_embed(image_url, job.prompt, job.quality, elapsed)
             await job.interaction.edit_original_response(embed=embed)
 

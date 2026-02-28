@@ -2,20 +2,31 @@
 File Browser for DistributeZip - Interactive file selection UI
 
 Provides an interactive file browser using Discord select menus
-to make file selection easier than typing file names.
+to make file selection easier than typing file names. Supports
+get, remove, and browse actions.
 """
 
-import disnake
 from pathlib import Path
-from typing import List, Optional, Callable, Awaitable, Tuple
+from typing import Callable, Awaitable, List, Optional, Tuple
+
+import disnake
 
 
 def create_file_browser_view(
     files_dir: Path,
     metadata: dict,
     action_type: str = "get"
-) -> Tuple[disnake.Embed, Optional['FileBrowserSelectView']]:
-    """Create a file browser view for file selection"""
+) -> Tuple[disnake.Embed, Optional["FileBrowserSelectView"]]:
+    """Create a file browser embed and view for file selection.
+
+    Args:
+        files_dir: Directory containing distributed files.
+        metadata: File metadata dict with "files" key.
+        action_type: "get", "remove", or "browse" - determines placeholder text.
+
+    Returns:
+        Tuple of (embed, view). View is None if no files available.
+    """
     files = metadata.get("files") if isinstance(metadata, dict) else None
     if not isinstance(files, dict) or not files:
         embed = disnake.Embed(
@@ -58,7 +69,7 @@ def create_file_browser_view(
 
 
 class FileSelectMenu(disnake.ui.Select):
-    """Select menu for file selection"""
+    """Discord select menu for file selection."""
     
     def __init__(self, options: List[disnake.SelectOption], placeholder: str):
         super().__init__(
@@ -103,7 +114,7 @@ class FileSelectMenu(disnake.ui.Select):
 
 
 class FileBrowserSelectView(disnake.ui.View):
-    """Interactive file browser using Discord select menus"""
+    """Interactive file browser using Discord select menus (max 25 options)."""
     
     def __init__(self, files_dir: Path, metadata: dict, sorted_files: List, action_type: str, timeout: float = 300):
         super().__init__(timeout=timeout)

@@ -13,7 +13,6 @@ This handles everything else.
 """
 
 import asyncio
-import functools
 import json
 import secrets
 import time
@@ -27,38 +26,13 @@ from disnake.ext import commands
 
 from .secret_santa_views import EventListPaginator
 from .secret_santa_checks import manage_guild_check, safe_display_name
+from .utils import autocomplete_safety_wrapper
 
 
 # Paths
 ROOT = Path(__file__).parent
 EVENTS_DIR = ROOT / "custom_events"
 EVENTS_DIR.mkdir(exist_ok=True)
-
-
-def autocomplete_safety_wrapper(func):
-    """Decorator to ensure autocomplete functions always return a list"""
-    @functools.wraps(func)
-    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
-        try:
-            result = await func(self, inter, string)
-            # Ensure result is always a list
-            if isinstance(result, list):
-                return [str(item) for item in result]  # Ensure all items are strings
-            elif result is None:
-                return []
-            elif isinstance(result, str):
-                self.logger.error(f"{func.__name__} returned string: '{result}'")
-                return []
-            else:
-                try:
-                    return [str(item) for item in list(result)]
-                except Exception:
-                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
-                    return []
-        except Exception as e:
-            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
-            return []
-    return wrapper
 
 
 # ============ BASE CLASSES ============
@@ -305,136 +279,50 @@ class CustomEventsCog(commands.Cog):
             if event.guild_id == guild_id
         ]
     
-    def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
-        """Universal safety wrapper - ensures autocomplete always returns a list"""
-        if isinstance(result, list):
-            # Ensure all items are strings
-            return [str(item) for item in result]
-        elif result is None:
-            return []
-        elif isinstance(result, str):
-            # If somehow a string was returned, log it and return empty list
-            self.logger.error(f"{function_name} returned string instead of list: {result}")
-            return []
-        else:
-            # Try to convert to list, or return empty
-            try:
-                return list(result) if result else []
-            except Exception:
-                self.logger.error(f"{function_name} returned invalid type: {type(result)}")
-                return []
-    
+    @autocomplete_safety_wrapper
     async def _autocomplete_event_id(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete function for event_id selection - returns event IDs as strings"""
-        try:
-            if not inter.guild:
-                return []
-            
-            events = self._get_available_events(inter.guild.id)
-            if not events:
-                return []
-            
-            # Sort by event ID (most recent first)
-            events.sort(key=lambda x: x[0], reverse=True)
-            
-            # Filter events that match the input string (by ID or name)
-            string_lower = string.lower() if string else ""
-            matching_ids = []
-            for event_id, event in events:
-                # Match by ID or name
-                if not string or string_lower in str(event_id) or string_lower in event.name.lower():
-                    matching_ids.append(str(event_id))
-            
-            # Return up to 25 options (Discord limit)
-            result = matching_ids[:25]
-            return self._ensure_list_result(result, "_autocomplete_event_id")
-        except Exception as e:
-            self.logger.error(f"Error in event_id autocomplete: {e}", exc_info=True)
-            return []  # Always return a list, even on error
-    
+        """Autocomplete function for event_id selection - returns event IDs as strings."""
+        if not inter.guild:
+            return []
+
+        events = self._get_available_events(inter.guild.id)
+        if not events:
+            return []
+
+        events.sort(key=lambda x: x[0], reverse=True)
+        string_lower = (string or "").lower()
+        return [
+            str(event_id)
+            for event_id, event in events
+            if not string or string_lower in str(event_id) or string_lower in event.name.lower()
+        ][:25]
+
     async def autocomplete_event_id_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for join event_id parameter"""
-        try:
-            result = await self._autocomplete_event_id(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_event_id_join")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_event_id_join: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_event_id_join: {e}", exc_info=True)
-            return []
-    
+        """Autocomplete for join event_id parameter."""
+        return await self._autocomplete_event_id(inter, string)
+
     async def autocomplete_event_id_shuffle(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for shuffle event_id parameter"""
-        try:
-            result = await self._autocomplete_event_id(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_event_id_shuffle")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_event_id_shuffle: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_event_id_shuffle: {e}", exc_info=True)
-            return []
-    
+        """Autocomplete for shuffle event_id parameter."""
+        return await self._autocomplete_event_id(inter, string)
+
     async def autocomplete_event_id_view(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for view event_id parameter"""
-        try:
-            result = await self._autocomplete_event_id(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_event_id_view")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_event_id_view: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_event_id_view: {e}", exc_info=True)
-            return []
-    
+        """Autocomplete for view event_id parameter."""
+        return await self._autocomplete_event_id(inter, string)
+
     async def autocomplete_event_id_stop(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for stop event_id parameter"""
-        try:
-            result = await self._autocomplete_event_id(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_event_id_stop")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_event_id_stop: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_event_id_stop: {e}", exc_info=True)
-            return []
-    
+        """Autocomplete for stop event_id parameter."""
+        return await self._autocomplete_event_id(inter, string)
+
+    @autocomplete_safety_wrapper
     async def autocomplete_timezone_join(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for join timezone parameter - suggests common timezones"""
-        try:
-            # Common timezones (UTC offsets from -12 to +14)
-            common_timezones = [
-                "UTC-12", "UTC-11", "UTC-10", "UTC-9", "UTC-8", "UTC-7", "UTC-6", "UTC-5",
-                "UTC-4", "UTC-3", "UTC-2", "UTC-1", "UTC+0", "UTC+1", "UTC+2", "UTC+3",
-                "UTC+4", "UTC+5", "UTC+6", "UTC+7", "UTC+8", "UTC+9", "UTC+10", "UTC+11",
-                "UTC+12", "UTC+13", "UTC+14"
-            ]
-            
-            # Also include some common named timezones
-            named_timezones = [
-                "UTC", "EST", "PST", "CST", "MST", "GMT", "CET", "JST", "AEST"
-            ]
-            
-            all_timezones = common_timezones + named_timezones
-            
-            # Filter timezones that match the input string
-            string_lower = string.lower() if string else ""
-            matching_timezones = [
-                tz for tz in all_timezones
-                if string_lower in tz.lower() or not string
-            ]
-            
-            # Return up to 25 options (Discord limit)
-            result = matching_timezones[:25]
-            return self._ensure_list_result(result, "autocomplete_timezone_join")
-        except Exception as e:
-            self.logger.error(f"Error in timezone autocomplete: {e}", exc_info=True)
-            return []  # Always return a list, even on error
+        """Autocomplete for join timezone parameter - suggests common timezones."""
+        common = ["UTC-12", "UTC-11", "UTC-10", "UTC-9", "UTC-8", "UTC-7", "UTC-6", "UTC-5",
+                  "UTC-4", "UTC-3", "UTC-2", "UTC-1", "UTC+0", "UTC+1", "UTC+2", "UTC+3",
+                  "UTC+4", "UTC+5", "UTC+6", "UTC+7", "UTC+8", "UTC+9", "UTC+10", "UTC+11",
+                  "UTC+12", "UTC+13", "UTC+14"]
+        named = ["UTC", "EST", "PST", "CST", "MST", "GMT", "CET", "JST", "AEST"]
+        string_lower = (string or "").lower()
+        return [tz for tz in common + named if string_lower in tz.lower() or not string][:25]
     
     # ============ COMMANDS ============
     
@@ -463,12 +351,11 @@ class CustomEventsCog(commands.Cog):
                 await inter.edit_original_response(content="❌ Event name too long (max 100 characters)")
                 return
             
-            existing_names = [e.name for e in self.events.values() if e.guild_id == inter.guild.id]
-            if name in existing_names:
-                await inter.edit_original_response(content="❌ An event with this name already exists in this server")
-                return
-            
             async with self._lock:
+                existing_names = [e.name for e in self.events.values() if e.guild_id == inter.guild.id]
+                if name in existing_names:
+                    await inter.edit_original_response(content="❌ An event with this name already exists in this server")
+                    return
                 event_id = self._next_event_id
                 self._next_event_id += 1
                 
@@ -546,11 +433,6 @@ class CustomEventsCog(commands.Cog):
         embed.set_footer(text="Wait for the organizer to shuffle teams!")
         
         await inter.edit_original_response(embed=embed)
-    
-    @event_join.autocomplete("timezone")
-    async def autocomplete_timezone_join_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete decorator for join timezone parameter"""
-        return await self.autocomplete_timezone_join(inter, string)
     
     @event_root.sub_command(name="shuffle", description="Run the matching algorithm")
     @manage_guild_check()
@@ -684,8 +566,9 @@ class CustomEventsCog(commands.Cog):
             event.status = "completed"
             self._save_event(event)
             
-            # Move to archive
-            archive_file = EVENTS_DIR / f"archive_{event.event_id}_{event.name.replace(' ', '_')}.json"
+            # Move to archive (sanitize name for filesystem)
+            safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in event.name).replace(" ", "_")
+            archive_file = EVENTS_DIR / f"archive_{event.event_id}_{safe_name}.json"
             event_file = EVENTS_DIR / f"event_{event.event_id}.json"
             
             try:

@@ -251,7 +251,11 @@ class DiscordLogHandler(logging.Handler):
         super().close()
 
 
-# ============ SETUP ============
+# ============ LOGGING ============
+LOG_FILE_MAX_BYTES = 5_000_000  # 5MB - max log file size before rotation
+LOG_FILE_BACKUP_COUNT = 5  # Number of rotated log files to keep
+
+
 def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
     """Setup logging with file, console, and Discord handlers"""
     logger = logging.getLogger("bot")
@@ -346,10 +350,7 @@ async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
 
 
 # ============ BOT SETUP ============
-# Bot initialization constants
 PYTHON_MIN_VERSION = (3, 9)  # Minimum required Python version
-LOG_FILE_MAX_BYTES = 5_000_000  # 5MB - max log file size before rotation
-LOG_FILE_BACKUP_COUNT = 5  # Number of rotated log files to keep
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
 MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)

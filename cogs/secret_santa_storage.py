@@ -1,11 +1,30 @@
 """
-Secret Santa Storage Module - File I/O and State Management
+Secret Santa Storage Module – File I/O and State Management
+
+This module is the single source of truth for Secret Santa persistence. All state,
+archives, and metadata flow through these functions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW IT ALL WORKS TOGETHER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  SecretSanta_cog (in-memory)  ←→  load_state_with_fallback / save_state
+              ↑                                    ↑
+              │                                    │
+              └────────────────────────────────────┘
+                         STATE_FILE
+                    (secret_santa_state.json)
+                    + .backup fallback
+
+  Past years (read-only)  ←──  load_all_archives  ←──  archive/*.json
+  Assignment history      ←──  load_history_from_archives (assignments module)
+  New year write         ──→  archive_event     ──→  archive/{year}.json
 
 RESPONSIBILITIES:
-- JSON file operations (load/save with atomic writes)
-- State file management with fallback
-- Archive operations and loading
-- Cross-platform compatibility (Windows/Linux)
+  • JSON load/save with atomic writes (crash-safe)
+  • Multi-layer state fallback (main → .backup → defaults)
+  • Archive loading with legacy format conversion
+  • Cross-platform paths (Windows/Linux)
 """
 
 import datetime as dt
@@ -14,43 +33,71 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Paths - relative to cogs directory
-ROOT = Path(__file__).parent
-STATE_FILE = ROOT / "secret_santa_state.json"
-ARCHIVE_DIR = ROOT / "archive"
-BACKUPS_DIR = ARCHIVE_DIR / "backups"
+# ─── Paths (relative to cogs directory) ───────────────────────────────────────
+ROOT: Path = Path(__file__).parent  # cogs/
+STATE_FILE: Path = ROOT / "secret_santa_state.json"  # Live event + current_year
+ARCHIVE_DIR: Path = ROOT / "archive"  # Past years: 2021.json, 2022.json, ...
+BACKUPS_DIR: Path = ARCHIVE_DIR / "backups"  # Indestructible backups (never auto-deleted)
 
-# Ensure directories exist
-ARCHIVE_DIR.mkdir(exist_ok=True)
-BACKUPS_DIR.mkdir(exist_ok=True)
+ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Max file size to prevent DoS from huge/corrupt files (10MB is plenty for state/archives)
+LOAD_JSON_MAX_BYTES = 10 * 1024 * 1024
 
 
 def load_json(path: Path, default: Any = None) -> Any:
-    """Load JSON with error handling"""
-    if path.exists():
-        try:
-            text = path.read_text(encoding='utf-8').strip()
-            return json.loads(text) if text else (default or {})
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            pass
-    return default or {}
-
-
-def save_json(path: Path, data: Any, logger=None):
     """
-    Save JSON atomically with error handling.
-    
-    Uses write-temp-replace pattern to ensure atomic writes:
-    writes to temporary file first, then replaces original.
-    This prevents corruption if process crashes during write.
-    
+    Load JSON from disk with graceful error handling.
+
+    Returns the parsed content on success. On failure (missing file, invalid JSON,
+    encoding error, file too large), returns the default. Uses ``default if default is not None else {}``
+    so that falsy defaults like ``[]`` or ``0`` are preserved.
+
     Args:
-        path: File path to save to
-        data: Data to serialize (must be JSON-serializable)
-        logger: Optional logger for error reporting
-    
+        path: Path to the JSON file.
+        default: Value to return when file is missing or invalid. If None, returns ``{}``.
+
+    Returns:
+        Parsed JSON (dict/list/etc.) or default.
+
+    Note:
+        Used by :func:`load_state_with_fallback`, :func:`load_all_archives`, and
+        ``secret_santa_assignments.load_history_from_archives``.
+    """
+    fallback = default if default is not None else {}
+    if path is None or not hasattr(path, "exists"):
+        return fallback
+    if not path.exists():
+        return fallback
+    try:
+        size = path.stat().st_size
+        if size > LOAD_JSON_MAX_BYTES:
+            return fallback
+        text = path.read_text(encoding='utf-8', errors='replace').strip()
+        if not text:
+            return fallback
+        return json.loads(text)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        pass
+    return fallback
+
+
+def save_json(path: Path, data: Any, logger=None) -> None:
+    """
+    Save JSON atomically with crash-safe write-temp-replace.
+
+    Writes to ``path.tmp`` first, then atomically replaces the target file.
+    If the process crashes mid-write, the original file stays intact.
+
+    Args:
+        path: Destination file path.
+        data: JSON-serializable data (dict, list, etc.).
+        logger: Optional logger for error messages.
+
     Raises:
-        Exception: If write fails (caller should handle)
+        OSError, json.JSONEncodeError: Re-raised after cleanup; caller handles.
     """
     temp = path.with_suffix('.tmp')
     try:
@@ -74,7 +121,14 @@ def save_json(path: Path, data: Any, logger=None):
 
 
 def get_default_state() -> dict:
-    """Get default state structure"""
+    """
+    Return the canonical empty/minimal state structure.
+
+    Used when no valid state file exists or validation fails completely.
+
+    Returns:
+        Dict with ``current_year`` (today), ``pair_history`` (empty), ``current_event`` (None).
+    """
     return {
         "current_year": dt.date.today().year,
         "pair_history": {},
@@ -83,7 +137,19 @@ def get_default_state() -> dict:
 
 
 def validate_state_structure(state: dict, logger=None) -> dict:
-    """Validate and fix state structure"""
+    """
+    Ensure state has required keys and valid types; fix in place.
+
+    Validates ``current_year`` (int, 2000–2100), ``pair_history``, ``current_event``,
+    and nested event fields. Resets invalid data to defaults.
+
+    Args:
+        state: State dict (may be mutated).
+        logger: Optional logger for warnings.
+
+    Returns:
+        The same dict after validation/fixes.
+    """
     if not isinstance(state, dict):
         if logger:
             logger.error("State is not a dict, using defaults")
@@ -122,7 +188,18 @@ def validate_state_structure(state: dict, logger=None) -> dict:
 
 
 def load_state_with_fallback(logger=None) -> dict:
-    """Load state with multi-layer fallback system"""
+    """
+    Load Secret Santa state with multi-layer fallback.
+
+    Try: (1) main state file → (2) .backup file → (3) :func:`get_default_state`.
+    Ensures the cog always gets valid state, even after corruption or crash.
+
+    Args:
+        logger: Optional logger for load status.
+
+    Returns:
+        Validated state dict, never raises.
+    """
     # Try main state file
     try:
         state = load_json(STATE_FILE, get_default_state())
@@ -161,7 +238,19 @@ def load_state_with_fallback(logger=None) -> dict:
 
 
 def save_state(state: dict, logger=None) -> bool:
-    """Save state to disk with error handling and backup"""
+    """
+    Persist state to disk; on failure, try saving to .backup.
+
+    Uses :func:`save_json` for atomic writes. If main file fails, attempts
+    ``secret_santa_state.backup`` so data is not lost.
+
+    Args:
+        state: Full state dict to persist.
+        logger: Optional logger for errors.
+
+    Returns:
+        True if main file saved; False if both main and backup failed.
+    """
     try:
         save_json(STATE_FILE, state, logger)
         return True
@@ -181,7 +270,19 @@ def save_state(state: dict, logger=None) -> bool:
 
 
 def load_all_archives(logger=None) -> Dict[int, dict]:
-    """Load all archive files from archive directory"""
+    """
+    Load all year archives from :data:`ARCHIVE_DIR` into a single dict.
+
+    Scans for ``[0-9]*.json`` (e.g. 2021.json, 2022.json). Skips the backups
+    subdirectory. Converts legacy format (assignments list) to unified format
+    (event with participants, gift_submissions, assignments).
+
+    Args:
+        logger: Optional logger for load errors.
+
+    Returns:
+        ``{year: archive_data}`` with unified structure.
+    """
     archives = {}
     
     for archive_file in ARCHIVE_DIR.glob("[0-9]*.json"):
@@ -211,6 +312,8 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
                 assignments_map = {}
                 
                 for assignment in data["assignments"]:
+                    if not isinstance(assignment, dict):
+                        continue
                     giver_id = assignment.get("giver_id", "")
                     giver_name = assignment.get("giver_name", "Unknown")
                     receiver_id = assignment.get("receiver_id", "")
@@ -250,20 +353,24 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
 
 def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
     """
-    Archive event data in unified format with overwrite protection.
-    
-    If archive already exists for this year, saves to timestamped backup
-    instead to prevent accidental data loss. This allows archiving multiple
-    times safely (e.g., if event is restarted or needs correction).
-    
+    Archive a completed event to :data:`ARCHIVE_DIR` in unified format.
+
+    Writes to ``{year}.json``. If that file already exists, writes to
+    ``{year}_backup_{timestamp}.json`` instead to avoid overwriting.
+    Year is clamped to 2000–2100 if invalid.
+
     Args:
-        event: Event data dictionary (participants, assignments, gifts, etc.)
-        year: Year of the event (4-digit integer)
-        logger: Optional logger for status messages
-    
+        event: Event dict (participants, assignments, gift_submissions, etc.).
+        year: Four-digit year (e.g. 2025).
+        logger: Optional logger for status.
+
     Returns:
-        Filename of the created archive (either {year}.json or {year}_backup_TIMESTAMP.json)
+        Name of the created file (e.g. ``"2025.json"`` or ``"2025_backup_20250125_123456.json"``).
     """
+    if not event or not isinstance(event, dict):
+        if logger:
+            logger.error("archive_event: event must be a non-empty dict")
+        raise ValueError("event must be a non-empty dict")
     # Defensive: ensure year is valid so we never write e.g. 5.json or 99999.json
     today_year = dt.date.today().year
     if not isinstance(year, int) or year < 2000 or year > 2100:

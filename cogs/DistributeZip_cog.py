@@ -31,7 +31,6 @@ DESIGN DECISIONS:
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
 import time
@@ -45,6 +44,7 @@ from disnake.ext import commands
 from .owner_utils import owner_check, get_owner_mention, is_owner
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
+from .utils import autocomplete_safety_wrapper
 
 # Paths
 ROOT = Path(__file__).parent
@@ -62,32 +62,6 @@ MEGABYTE = 1024 * 1024  # Bytes in one megabyte (for size formatting)
 FILE_SEND_TIMEOUT = 120  # 2 minutes - timeout for sending files via DM (large files need time)
 FILE_SEND_RETRY_DELAY = 2  # Seconds to wait before retry on transient errors
 MAX_RETRIES = 2  # Maximum retries for transient network errors
-
-
-def autocomplete_safety_wrapper(func):
-    """Decorator to ensure autocomplete functions always return a list"""
-    @functools.wraps(func)
-    async def wrapper(self, inter: disnake.ApplicationCommandInteraction, string: str):
-        try:
-            result = await func(self, inter, string)
-            # Ensure result is always a list
-            if isinstance(result, list):
-                return [str(item) for item in result]  # Ensure all items are strings
-            elif result is None:
-                return []
-            elif isinstance(result, str):
-                self.logger.error(f"{func.__name__} returned string: '{result}'")
-                return []
-            else:
-                try:
-                    return [str(item) for item in list(result)]
-                except Exception:
-                    self.logger.error(f"{func.__name__} returned invalid type: {type(result)}")
-                    return []
-        except Exception as e:
-            self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
-            return []
-    return wrapper
 
 
 def load_metadata() -> Dict:
@@ -146,6 +120,7 @@ class DistributeZipCog(commands.Cog):
         if not isinstance(self.metadata, dict):
             self.metadata = {}
         self._sending_lock = asyncio.Lock()
+        self._metadata_lock = asyncio.Lock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="distzip-io")
         
         # Ensure metadata structure (normalize in case file had null or wrong types)
@@ -322,71 +297,25 @@ class DistributeZipCog(commands.Cog):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(self._executor, save_metadata, self.metadata, self.logger)
     
-    def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
-        """Universal safety wrapper - ensures autocomplete always returns a list"""
-        if isinstance(result, list):
-            # Ensure all items are strings
-            return [str(item) for item in result]
-        elif result is None:
-            return []
-        elif isinstance(result, str):
-            # If somehow a string was returned, log it and return empty list
-            self.logger.error(f"{function_name} returned string instead of list: {result}")
-            return []
-        else:
-            # Try to convert to list, or return empty
-            try:
-                return list(result) if result else []
-            except Exception:
-                self.logger.error(f"{function_name} returned invalid type: {type(result)}")
-                return []
-    
+    @autocomplete_safety_wrapper
     async def _autocomplete_file_name(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete function for file_name selection"""
-        try:
-            available_files = self._get_available_files()
-            if not available_files:
-                return []
-            
-            # Filter files that match the input string
-            string_lower = string.lower() if string else ""
-            matching_files = [
-                file_name for file_name in available_files
-                if string_lower in file_name.lower() or not string
-            ]
-            
-            # Return up to 25 options (Discord limit)
-            result = matching_files[:25]
-            return self._ensure_list_result(result, "_autocomplete_file_name")
-        except Exception as e:
-            self.logger.error(f"Error in file_name autocomplete: {e}", exc_info=True)
-            return []  # Always return a list, even on error
-    
+        """Autocomplete for file_name selection."""
+        available_files = self._get_available_files()
+        if not available_files:
+            return []
+        string_lower = (string or "").lower()
+        return [
+            fn for fn in available_files
+            if string_lower in fn.lower() or not string
+        ][:25]
+
     async def autocomplete_file_name_get(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for get file_name parameter"""
-        try:
-            result = await self._autocomplete_file_name(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_file_name_get")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_file_name_get: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_file_name_get: {e}", exc_info=True)
-            return []
-    
+        """Autocomplete for get file_name parameter."""
+        return await self._autocomplete_file_name(inter, string)
+
     async def autocomplete_file_name_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
-        """Autocomplete for remove file_name parameter"""
-        try:
-            result = await self._autocomplete_file_name(inter, string)
-            final_result = self._ensure_list_result(result, "autocomplete_file_name_remove")
-            if not isinstance(final_result, list):
-                self.logger.error(f"autocomplete_file_name_remove: _ensure_list_result returned {type(final_result)}")
-                return []
-            return final_result
-        except Exception as e:
-            self.logger.error(f"Error in autocomplete_file_name_remove: {e}", exc_info=True)
-            return []
+        """Autocomplete for remove file_name parameter."""
+        return await self._autocomplete_file_name(inter, string)
     
     def _validate_file(self, attachment: disnake.Attachment) -> Optional[str]:
         """Validate file. Returns error message if invalid, None if valid"""
@@ -789,13 +718,14 @@ class DistributeZipCog(commands.Cog):
                     failed += 1
                     self.logger.error(f"Unexpected error processing member {member.id} ({member.display_name}): {e}", exc_info=True)
         
-        # Update download count asynchronously (outside the lock)
-        if file_id in self.metadata["files"]:
-            self.metadata["files"][file_id]["download_count"] = successful
-            try:
-                await self._save_metadata_async()
-            except Exception as e:
-                self.logger.error(f"Failed to update download count: {e}")
+        # Update download count (inside metadata lock to prevent races)
+        async with self._metadata_lock:
+            if file_id in self.metadata["files"]:
+                self.metadata["files"][file_id]["download_count"] = successful
+                try:
+                    await self._save_metadata_async()
+                except Exception as e:
+                    self.logger.error(f"Failed to update download count: {e}")
         
         # Send summary with detailed statistics
         summary_embed = disnake.Embed(
@@ -870,7 +800,7 @@ class DistributeZipCog(commands.Cog):
         
         # Permission check
         if not is_owner(inter):
-            owner_name = get_owner_mention()
+            owner_name = get_owner_mention(inter.bot)
             await self._safe_edit_response(inter,
                 content=f"❌ **Permission Denied**\n"
                        f"Only {owner_name} can upload files for distribution.\n"
@@ -959,25 +889,26 @@ class DistributeZipCog(commands.Cog):
                 # Save the file
                 file_path.write_bytes(file_data)
                 
-                # Update metadata
+                # Update metadata (inside lock to prevent races with concurrent uploads/removes)
                 file_id = str(int(time.time() * 1000) + idx)  # Ensure unique IDs for multiple files
-                self.metadata["files"][file_id] = {
-                    "name": file_name,
-                    "filename": file_path.name,  # Use actual saved filename
-                    "uploaded_by": inter.author.id,
-                    "required_by": requester_user.id,
-                    "uploaded_at": time.time(),
-                    "size": att.size,
-                    "download_count": 0
-                }
-                
-                self.metadata["history"].append({
-                    "file_id": file_id,
-                    "file_name": file_name,
-                    "uploaded_by": inter.author.id,
-                    "required_by": requester_user.id,
-                    "uploaded_at": time.time()
-                })
+                async with self._metadata_lock:
+                    self.metadata["files"][file_id] = {
+                        "name": file_name,
+                        "filename": file_path.name,  # Use actual saved filename
+                        "uploaded_by": inter.author.id,
+                        "required_by": requester_user.id,
+                        "uploaded_at": time.time(),
+                        "size": att.size,
+                        "download_count": 0
+                    }
+                    
+                    self.metadata["history"].append({
+                        "file_id": file_id,
+                        "file_name": file_name,
+                        "uploaded_by": inter.author.id,
+                        "required_by": requester_user.id,
+                        "uploaded_at": time.time()
+                    })
                 
                 successful_uploads.append({
                     "file_id": file_id,
@@ -995,9 +926,10 @@ class DistributeZipCog(commands.Cog):
                     "error": f"Upload failed: {str(e)}"
                 })
         
-        # Save metadata once for all files
+        # Save metadata once for all files (inside lock for consistency)
         if successful_uploads:
-            await self._save_metadata_async()
+            async with self._metadata_lock:
+                await self._save_metadata_async()
         
         # Send summary
         if successful_uploads and not failed_uploads:
@@ -1014,7 +946,7 @@ class DistributeZipCog(commands.Cog):
                 for file_info in successful_uploads:
                     summary += f"• {file_info['file_name']}\n"
                 summary += "\n📤 Starting distribution for all files..."
-                await self._safe_edit_response(inter,content=summary)
+                await self._safe_edit_response(inter, content=summary)
                 
                 # Distribute each file
                 for file_info in successful_uploads:
@@ -1038,7 +970,7 @@ class DistributeZipCog(commands.Cog):
                 for fail_info in failed_uploads:
                     summary += f"• {fail_info['filename']}: {fail_info['error']}\n"
             
-            await self._safe_edit_response(inter,content=summary)
+            await self._safe_edit_response(inter, content=summary)
             
             # Distribute successful files
             for file_info in successful_uploads:
@@ -1050,7 +982,7 @@ class DistributeZipCog(commands.Cog):
             summary = f"❌ **All {len(failed_uploads)} file(s) failed to upload**\n\n"
             for fail_info in failed_uploads:
                 summary += f"• {fail_info['filename']}: {fail_info['error']}\n"
-            await self._safe_edit_response(inter,content=summary)
+            await self._safe_edit_response(inter, content=summary)
 
     @distributezip.sub_command(name="list", description="List all uploaded files")
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
@@ -1060,7 +992,7 @@ class DistributeZipCog(commands.Cog):
         if not isinstance(files, dict):
             files = {}
         if not files:
-            await self._safe_edit_response(inter,content="📦 No files have been uploaded yet")
+            await self._safe_edit_response(inter, content="📦 No files have been uploaded yet")
             return
         
         # Sort by upload time (newest first); only include entries that are dicts
@@ -1074,7 +1006,7 @@ class DistributeZipCog(commands.Cog):
         if len(sorted_files) > 10:
             paginator = FileListPaginator(sorted_files, timeout=300)
             embed = paginator.get_embed()
-            await self._safe_edit_response(inter,embed=embed, view=paginator)
+            await self._safe_edit_response(inter, embed=embed, view=paginator)
         else:
             # Show all files on one page (no pagination needed)
             embed = disnake.Embed(title="📦 Uploaded Files", color=disnake.Color.blue())
@@ -1168,23 +1100,29 @@ class DistributeZipCog(commands.Cog):
         
         async def remove_handler(interaction, file_id, file_data, file_path):
             try:
+                await interaction.response.defer(ephemeral=True)
                 if file_path.exists():
                     file_path.unlink()
-                del self.metadata["files"][file_id]
-                
-                # Mark as deleted in history (preserve audit trail)
-                for history_entry in self.metadata.get("history", []):
-                    if history_entry.get("file_id") == file_id:
-                        history_entry["status"] = "*deleted*"
-                        break
-                
-                await self._save_metadata_async()
-                await interaction.response.send_message(
+                async with self._metadata_lock:
+                    del self.metadata["files"][file_id]
+                    # Mark as deleted in history (preserve audit trail)
+                    for history_entry in self.metadata.get("history", []):
+                        if history_entry.get("file_id") == file_id:
+                            history_entry["status"] = "*deleted*"
+                            break
+                    await self._save_metadata_async()
+                await interaction.followup.send(
                     f"✅ File '{file_data.get('name')}' has been removed", ephemeral=True
                 )
             except Exception as e:
                 self.logger.error(f"Error removing file: {e}", exc_info=True)
-                await interaction.response.send_message(f"❌ Error removing file: {str(e)}", ephemeral=True)
+                try:
+                    await interaction.followup.send(f"❌ Error removing file: {str(e)}", ephemeral=True)
+                except Exception:
+                    try:
+                        await interaction.response.send_message(f"❌ Error removing file: {str(e)}", ephemeral=True)
+                    except Exception:
+                        pass
         
         if not file_name:
             await self._handle_file_browser(inter, "remove", remove_handler)
@@ -1207,19 +1145,18 @@ class DistributeZipCog(commands.Cog):
         try:
             if file_path.exists():
                 file_path.unlink()
-            del self.metadata["files"][file_id]
-            
-            # Mark as deleted in history (preserve audit trail)
-            for history_entry in self.metadata.get("history", []):
-                if history_entry.get("file_id") == file_id:
-                    history_entry["status"] = "*deleted*"
-                    break
-            
-            await self._save_metadata_async()
-            await self._safe_edit_response(inter,content=f"✅ File '{file_name}' has been removed")
+            async with self._metadata_lock:
+                del self.metadata["files"][file_id]
+                # Mark as deleted in history (preserve audit trail)
+                for history_entry in self.metadata.get("history", []):
+                    if history_entry.get("file_id") == file_id:
+                        history_entry["status"] = "*deleted*"
+                        break
+                await self._save_metadata_async()
+            await self._safe_edit_response(inter, content=f"✅ File '{file_name}' has been removed")
         except Exception as e:
             self.logger.error(f"Error removing file: {e}", exc_info=True)
-            await self._safe_edit_response(inter,content=f"❌ Error removing file: {str(e)}")
+            await self._safe_edit_response(inter, content=f"❌ Error removing file: {str(e)}")
 
     # ============ COG LIFECYCLE ============
     async def cog_load(self):

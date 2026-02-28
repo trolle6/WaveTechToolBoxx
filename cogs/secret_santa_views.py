@@ -52,7 +52,7 @@ class SecretSantaReplyView(disnake.ui.View):
             santa_id = None
             if isinstance(assignments, dict):
                 for giver, receiver in assignments.items():
-                    if receiver == user_id:
+                    if str(receiver) == user_id:
                         try:
                             santa_id = int(giver)
                             break
@@ -67,10 +67,17 @@ class SecretSantaReplyView(disnake.ui.View):
             await inter.response.send_modal(modal)
             
         except Exception as e:
-            # Log the error for debugging
             if hasattr(inter.bot, 'logger'):
                 inter.bot.logger.error(f"Reply button error: {e}")
-            await inter.response.send_message(content="❌ An error occurred while opening the reply form", ephemeral=True)
+            try:
+                await inter.response.send_message(content="❌ An error occurred while opening the reply form", ephemeral=True)
+            except disnake.errors.InteractionResponded:
+                try:
+                    await inter.followup.send(content="❌ An error occurred while opening the reply form", ephemeral=True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
 
 class SecretSantaReplyModal(disnake.ui.Modal):
@@ -97,7 +104,8 @@ class SecretSantaReplyModal(disnake.ui.Modal):
     async def callback(self, inter: disnake.ModalInteraction):
         """Handle modal submission"""
         await inter.response.defer(ephemeral=True)
-        reply = (inter.text_values.get("reply_text") or "").strip()
+        text_values = getattr(inter, "text_values", None) or {}
+        reply = (text_values.get("reply_text") or "").strip()
         if not reply:
             await inter.followup.send(content="❌ Please type a reply before sending.", ephemeral=True)
             return
@@ -118,26 +126,32 @@ class YearHistoryPaginator(disnake.ui.View):
     def __init__(self, year: int, archive: dict, participants: dict, emoji_mapping: dict, timeout: float = 300):
         super().__init__(timeout=timeout)
         self.year = year
-        self.archive = archive
-        self.participants = participants
-        self.emoji_mapping = emoji_mapping
+        self.archive = archive if isinstance(archive, dict) else {}
+        self.participants = participants if isinstance(participants, dict) else {}
+        self.emoji_mapping = emoji_mapping if isinstance(emoji_mapping, dict) else {}
         self.current_page = 0
         
         # Build all assignment lines
-        event_data = archive.get("event", {})
-        assignments = event_data.get("assignments", {})
-        gifts = event_data.get("gift_submissions", {})
+        event_data = self.archive.get("event", {}) or {}
+        if not isinstance(event_data, dict):
+            event_data = {}
+        assignments = event_data.get("assignments", {}) or {}
+        gifts = event_data.get("gift_submissions", {}) or {}
+        if not isinstance(assignments, dict):
+            assignments = {}
+        if not isinstance(gifts, dict):
+            gifts = {}
         
         self.all_lines = []
         for giver_id, receiver_id in assignments.items():
-            giver_name = participants.get(str(giver_id), f"User {giver_id}")
-            receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
+            giver_name = self.participants.get(str(giver_id), f"User {giver_id}")
+            receiver_name = self.participants.get(str(receiver_id), f"User {receiver_id}")
             
             giver_mention = f"<@{giver_id}>" if str(giver_id).isdigit() else giver_name
             receiver_mention = f"<@{receiver_id}>" if str(receiver_id).isdigit() else receiver_name
             
-            giver_emoji = emoji_mapping.get(str(giver_id), "🎁")
-            receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
+            giver_emoji = self.emoji_mapping.get(str(giver_id), "🎁")
+            receiver_emoji = self.emoji_mapping.get(str(receiver_id), "🎄")
             
             # Check for gift (handle null/empty consistently)
             submission = gifts.get(str(giver_id))
@@ -292,7 +306,8 @@ class FileListPaginator(disnake.ui.View):
         
         embed = disnake.Embed(
             title="📦 Uploaded Files",
-            color=disnake.Color.blue()
+            color=disnake.Color.blue(),
+            timestamp=dt.datetime.now()
         )
         
         for file_id, file_data in page_files:
@@ -368,7 +383,8 @@ class EventListPaginator(disnake.ui.View):
         embed = disnake.Embed(
             title="🎲 Active Events",
             description=f"{len(self.events)} event(s)",
-            color=disnake.Color.blue()
+            color=disnake.Color.blue(),
+            timestamp=dt.datetime.now()
         )
         
         for event in page_events:
@@ -450,8 +466,9 @@ class CommunicationsPaginator(disnake.ui.View):
         end_idx = min(start_idx + self.items_per_page, len(self.comms))
         page_comms = self.comms[start_idx:end_idx]
         embed = disnake.Embed(
-            title=f"💬 Communications ({len(self.comms)})",
-            color=disnake.Color.blue()
+            title=f"💬 Communications ({len(self.comms)} threads)",
+            color=disnake.Color.blue(),
+            timestamp=dt.datetime.now()
         )
         for santa_id, data in page_comms:
             if not isinstance(data, dict):
@@ -645,8 +662,9 @@ class BackupListPaginator(disnake.ui.View):
         
         embed = disnake.Embed(
             title="📋 Backed-Up Years",
-            description=f"Found **{len(self.backup_list)}** year(s) in backups folder:",
-            color=disnake.Color.blue()
+            description=f"Found **{len(self.backup_list)}** year(s) in backups folder.",
+            color=disnake.Color.blue(),
+            timestamp=dt.datetime.now()
         )
         
         field_name = "Years" if self.current_page == 0 else f"Years (Page {self.current_page + 1})"
@@ -691,7 +709,4 @@ class BackupListPaginator(disnake.ui.View):
         """Disable buttons when view times out"""
         for item in self.children:
             item.disabled = True
-
-
-
 

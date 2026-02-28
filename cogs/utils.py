@@ -6,16 +6,18 @@ circuit breaking, and safe file operations. All components are designed
 for async/await patterns and thread-safe operations.
 
 COMPONENTS:
+- autocomplete_safety_wrapper: Ensures autocomplete callbacks always return a list
 - RateLimiter: Token bucket rate limiter (O(1) operations with deque)
 - CircuitBreaker: Prevents cascading failures with circuit breaker pattern
 - LRUCache: Generic LRU cache with TTL support (expires old entries automatically)
-- JsonFile: Thread-safe JSON file operations with atomic writes
+- JsonFile: Thread-safe JSON file operations (direct write, not atomic)
 - RequestCache: Simple deduplication cache for expensive operations
 
 All classes use asyncio.Lock() for thread-safety in async contexts.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -26,6 +28,43 @@ from typing import Any, Generic, Optional, TypeVar
 logger = logging.getLogger("bot")
 
 T = TypeVar('T')  # Generic type for LRUCache
+
+__all__ = [
+    'autocomplete_safety_wrapper',
+    'RateLimiter',
+    'CircuitBreaker',
+    'LRUCache',
+    'JsonFile',
+    'RequestCache',
+]
+
+
+def autocomplete_safety_wrapper(func):
+    """
+    Decorator to ensure autocomplete functions always return a list.
+
+    Discord autocomplete requires a list of choices. This wrapper catches
+    exceptions and normalizes return values so autocomplete never crashes.
+    Used by SecretSanta, DistributeZip, and CustomEvents cogs.
+    """
+    @functools.wraps(func)
+    async def wrapper(self, inter, string: str):
+        try:
+            result = await func(self, inter, string)
+            if isinstance(result, list):
+                return [str(item) for item in result]
+            if result is None:
+                return []
+            if isinstance(result, str):
+                if hasattr(self, "logger"):
+                    self.logger.error(f"{func.__name__} returned string instead of list")
+                return []
+            return [str(item) for item in list(result)]
+        except Exception as e:
+            if hasattr(self, "logger"):
+                self.logger.error(f"Error in {func.__name__}: {e}", exc_info=True)
+            return []
+    return wrapper
 
 
 class RateLimiter:
@@ -309,13 +348,11 @@ class LRUCache(Generic[T]):
 
 class JsonFile:
     """
-    Thread-safe JSON file operations with atomic writes.
+    Thread-safe JSON file operations.
     
-    Uses asyncio.Lock to prevent concurrent access issues when multiple
-    tasks try to read/write the same file simultaneously.
-    
-    Note: save() does not use atomic writes (write-temp-replace) like
-    secret_santa_storage.py does, but is simpler for less critical files.
+    Uses asyncio.Lock to prevent concurrent access when multiple tasks
+    read/write the same file. save() uses direct write (not atomic
+    write-temp-replace); use secret_santa_storage for critical data.
     """
 
     def __init__(self, path: str):
@@ -338,7 +375,7 @@ class JsonFile:
                     return json.loads(self.path.read_text(encoding='utf-8'))
                 except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
                     logger.error(f"JSON load error for {self.path}: {e}")
-            return default or {}
+            return default if default is not None else {}
 
     async def save(self, data: Any):
         """

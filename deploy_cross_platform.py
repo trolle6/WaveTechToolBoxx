@@ -4,11 +4,19 @@ Cross-Platform Secret Santa Bot Deployment Script
 Works on both Windows and Linux
 """
 
+"""
+Cross-Platform WaveTechToolBox Deployment Script
+
+Validates environment, installs dependencies, and prepares the bot for deployment
+on Windows, Linux, and macOS.
+"""
+
+import json
 import os
-import sys
 import platform
 import subprocess
-import json
+import sys
+from datetime import datetime
 from pathlib import Path
 
 def get_os_info():
@@ -162,11 +170,11 @@ def setup_file_permissions():
             return True  # Non-critical
 
 def generate_deployment_report():
-    """Generate deployment report"""
+    """Generate deployment report with timestamp and environment details."""
     os_info = get_os_info()
-    
+
     report = {
-        'deployment_time': str(Path().cwd()),
+        'deployment_time': datetime.utcnow().isoformat() + 'Z',
         'os_info': os_info,
         'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         'working_directory': str(Path.cwd()),

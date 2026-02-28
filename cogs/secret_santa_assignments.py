@@ -73,10 +73,12 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
                 continue
 
             archive_data = load_json(archive_file)
+            if not isinstance(archive_data, dict):
+                continue
 
             # Check for unified format (event key)
-            if archive_data.get("event"):
-                event_data = archive_data["event"]
+            event_data = archive_data.get("event")
+            if isinstance(event_data, dict):
                 event_assignments = event_data.get("assignments", {})
 
                 if isinstance(event_assignments, dict):
@@ -86,10 +88,11 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
                             history.setdefault(str(giver), []).append(receiver_int)
                         except (ValueError, TypeError):
                             continue
-            
             # Handle legacy old format (direct assignments list)
             elif "assignments" in archive_data and isinstance(archive_data["assignments"], list):
                 for assignment in archive_data["assignments"]:
+                    if not isinstance(assignment, dict):
+                        continue
                     giver_id = assignment.get("giver_id")
                     receiver_id = assignment.get("receiver_id")
 
@@ -309,7 +312,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]], log
     for attempt in range(max_attempts):
         try:
             result: Dict[int, int] = {}
-            temp_history = {k: v.copy() for k, v in history.items()}  # Work with copy
+            temp_history = {str(k): list(v) if isinstance(v, list) else [] for k, v in history.items()}
             
             # Shuffle participants for different assignment order each attempt
             shuffled_participants = participants.copy()
