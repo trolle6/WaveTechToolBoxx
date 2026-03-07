@@ -149,8 +149,8 @@ class HttpManager:
         """
         Get or create HTTP session with connection pooling.
         
-        Note: Session timeout is set at creation, but individual requests
-        can override with request-level timeout (see DALL-E and TTS code).
+        Handles event loop changes (e.g. bot crash+retry) by recreating the session
+        when the current loop differs from the session's loop or the loop is closed.
         
         Args:
             timeout: Request timeout in seconds (default: HTTP_DEFAULT_TIMEOUT)
@@ -158,21 +158,53 @@ class HttpManager:
         Returns:
             Configured aiohttp ClientSession
         """
-        if self._session is None or self._session.closed:
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        session_loop = getattr(self._session, "_loop", None) if self._session else None
+        need_new = (
+            self._session is None
+            or self._session.closed
+            or session_loop is None
+            or session_loop.is_closed()
+            or (current_loop is not None and session_loop != current_loop)
+        )
+
+        if need_new:
+            if self._session and not self._session.closed:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+
             connector = aiohttp.TCPConnector(
                 limit=HTTP_CONNECTION_LIMIT,
                 limit_per_host=HTTP_CONNECTION_LIMIT_PER_HOST,
                 ttl_dns_cache=HTTP_DNS_CACHE_TTL,
                 enable_cleanup_closed=True,
-                force_close=False  # Keep connections alive for reuse
+                force_close=False,
             )
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 connector=connector,
-                headers={'Connection': 'keep-alive'}
+                headers={"Connection": "keep-alive"},
             )
         return self._session
-    
+
+    async def invalidate_session(self):
+        """Force-close current session so next get_session() creates a fresh one.
+        Use when the session's event loop has closed (e.g. after validation, or bot restart).
+        """
+        if self._session and not self._session.closed:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+        self._session = None  # Always clear so next get_session() creates fresh
+
     async def close(self):
         """Cleanly close HTTP session and connection pool"""
         if self._session and not self._session.closed:
@@ -471,7 +503,13 @@ async def on_ready():
         if discord_handler:
             discord_handler.set_bot(bot)
             logger.info("Discord logging handler connected")
-        
+
+        # Clear any HTTP session from pre-bot validation (asyncio.run uses a different loop)
+        try:
+            await bot.http_mgr.invalidate_session()
+        except Exception:
+            pass
+
         asyncio.create_task(daily_maintenance_loop())
         
         try:
@@ -755,6 +793,8 @@ if __name__ == "__main__":
         if not asyncio.run(validate_openai_key(config.OPENAI_API_KEY, logger, bot.http_mgr)):
             logger.critical("OpenAI API key is invalid. Fix config.env or set SKIP_API_VALIDATION=true")
             sys.exit(1)
+        # Clear HTTP session - it was bound to asyncio.run's temporary loop; bot uses a different loop
+        asyncio.run(bot.http_mgr.invalidate_session())
     else:
         logger.warning("API validation skipped")
     

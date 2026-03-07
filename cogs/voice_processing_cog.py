@@ -404,7 +404,7 @@ class VoiceProcessingCog(commands.Cog):
                 )
                 return False
             
-            self.logger.info(f"✅ FFmpeg found at: {ffmpeg_path}")
+            self.logger.info(f"FFmpeg found at: {ffmpeg_path}")
             
             # Try to get FFmpeg version and codec information
             try:
@@ -442,7 +442,7 @@ class VoiceProcessingCog(commands.Cog):
                     if not has_opus:
                         self.logger.warning("⚠️ Opus codec not found in FFmpeg - Discord voice may fail")
                     if has_mp3 and has_opus:
-                        self.logger.info("✅ FFmpeg has required codecs (MP3, Opus)")
+                        self.logger.info("FFmpeg has required codecs (MP3, Opus)")
             except Exception as e:
                 self.logger.debug(f"Could not check FFmpeg codecs: {e}")
             
@@ -864,6 +864,20 @@ class VoiceProcessingCog(commands.Cog):
                     await asyncio.sleep(delay)
                     continue
                 self.logger.error(f"TTS connection error after retries: {e}", exc_info=True)
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e) and attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
+                    self.logger.warning(
+                        f"TTS session tied to closed loop, invalidating and retrying (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})"
+                    )
+                    try:
+                        await self.bot.http_mgr.invalidate_session()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(TTS_API_RETRY_BASE_DELAY)
+                    continue
+                last_error = e
+                self.logger.error(f"TTS request error: {e}", exc_info=True)
+                break
             except Exception as e:
                 last_error = e
                 self.logger.error(f"TTS request error: {e}", exc_info=True)
