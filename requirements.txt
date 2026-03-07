@@ -1,7 +1,8 @@
 # WaveTechToolBox Dependencies
 
-# Core Discord library (includes voice support via PyNaCl)
-disnake>=2.9.0
+# Core Discord library - requires 2.12+ for DAVE (E2EE) voice support (Discord enforces 4017 otherwise)
+# [voice] extra pulls in dave-py, PyNaCl, audioop-lts for voice connections
+disnake[voice]>=2.12.0
 
 # HTTP client for API calls (OpenAI TTS, DALL-E)
 aiohttp>=3.9.0

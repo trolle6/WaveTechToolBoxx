@@ -11,12 +11,14 @@ USAGE:
 """
 
 import asyncio
+import io
 import logging
 import logging.handlers
 import os
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -282,8 +284,9 @@ def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
     fh.setFormatter(fmt)
     logger.addHandler(fh)
     
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
+    # Console handler - use UTF-8 to avoid UnicodeEncodeError on Windows (cp1252)
+    utf8_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace') if hasattr(sys.stdout, 'buffer') else sys.stdout
+    ch = logging.StreamHandler(utf8_stream)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
     
@@ -301,16 +304,18 @@ OPENAI_VALIDATION_TIMEOUT = 10  # seconds
 OPENAI_API_KEY_PREFIX = "sk-"
 
 
-async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
+async def validate_openai_key(key: str, logger: logging.Logger, http_mgr: "HttpManager") -> bool:
     """
     Validate OpenAI API key format and connectivity.
     
     Checks key format (must start with 'sk-') and makes a test API call.
+    Uses shared HttpManager session for connection pool reuse.
     Allows bot to start even on network errors (may be transient).
     
     Args:
         key: OpenAI API key to validate
         logger: Logger instance for validation messages
+        http_mgr: HttpManager instance for session reuse
     
     Returns:
         True if key appears valid, False if format is wrong or key is invalid
@@ -326,8 +331,8 @@ async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
         return False
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        session = await http_mgr.get_session()
+        async with session.get(
                 OPENAI_VALIDATION_URL,
                 headers={"Authorization": f"Bearer {key}"},
                 timeout=aiohttp.ClientTimeout(total=OPENAI_VALIDATION_TIMEOUT)
@@ -350,7 +355,7 @@ async def validate_openai_key(key: str, logger: logging.Logger) -> bool:
 
 
 # ============ BOT SETUP ============
-PYTHON_MIN_VERSION = (3, 9)  # Minimum required Python version
+PYTHON_MIN_VERSION = (3, 10)  # disnake 2.12+ (DAVE voice) requires Python 3.10+
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
 MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)
@@ -369,6 +374,7 @@ bot = commands.InteractionBot(intents=intents)
 bot.config = config
 bot.logger = logger
 bot.http_mgr = HttpManager()
+bot.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bot-io")
 bot.discord_handler = discord_handler
 bot.ready_once = False
 
@@ -664,6 +670,13 @@ async def graceful_shutdown():
         except Exception:
             pass
     
+    # Shutdown shared thread pool
+    if hasattr(bot, "executor") and bot.executor:
+        try:
+            bot.executor.shutdown(wait=True)
+        except Exception:
+            pass
+    
     # Close HTTP session
     try:
         await bot.http_mgr.close()
@@ -737,9 +750,9 @@ if __name__ == "__main__":
     
     logger.info("Production checks passed")
     
-    # Validate API key
+    # Validate API key (uses shared HttpManager for connection reuse)
     if not config.SKIP_API_VALIDATION:
-        if not asyncio.run(validate_openai_key(config.OPENAI_API_KEY, logger)):
+        if not asyncio.run(validate_openai_key(config.OPENAI_API_KEY, logger, bot.http_mgr)):
             logger.critical("OpenAI API key is invalid. Fix config.env or set SKIP_API_VALIDATION=true")
             sys.exit(1)
     else:
