@@ -335,6 +335,23 @@ class DALLECog(commands.Cog):
                     self.stats["failed"] += 1
                 return {"success": False, "error": "⏰ Request timeout"}
 
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e) and attempt < self.max_retries - 1:
+                    self.logger.warning("DALL-E: session tied to closed loop, invalidating and retrying")
+                    try:
+                        await self.bot.http_mgr.invalidate_session()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                self.logger.error(f"Generation error: {e}", exc_info=True)
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                async with self._stats_lock:
+                    self.stats["failed"] += 1
+                return {"success": False, "error": f"Unexpected error: {str(e)[:50]}"}
+
             except Exception as e:
                 self.logger.error(f"Generation error: {e}", exc_info=True)
                 if attempt < self.max_retries - 1:

@@ -403,16 +403,17 @@ class RequestCache:
     Simple deduplication cache for expensive operations.
     
     Stores key-value pairs with expiration times. Automatically removes
-    expired entries on access. Simpler than LRUCache but doesn't track
-    access times or limit size.
+    expired entries on access. When max_size is set, evicts the soonest-
+    to-expire entry when at capacity to prevent unbounded growth.
     
     Use case: Prevent duplicate expensive operations (API calls, calculations)
     within a time window.
     """
 
-    def __init__(self, ttl: int = 3600):
+    def __init__(self, ttl: int = 3600, max_size: Optional[int] = 1000):
         self.cache: dict[str, tuple[Any, float]] = {}  # key -> (value, expiration_timestamp)
         self.ttl = ttl
+        self.max_size = max_size  # None = unlimited; prevents unbounded growth when set
         self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Optional[Any]:
@@ -439,11 +440,18 @@ class RequestCache:
         """
         Set value in cache with TTL expiration.
         
+        When max_size is set and cache is full, evicts the soonest-to-expire
+        entry to make room.
+        
         Args:
             key: Cache key
             value: Value to cache (will expire after TTL)
         """
         async with self._lock:
+            if self.max_size is not None and key not in self.cache and len(self.cache) >= self.max_size:
+                # Evict soonest-to-expire entry
+                soonest_key = min(self.cache, key=lambda k: self.cache[k][1])
+                del self.cache[soonest_key]
             self.cache[key] = (value, time.time() + self.ttl)
 
     async def cleanup(self):

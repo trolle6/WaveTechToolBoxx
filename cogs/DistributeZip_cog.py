@@ -34,7 +34,6 @@ import asyncio
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -121,7 +120,7 @@ class DistributeZipCog(commands.Cog):
             self.metadata = {}
         self._sending_lock = asyncio.Lock()
         self._metadata_lock = asyncio.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="distzip-io")
+        self._executor = bot.executor  # Shared executor from main.py (bot is self.bot)
         
         # Ensure metadata structure (normalize in case file had null or wrong types)
         if not isinstance(self.metadata.get("files"), dict):
@@ -1175,10 +1174,7 @@ class DistributeZipCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Failed to save metadata during unload: {e}")
         
-        # Shutdown executor to prevent resource leaks
-        if hasattr(self, '_executor'):
-            self._executor.shutdown(wait=True, timeout=5)
-            self.logger.info("ThreadPoolExecutor shut down")
+        # Executor is shared (bot.executor) - shutdown in main.py graceful_shutdown
 
 
 def setup(bot):

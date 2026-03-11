@@ -70,7 +70,6 @@ import asyncio
 import datetime as dt
 import secrets
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -173,7 +172,7 @@ class SecretSantaCog(commands.Cog):
         self._backup_task: Optional[asyncio.Task] = None
         self._scheduled_shuffle_task: Optional[asyncio.Task] = None
         self._unloaded = False  # Track if already unloaded
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="santa-io")
+        self._executor = bot.executor  # Shared executor from main.py (bot is self.bot)
         
         self.logger.info("Secret Santa cog initialized with persistent reply buttons")
     
@@ -925,10 +924,7 @@ class SecretSantaCog(commands.Cog):
                 except asyncio.CancelledError:
                     pass
             
-            # Shutdown executor to prevent resource leaks
-            if hasattr(self, '_executor'):
-                self._executor.shutdown(wait=True, timeout=5)
-                self.logger.info("ThreadPoolExecutor shut down")
+            # Executor is shared (bot.executor) - shutdown in main.py graceful_shutdown
             
             self.logger.info("Secret Santa cog unloaded")
         except Exception as e:
@@ -1345,6 +1341,20 @@ class SecretSantaCog(commands.Cog):
                         continue
                     self.logger.debug(f"Anonymization failed: {resp.status}")
                     return text
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e) and attempt < ANONYMIZE_RETRY_MAX - 1:
+                    self.logger.debug(
+                        "Anonymization: session tied to closed loop, invalidating and retrying"
+                    )
+                    try:
+                        await self.bot.http_mgr.invalidate_session()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(ANONYMIZE_RETRY_BASE_DELAY * (2 ** attempt))
+                    continue
+                last_error = e
+                self.logger.debug(f"Anonymization error: {e}")
+                break
             except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
                 last_error = e
                 if attempt < ANONYMIZE_RETRY_MAX - 1:
@@ -1407,7 +1417,7 @@ class SecretSantaCog(commands.Cog):
         ),
         debug: bool = commands.Param(
             default=False,
-            description="Debug mode: skip archive-exists warning (for testing algorithm with 2021-2025 history when current year already archived)"
+            description="Skip archive-exists check (testing only)"
         )
     ):
         """Start new Secret Santa event (optionally schedule automatic shuffle)"""

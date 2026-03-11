@@ -494,56 +494,64 @@ class VoiceProcessingCog(commands.Cog):
         cached = await self.pronunciation_cache.get(text)
         if cached:
             return cached
-        
-        try:
-            prompt = (
-                "Rewrite this text ONLY to improve pronunciation for text-to-speech. "
-                "Only expand very short acronyms (2-4 letters) into their letter names (e.g., 'JKM' → 'Jay Kay Em'). "
-                "Convert complex usernames/gamertags to speakable form (e.g., 'xXDarkLordXx' → 'Dark Lord'). "
-                "DO NOT expand normal capitalized words or sentences - leave them as-is. "
-                "Keep all other words exactly the same. Don't change grammar, meaning, or add extra words.\n\n"
-                f"Text: {text}\n\nImproved:"
-            )
-            
-            headers = self._get_openai_headers()
-            
-            # Calculate max_tokens: estimate ~4 chars per token, add 50% buffer
-            # Cap at reasonable limit (2000 tokens ≈ 8000 chars output)
-            estimated_tokens = int(len(text) / 4 * 1.5)
-            max_tokens = min(2000, max(200, estimated_tokens))
-            
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0.1
-            }
-            
-            self.logger.debug(f"Pronunciation improvement API: input_length={len(text)}, max_tokens={max_tokens}")
-            
-            session = await self.bot.http_mgr.get_session(timeout=10)
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                json=payload,
-                headers=headers
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    try:
-                        improved = result["choices"][0]["message"]["content"].strip()
-                    except (KeyError, TypeError, IndexError):
+
+        prompt = (
+            "Rewrite this text ONLY to improve pronunciation for text-to-speech. "
+            "Only expand very short acronyms (2-4 letters) into their letter names (e.g., 'JKM' → 'Jay Kay Em'). "
+            "Convert complex usernames/gamertags to speakable form (e.g., 'xXDarkLordXx' → 'Dark Lord'). "
+            "DO NOT expand normal capitalized words or sentences - leave them as-is. "
+            "Keep all other words exactly the same. Don't change grammar, meaning, or add extra words.\n\n"
+            f"Text: {text}\n\nImproved:"
+        )
+        headers = self._get_openai_headers()
+        estimated_tokens = int(len(text) / 4 * 1.5)
+        max_tokens = min(2000, max(200, estimated_tokens))
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.1
+        }
+        self.logger.debug(f"Pronunciation improvement API: input_length={len(text)}, max_tokens={max_tokens}")
+
+        for attempt in range(2):  # Retry once on "Event loop is closed"
+            try:
+                session = await self.bot.http_mgr.get_session(timeout=10)
+                async with session.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    json=payload,
+                    headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        try:
+                            improved = result["choices"][0]["message"]["content"].strip()
+                        except (KeyError, TypeError, IndexError):
+                            return text
+                        improved = improved.replace("Improved:", "").strip()
+                        final_text = improved if improved else text
+                        await self.pronunciation_cache.set(text, final_text)
+                        return final_text
+                    else:
+                        self.logger.warning(f"Pronunciation improvement API returned {resp.status}")
                         return text
-                    improved = improved.replace("Improved:", "").strip()
-                    final_text = improved if improved else text
-                    await self.pronunciation_cache.set(text, final_text)
-                    return final_text
-                else:
-                    self.logger.warning(f"Pronunciation improvement API returned {resp.status}")
-        except asyncio.TimeoutError:
-            self.logger.debug("Pronunciation improvement timed out, using original text")
-        except Exception as e:
-            self.logger.debug(f"Pronunciation improvement failed: {e}")
-        
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e) and attempt == 0:
+                    self.logger.debug("Pronunciation improvement: session tied to closed loop, invalidating and retrying")
+                    try:
+                        await self.bot.http_mgr.invalidate_session()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+                    continue
+                self.logger.debug(f"Pronunciation improvement failed: {e}")
+                return text
+            except asyncio.TimeoutError:
+                self.logger.debug("Pronunciation improvement timed out, using original text")
+                return text
+            except Exception as e:
+                self.logger.debug(f"Pronunciation improvement failed: {e}")
+                return text
         return text
 
     def _apply_corrections(self, text: str) -> str:
