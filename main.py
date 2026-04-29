@@ -483,7 +483,7 @@ async def daily_maintenance_loop():
                     await fn()
                 except Exception as e:
                     logger.error(f"Daily maintenance failed for {name}: {e}", exc_info=True)
-        await asyncio.sleep(SECONDS_PER_DAY_MAINTENANCE)
+        # No second fixed sleep here; loop recalculates next UTC midnight each iteration.
 
 
 # ============ BOT EVENTS ============
@@ -766,7 +766,7 @@ def load_cogs() -> int:
 if __name__ == "__main__":
     logger.info("Starting bot...")
     
-    # Python version check - disnake requires 3.9+
+    # Python version check - disnake 2.12+ (DAVE voice) requires Python 3.10+
     if sys.version_info < PYTHON_MIN_VERSION:
         logger.critical(
             f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ required. "
