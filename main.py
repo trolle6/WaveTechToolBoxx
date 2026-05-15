@@ -442,6 +442,8 @@ def validate_runtime_dependencies(logger: logging.Logger) -> bool:
         return False
 
     return True
+
+
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
 MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)

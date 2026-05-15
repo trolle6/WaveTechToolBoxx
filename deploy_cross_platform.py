@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-Cross-Platform Secret Santa Bot Deployment Script
-Works on both Windows and Linux
-"""
+Cross-Platform WaveTechToolBox deployment checks.
 
-"""
-Cross-Platform WaveTechToolBox Deployment Script
-
-Validates environment, installs dependencies, and prepares the bot for deployment
-on Windows, Linux, and macOS.
+Validates environment, installs dependencies (disnake[voice] 2.12+ for Discord DAVE),
+and prepares the bot on Windows, Linux, and macOS.
 """
 
 import json

@@ -59,8 +59,8 @@ try {
         pip install -r requirements.txt
         Write-Host "✅ Dependencies installed from requirements.txt" -ForegroundColor Green
     } else {
-        # Install core dependencies
-        pip install disnake>=2.9.0 aiohttp>=3.8.0
+        # Install core dependencies (match requirements.txt: disnake 2.12+ voice/DAVE)
+        pip install "disnake[voice]>=2.12.0" "aiohttp>=3.10.0" "python-dotenv>=1.0.0"
         Write-Host "✅ Core dependencies installed" -ForegroundColor Green
     }
 } catch {
