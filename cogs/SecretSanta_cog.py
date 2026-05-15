@@ -92,7 +92,12 @@ from .secret_santa_views import (
     SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
     CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
 )
-from .secret_santa_checks import participant_check, safe_display_name
+from .secret_santa_checks import (
+    GIFT_NO_SUBMISSION_ROW,
+    format_gift_description_for_display,
+    participant_check,
+    safe_display_name,
+)
 
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
@@ -2445,7 +2450,7 @@ class SecretSantaCog(commands.Cog):
         )
         embed.add_field(
             name="🎁 Gift Description",
-            value=f"*{gift_description}*",
+            value=format_gift_description_for_display(gift_description, max_length=900),
             inline=False
         )
         embed.set_footer(text="🎄 Thank you for participating in Secret Santa! Your kindness makes the season brighter.")
@@ -2598,12 +2603,12 @@ class SecretSantaCog(commands.Cog):
             if old_gift:
                 embed.add_field(
                     name="📝 Old Gift",
-                    value=f"*{self._truncate_text(old_gift, 200)}*",
+                    value=format_gift_description_for_display(old_gift, max_length=900),
                     inline=False
                 )
             embed.add_field(
                 name="🎁 New Gift",
-                value=f"*{gift_description}*",
+                value=format_gift_description_for_display(gift_description, max_length=900),
                 inline=False
             )
             
@@ -2899,10 +2904,10 @@ class SecretSantaCog(commands.Cog):
             giver_name = participants.get(giver_id, f"User {giver_id}")
             receiver_name = submission.get("receiver_name", "Unknown")
             raw_gift = submission.get("gift")
-            if raw_gift and isinstance(raw_gift, str):
-                gift = raw_gift[:200] + "..." if len(raw_gift) > 200 else raw_gift
-            else:
-                gift = "*(not yet submitted)*"
+            gift = format_gift_description_for_display(
+                raw_gift if isinstance(raw_gift, str) else None,
+                max_length=200,
+            )
 
             # Get consistent emojis for each person this year
             giver_emoji = emoji_mapping.get(giver_id, "🎁")
@@ -3067,14 +3072,16 @@ class SecretSantaCog(commands.Cog):
                         submission = gifts.get(str(giver_id))
                         if submission and isinstance(submission, dict):
                             raw = submission.get("gift")
-                            if isinstance(raw, str) and raw.strip():
-                                gift_desc = raw[:57] + "..." if len(raw) > 60 else raw
-                            else:
-                                gift_desc = "(not yet submitted)"
+                            gift_desc = format_gift_description_for_display(
+                                raw if isinstance(raw, str) else None,
+                                max_length=60,
+                            )
                             exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
-                            exchange_lines.append(f"    ⤷ *{gift_desc}*")
+                            exchange_lines.append(f"    ⤷ {gift_desc}")
                         else:
-                            exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *(no gift recorded)*")
+                            exchange_lines.append(
+                                f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *{GIFT_NO_SUBMISSION_ROW}*"
+                            )
                     
                     embed.add_field(
                         name=f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)",
@@ -3297,10 +3304,11 @@ class SecretSantaCog(commands.Cog):
                 gave_to_mention = f"<@{participation['gave_to_id']}>" if participation['gave_to_id'] else participation['gave_to_name']
                 year_lines.append(f"🎁 **Gave to:** {gave_to_mention}")
                 if participation["gift_given"] and isinstance(participation["gift_given"], str):
-                    gift_short = participation["gift_given"][:80] + "..." if len(participation["gift_given"]) > 80 else participation["gift_given"]
-                    year_lines.append(f"   └─ *{gift_short}*")
+                    year_lines.append(
+                        f"   └─ {format_gift_description_for_display(participation['gift_given'], max_length=80)}"
+                    )
                 else:
-                    year_lines.append(f"   └─ *(no gift recorded)*")
+                    year_lines.append(f"   └─ {format_gift_description_for_display(None)}")
             else:
                 year_lines.append(f"🎁 **Gave to:** *(assignment not found)*")
             
@@ -3309,10 +3317,11 @@ class SecretSantaCog(commands.Cog):
                 received_from_mention = f"<@{participation['received_from_id']}>" if participation['received_from_id'] else participation['received_from_name']
                 year_lines.append(f"🎅 **Received from:** {received_from_mention}")
                 if participation["gift_received"] and isinstance(participation["gift_received"], str):
-                    gift_short = participation["gift_received"][:80] + "..." if len(participation["gift_received"]) > 80 else participation["gift_received"]
-                    year_lines.append(f"   └─ *{gift_short}*")
+                    year_lines.append(
+                        f"   └─ {format_gift_description_for_display(participation['gift_received'], max_length=80)}"
+                    )
                 else:
-                    year_lines.append(f"   └─ *(no gift recorded)*")
+                    year_lines.append(f"   └─ {format_gift_description_for_display(None)}")
             else:
                 year_lines.append(f"🎅 **Received from:** *(unknown)*")
             

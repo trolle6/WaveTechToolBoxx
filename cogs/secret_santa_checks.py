@@ -97,3 +97,31 @@ def safe_display_name(author: disnake.User | disnake.Member | None) -> str:
     if isinstance(author, disnake.Member):
         return author.display_name or author.name or "Unknown"
     return getattr(author, "name", None) or "Unknown"
+
+
+# Wording for history/embeds: avoid plain "nothing" / ambiguous empty states
+GIFT_EMPTY_DESCRIPTION = "*(no description saved yet)*"
+GIFT_NO_SUBMISSION_ROW = "*(no submission on file)*"
+
+
+def format_gift_description_for_display(
+    raw: Optional[str],
+    *,
+    max_length: int = 200,
+    empty_label: str = GIFT_EMPTY_DESCRIPTION,
+) -> str:
+    """
+    Format gift text for Discord embeds.
+
+    Non-empty text is wrapped in inline `` `...` `` so a literal joke like "nothing"
+    is clearly the participant's wording, not a missing gift. Empty strings use a
+    clear meta label instead of looking like a real gift name.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return empty_label
+    single_line = " ".join(raw.split())
+    if len(single_line) > max_length:
+        single_line = single_line[: max_length - 1] + "…"
+    if "`" in single_line:
+        single_line = single_line.replace("`", "′")
+    return f"`{single_line}`"

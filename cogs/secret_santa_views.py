@@ -19,6 +19,8 @@ from typing import Dict, List, Tuple, Any
 
 import disnake
 
+from .secret_santa_checks import format_gift_description_for_display, GIFT_NO_SUBMISSION_ROW
+
 
 class SecretSantaReplyView(disnake.ui.View):
     """View with reply button for Secret Santa messages - persists across bot restarts"""
@@ -157,14 +159,16 @@ class YearHistoryPaginator(disnake.ui.View):
             submission = gifts.get(str(giver_id))
             if submission and isinstance(submission, dict):
                 raw = submission.get("gift")
-                if isinstance(raw, str) and raw.strip():
-                    gift_desc = raw[:57] + "..." if len(raw) > 60 else raw
-                else:
-                    gift_desc = "(not yet submitted)"
+                gift_desc = format_gift_description_for_display(
+                    raw if isinstance(raw, str) else None,
+                    max_length=60,
+                )
                 self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
-                self.all_lines.append(f"    ⤷ *{gift_desc}*")
+                self.all_lines.append(f"    ⤷ {gift_desc}")
             else:
-                self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *(no gift recorded)*")
+                self.all_lines.append(
+                    f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *{GIFT_NO_SUBMISSION_ROW}*"
+                )
         
         # Calculate pages (10 assignments per page = ~20 lines with gifts)
         self.items_per_page = 10
