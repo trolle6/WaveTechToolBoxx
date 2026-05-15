@@ -680,7 +680,7 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: Curious
             lambda q: (
-                f"❓ **Secret Santa** `::{year}::` **– YOUR SANTA IS CURIOUS!** ❓\n\n"
+                f"❓ **Secret Santa** `{year}` **– YOUR SANTA IS CURIOUS!** ❓\n\n"
                 f"Ooh, your Santa has a question for you! They're wondering:\n\n"
                 f"*\"{q}\"*\n\n"
                 f"---\n\n"
@@ -690,7 +690,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation B: Clue Request
             lambda q: (
-                f"🔍 **Secret Santa** `::{year}::` **– CLUE REQUEST!** 🔍\n\n"
+                f"🔍 **Secret Santa** `{year}` **– CLUE REQUEST!** 🔍\n\n"
                 f"Your Santa's on a treasure hunt for the ideal gift! They need a little direction:\n\n"
                 f"*\"{q}\"*\n\n"
                 f"---\n\n"
@@ -700,7 +700,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation C: Thinking of you
             lambda q: (
-                f"💭 **Secret Santa** `::{year}::` **– YOUR SANTA IS THINKING OF YOU!** 💭\n\n"
+                f"💭 **Secret Santa** `{year}` **– YOUR SANTA IS THINKING OF YOU!** 💭\n\n"
                 f"Your Santa's brainstorming gift ideas and would love your input:\n\n"
                 f"*\"{q}\"*\n\n"
                 f"---\n\n"
@@ -716,7 +716,7 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: Wrote back
             lambda r: (
-                f"🎅 **Secret Santa** `::{year}::` **– YOUR GIFTEE WROTE BACK!** 🎅\n\n"
+                f"🎅 **Secret Santa** `{year}` **– YOUR GIFTEE WROTE BACK!** 🎅\n\n"
                 f"Great news! Your giftee responded:\n\n"
                 f"*\"{r}\"*\n\n"
                 f"---\n\n"
@@ -726,7 +726,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation B: Message incoming
             lambda r: (
-                f"💌 **Secret Santa** `::{year}::` **– MESSAGE INCOMING!** 💌\n\n"
+                f"💌 **Secret Santa** `{year}` **– MESSAGE INCOMING!** 💌\n\n"
                 f"Your giftee sent a reply! Here's what they said:\n\n"
                 f"*\"{r}\"*\n\n"
                 f"---\n\n"
@@ -736,7 +736,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Variation C: Plot thickens
             lambda r: (
-                f"✨ **Secret Santa** `::{year}::` **– THE PLOT THICKENS!** ✨\n\n"
+                f"✨ **Secret Santa** `{year}` **– THE PLOT THICKENS!** ✨\n\n"
                 f"Interesting! Your giftee just shared this:\n\n"
                 f"*\"{r}\"*\n\n"
                 f"---\n\n"
@@ -752,21 +752,21 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: Welcome aboard
             lambda y: (
-                f"🎉 **Secret Santa** `::{y}::` **– WELCOME ABOARD!** 🎉\n\n"
+                f"🎉 **Secret Santa** `{y}` **– WELCOME ABOARD!** 🎉\n\n"
                 f"You're officially on the nice list! 🎅\n\n"
                 f"Get ready for some holiday magic! We'll message you here once you've been matched with your giftee.\n\n"
                 f"In the meantime, why not add some wishlist ideas? It helps your own Santa out! 🎄"
             ),
             # Variation B: So glad you're here
             lambda y: (
-                f"✨ **Secret Santa** `::{y}::` **– SO GLAD YOU'RE HERE!** ✨\n\n"
+                f"✨ **Secret Santa** `{y}` **– SO GLAD YOU'RE HERE!** ✨\n\n"
                 f"Welcome to this year's Secret Santa adventure!\n\n"
                 f"We'll DM you with your special assignment once the shuffle happens. The magic begins soon! ❄️\n\n"
                 f"Pro tip: Add a few wishlist items now to give your Santa a head start! 🎁"
             ),
             # Variation C: You're in
             lambda y: (
-                f"❤️ **Secret Santa** `::{y}::` **– YOU'RE IN!** ❤️\n\n"
+                f"❤️ **Secret Santa** `{y}` **– YOU'RE IN!** ❤️\n\n"
                 f"Yay! You've joined the holiday fun!\n\n"
                 f"Keep an eye on your DMs - we'll send your giftee assignment here when everything's ready.\n\n"
                 f"Why not sprinkle some hints on your wishlist? Your Santa will thank you! 🤫"
@@ -795,7 +795,7 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Template 1: Mission-focused
             lambda opening, name: (
-                f"🎯 **Secret Santa** `::{year}::` **– YOUR SPECIAL MISSION!** 🎯\n\n"
+                f"🎯 **Secret Santa** `{year}` **– YOUR SPECIAL MISSION!** 🎯\n\n"
                 f"{opening}\n\n"
                 f"---\n\n"
                 f"`:: Giftee ::` {name}\n\n"
@@ -803,7 +803,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Template 2: Adventure-focused
             lambda opening, name: (
-                f"🎁 **Secret Santa** `::{year}::` **– YOUR GIFTING ADVENTURE!** 🎁\n\n"
+                f"🎁 **Secret Santa** `{year}` **– YOUR GIFTING ADVENTURE!** 🎁\n\n"
                 f"{opening}\n\n"
                 f"---\n\n"
                 f"`:: Giftee ::` {name}\n\n"
@@ -811,7 +811,7 @@ class SecretSantaCog(commands.Cog):
             ),
             # Template 3: Magic-focused
             lambda opening, name: (
-                f"✨ **Secret Santa** `::{year}::` **– THE MAGIC BEGINS!** ✨\n\n"
+                f"✨ **Secret Santa** `{year}` **– THE MAGIC BEGINS!** ✨\n\n"
                 f"{opening}\n\n"
                 f"---\n\n"
                 f"`:: Giftee ::` {name}\n\n"
@@ -828,22 +828,22 @@ class SecretSantaCog(commands.Cog):
         templates = [
             # Variation A: And that's a wrap
             lambda y: (
-                f"✨ **Secret Santa** `::{y}::` **– AND THAT'S A WRAP!** ✨\n\n"
+                f"✨ **Secret Santa** `{y}` **– AND THAT'S A WRAP!** ✨\n\n"
                 f"A huge, heartfelt thank you to everyone who participated! 🎁\n\n"
                 f"Because of all of you, this holiday season just got a whole lot warmer and brighter. The joy you've shared is the real gift.\n\n"
                 f"Until next year! Stay merry and bright! 🎄❤️"
             ),
             # Variation B: Mission complete
             lambda y: (
-                f"🎄 **Secret Santa** `::{y}::` **– MISSION COMPLETE!** 🎄\n\n"
+                f"🎄 **Secret Santa** `{y}` **– MISSION COMPLETE!** 🎄\n\n"
                 f"And just like that, another wonderful Secret Santa comes to a close.\n\n"
                 f"Thank you for spreading so much joy and holiday magic. You've made someone's season truly special.\n\n"
                 f"Wishing you all the warmth and happiness this holiday brings! ❤️"
             ),
             # Variation C: Thanks for the magic
             lambda y: (
-                f"🌟 **Secret Santa** `::{y}::` **– THANKS FOR THE MAGIC!** 🌟\n\n"
-                f"The final sleigh bell has rung! Secret Santa `::{y}::` is complete.\n\n"
+                f"🌟 **Secret Santa** `{y}` **– THANKS FOR THE MAGIC!** 🌟\n\n"
+                f"The final sleigh bell has rung! Secret Santa `{y}` is complete.\n\n"
                 f"What an amazing gift-giving journey it's been! Thank you for your kindness, creativity, and holiday spirit.\n\n"
                 f"May your holidays be as bright as the smiles you've created! ✨🎅"
             )
@@ -853,7 +853,7 @@ class SecretSantaCog(commands.Cog):
     def _get_leave_message(self, year: int) -> str:
         """Get the leave message for participants"""
         return (
-            f"👋 **Secret Santa** `::{year}::` **– WE'LL MISS YOU!** 👋\n\n"
+            f"👋 **Secret Santa** `{year}` **– WE'LL MISS YOU!** 👋\n\n"
             f"You've left this year's Secret Santa.\n\n"
             f"Your spot has been cleared and you won't be matched with anyone.\n\n"
             f"Changed your mind? You can always rejoin before the shuffle happens! ❤️"
