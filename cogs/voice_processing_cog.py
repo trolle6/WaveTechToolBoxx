@@ -190,8 +190,9 @@ class VoiceProcessingCog(commands.Cog):
         self.enabled = True
         self.logger.info("TTS enabled")
         
-        # Check FFmpeg availability and log diagnostics
+        # Check FFmpeg and Discord DAVE (E2EE voice) dependencies
         self._check_ffmpeg_availability()
+        self._check_dave_availability()
         
         # Pre-compile regex patterns
         self._compiled_corrections = self._compile_correction_patterns()
@@ -383,6 +384,23 @@ class VoiceProcessingCog(commands.Cog):
             return new_voice
 
     # ============ SYSTEM DIAGNOSTICS ============
+    def _check_dave_availability(self) -> bool:
+        """
+        Verify dave-py is installed for Discord's mandatory E2EE voice (DAVE).
+
+        Without it, voice connections fail with WebSocket close code 4017.
+        """
+        import importlib.util
+
+        if importlib.util.find_spec("dave") is None:
+            self.logger.error(
+                "dave-py is not installed. Discord voice requires DAVE (E2EE) as of 2026.\n"
+                'Install: pip install "disnake[voice]>=2.12.0"'
+            )
+            return False
+        self.logger.info("Discord voice DAVE (dave-py) dependency OK")
+        return True
+
     def _check_ffmpeg_availability(self):
         """
         Check if FFmpeg is available and log diagnostic information.

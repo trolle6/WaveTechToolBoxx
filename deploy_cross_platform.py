@@ -29,20 +29,40 @@ def get_os_info():
         'python_version': sys.version_info
     }
 
+PYTHON_MIN = (3, 10)
+DISNAKE_MIN = (2, 12, 0)
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in version.split(".")[:3]:
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
 def check_python_version():
     """Check Python version compatibility"""
     version = sys.version_info
-    if version.major < 3 or (version.major == 3 and version.minor < 9):
-        print(f"❌ Python 3.9+ required. Current: {version.major}.{version.minor}.{version.micro}")
+    if version < PYTHON_MIN:
+        print(
+            f"❌ Python {PYTHON_MIN[0]}.{PYTHON_MIN[1]}+ required "
+            f"(disnake 2.12+ / Discord DAVE voice). "
+            f"Current: {version.major}.{version.minor}.{version.micro}"
+        )
         return False
     print(f"✅ Python {version.major}.{version.minor}.{version.micro}")
     return True
 
 def check_dependencies():
     """Check if all required dependencies are available"""
+    import importlib.util
+
     required_modules = ['disnake', 'asyncio', 'aiohttp', 'pathlib']
     missing_modules = []
-    
+
     for module in required_modules:
         try:
             __import__(module)
@@ -50,11 +70,25 @@ def check_dependencies():
         except ImportError:
             missing_modules.append(module)
             print(f"❌ {module} not found")
-    
+
     if missing_modules:
         print(f"Missing modules: {missing_modules}")
         return False
-    
+
+    import disnake
+    if _parse_version_tuple(disnake.__version__) < DISNAKE_MIN:
+        print(
+            f"❌ disnake {disnake.__version__} is too old; need "
+            f"{DISNAKE_MIN[0]}.{DISNAKE_MIN[1]}+"
+        )
+        return False
+    print(f"✅ disnake {disnake.__version__}")
+
+    if importlib.util.find_spec("dave") is None:
+        print('❌ dave-py missing — run: pip install "disnake[voice]>=2.12.0"')
+        return False
+    print("✅ dave-py (Discord voice E2EE) available")
+
     return True
 
 def create_directories():
@@ -110,7 +144,7 @@ def install_dependencies():
             print("✅ Dependencies installed from requirements.txt")
         else:
             # Install core dependencies manually
-            core_deps = ['disnake>=2.9.0', 'aiohttp>=3.8.0']
+            core_deps = ['disnake[voice]>=2.12.0', 'aiohttp>=3.10.0', 'python-dotenv>=1.0.0']
             for dep in core_deps:
                 subprocess.run([python_exe, '-m', 'pip', 'install', dep], 
                              check=True, capture_output=True, text=True)

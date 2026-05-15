@@ -5,7 +5,7 @@
 echo "🚀 Secret Santa Bot Deployment"
 echo "================================"
 
-# Check if Python 3.9+ is available
+# Check if Python 3.10+ is available (disnake 2.12+ / Discord DAVE voice)
 python3 --version
 if [ $? -ne 0 ]; then
     echo "❌ Python 3 not found"

@@ -181,9 +181,9 @@ tail -f bot.log
 
 3. **"Python not found" on Linux**
    ```bash
-   # Install Python 3.9+
+   # Install Python 3.10+ (disnake 2.12+ / Discord DAVE voice) and FFmpeg (TTS)
    sudo apt update
-   sudo apt install python3.9 python3.9-pip
+   sudo apt install python3.12 python3.12-venv python3-pip ffmpeg
    ```
 
 4. **"Environment variables not set"**
@@ -195,7 +195,9 @@ tail -f bot.log
 ## 📊 **DEPLOYMENT CHECKLIST**
 
 ### **Before Deployment:**
-- [ ] Python 3.9+ installed
+- [ ] Python 3.10+ installed
+- [ ] FFmpeg installed (TTS playback)
+- [ ] `pip install -r requirements.txt` (installs disnake 2.12+ with dave-py for voice)
 - [ ] Dependencies installed (`pip install -r requirements.txt`)
 - [ ] Environment variables set
 - [ ] Directories created

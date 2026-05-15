@@ -5,21 +5,21 @@
 echo "🚀 Secret Santa Bot Deployment (Linux)"
 echo "======================================"
 
-# Check if Python 3.9+ is available
+# Check if Python 3.10+ is available (disnake 2.12+ / Discord DAVE voice)
 if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 not found. Please install Python 3.9+"
+    echo "❌ Python 3 not found. Please install Python 3.10+"
     exit 1
 fi
 
 PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "✅ Python found: $PYTHON_VERSION"
 
-# Check Python version (3.9+)
+# Check Python version (3.10+)
 PYTHON_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
 PYTHON_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
 
-if [ $PYTHON_MAJOR -lt 3 ] || ([ $PYTHON_MAJOR -eq 3 ] && [ $PYTHON_MINOR -lt 9 ]); then
-    echo "❌ Python 3.9+ required. Current: $PYTHON_VERSION"
+if [ $PYTHON_MAJOR -lt 3 ] || ([ $PYTHON_MAJOR -eq 3 ] && [ $PYTHON_MINOR -lt 10 ]); then
+    echo "❌ Python 3.10+ required (disnake 2.12+ / Discord voice). Current: $PYTHON_VERSION"
     exit 1
 fi
 
@@ -61,7 +61,7 @@ if [ -f "requirements.txt" ]; then
     echo "✅ Dependencies installed from requirements.txt"
 else
     # Install core dependencies
-    pip3 install disnake>=2.9.0 aiohttp>=3.8.0
+    pip3 install "disnake[voice]>=2.12.0" "aiohttp>=3.10.0" "python-dotenv>=1.0.0"
     echo "✅ Core dependencies installed"
 fi
 

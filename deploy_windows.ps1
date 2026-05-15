@@ -9,7 +9,7 @@ try {
     $pythonVersion = python --version 2>&1
     Write-Host "✅ Python found: $pythonVersion" -ForegroundColor Green
 } catch {
-    Write-Host "❌ Python not found. Please install Python 3.9+" -ForegroundColor Red
+    Write-Host "❌ Python not found. Please install Python 3.10+ (required for disnake 2.12 / Discord voice)" -ForegroundColor Red
     exit 1
 }
 

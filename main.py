@@ -388,6 +388,60 @@ async def validate_openai_key(key: str, logger: logging.Logger, http_mgr: "HttpM
 
 # ============ BOT SETUP ============
 PYTHON_MIN_VERSION = (3, 10)  # disnake 2.12+ (DAVE voice) requires Python 3.10+
+MIN_DISNAKE_VERSION = (2, 12, 0)  # Discord mandates DAVE (E2EE) for voice; older libs get close 4017
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...]:
+    """Parse '2.12.0' -> (2, 12, 0) for minimum-version checks."""
+    parts: list[int] = []
+    for piece in version.split(".")[:3]:
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
+def validate_runtime_dependencies(logger: logging.Logger) -> bool:
+    """
+    Verify disnake and Discord voice (DAVE) dependencies before loading cogs.
+
+    Returns False if requirements are not met (caller should exit).
+    """
+    import importlib.util
+
+    if _parse_version_tuple(disnake.__version__) < MIN_DISNAKE_VERSION:
+        logger.critical(
+            f"disnake {disnake.__version__} is too old; need "
+            f"{MIN_DISNAKE_VERSION[0]}.{MIN_DISNAKE_VERSION[1]}+ for Discord voice (DAVE/E2EE). "
+            f'Run: pip install -r requirements.txt'
+        )
+        return False
+
+    if importlib.util.find_spec("dave") is None:
+        logger.critical(
+            "dave-py is not installed (required for Discord voice since 2026). "
+            'Install with: pip install "disnake[voice]>=2.12.0"'
+        )
+        return False
+
+    try:
+        import aiohttp
+        from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+        try:
+            dotenv_ver = pkg_version("python-dotenv")
+        except PackageNotFoundError:
+            dotenv_ver = "unknown"
+        logger.info(
+            f"Runtime deps OK: disnake {disnake.__version__}, "
+            f"aiohttp {aiohttp.__version__}, python-dotenv {dotenv_ver}, dave-py present"
+        )
+    except ImportError as e:
+        logger.critical(f"Missing dependency: {e}. Run: pip install -r requirements.txt")
+        return False
+
+    return True
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
 MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)
@@ -787,6 +841,9 @@ if __name__ == "__main__":
             sys.exit(1)
     
     logger.info("Production checks passed")
+
+    if not validate_runtime_dependencies(logger):
+        sys.exit(1)
     
     # Validate API key (uses shared HttpManager for connection reuse)
     if not config.SKIP_API_VALIDATION:

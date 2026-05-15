@@ -11,31 +11,61 @@ import subprocess
 import sys
 from pathlib import Path
 
+PYTHON_MIN = (3, 10)
+DISNAKE_MIN = (2, 12, 0)
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in version.split(".")[:3]:
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
 def check_python_version():
     """Check Python version"""
     version = sys.version_info
-    if version.major < 3 or (version.major == 3 and version.minor < 9):
-        print("❌ Python 3.9+ required")
+    if version < PYTHON_MIN:
+        print(
+            f"❌ Python {PYTHON_MIN[0]}.{PYTHON_MIN[1]}+ required "
+            f"(disnake 2.12+ / Discord DAVE voice). Current: {version.major}.{version.minor}"
+        )
         return False
     print(f"✅ Python {version.major}.{version.minor}.{version.micro}")
     return True
 
 def check_dependencies():
     """Check if all dependencies are installed"""
+    import importlib.util
+
     try:
         import disnake
+        if _parse_version_tuple(disnake.__version__) < DISNAKE_MIN:
+            print(
+                f"❌ disnake {disnake.__version__} is too old; need "
+                f"{DISNAKE_MIN[0]}.{DISNAKE_MIN[1]}+ for Discord voice"
+            )
+            return False
         print(f"✅ disnake {disnake.__version__}")
     except ImportError:
         print("❌ disnake not installed")
         return False
-    
-    try:
-        import asyncio
-        print("✅ asyncio available")
-    except ImportError:
-        print("❌ asyncio not available")
+
+    if importlib.util.find_spec("dave") is None:
+        print('❌ dave-py missing — run: pip install "disnake[voice]>=2.12.0"')
         return False
-    
+    print("✅ dave-py (Discord voice E2EE) available")
+
+    try:
+        import aiohttp
+        print(f"✅ aiohttp {aiohttp.__version__}")
+    except ImportError:
+        print("❌ aiohttp not installed")
+        return False
+
     return True
 
 def check_environment():
