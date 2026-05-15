@@ -18,6 +18,8 @@ import os
 import signal
 import sys
 import time
+import warnings
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -103,13 +105,13 @@ class Config:
                 try:
                     self.data[key] = int(val)
                 except ValueError:
-                    print(f"Warning: Invalid integer for {key}, using default {default}")
+                    warnings.warn(f"Invalid integer for {key!r}, using default {default!r}", UserWarning)
                     self.data[key] = default
             elif key == "BOT_OWNER_USER_ID" and val:
                 try:
                     self.data[key] = int(val)
                 except ValueError:
-                    print(f"Warning: Invalid BOT_OWNER_USER_ID '{val}', using None")
+                    warnings.warn(f"Invalid BOT_OWNER_USER_ID {val!r}, using None", UserWarning)
                     self.data[key] = None
             else:
                 self.data[key] = val
@@ -139,12 +141,28 @@ class HttpManager:
     """
     _instance = None
     _session: Optional[aiohttp.ClientSession] = None
-    
+
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            inst = super().__new__(cls)
+            inst._session_lock = asyncio.Lock()
+            cls._instance = inst
         return cls._instance
-    
+
+    def _session_needs_rebuild(
+        self,
+        session: Optional[aiohttp.ClientSession],
+        current_loop: Optional[asyncio.AbstractEventLoop],
+    ) -> bool:
+        if session is None or session.closed:
+            return True
+        session_loop = getattr(session, "_loop", None)
+        if session_loop is None or session_loop.is_closed():
+            return True
+        if current_loop is not None and session_loop is not current_loop:
+            return True
+        return False
+
     async def get_session(self, timeout: int = HTTP_DEFAULT_TIMEOUT) -> aiohttp.ClientSession:
         """
         Get or create HTTP session with connection pooling.
@@ -163,16 +181,13 @@ class HttpManager:
         except RuntimeError:
             current_loop = None
 
-        session_loop = getattr(self._session, "_loop", None) if self._session else None
-        need_new = (
-            self._session is None
-            or self._session.closed
-            or session_loop is None
-            or session_loop.is_closed()
-            or (current_loop is not None and session_loop != current_loop)
-        )
+        if not self._session_needs_rebuild(self._session, current_loop):
+            return self._session  # hot path: no lock
 
-        if need_new:
+        async with self._session_lock:
+            if not self._session_needs_rebuild(self._session, current_loop):
+                return self._session
+
             if self._session and not self._session.closed:
                 try:
                     await self._session.close()
@@ -192,31 +207,34 @@ class HttpManager:
                 connector=connector,
                 headers={"Connection": "keep-alive"},
             )
-        return self._session
+            return self._session
 
     async def invalidate_session(self):
         """Force-close current session so next get_session() creates a fresh one.
         Use when the session's event loop has closed (e.g. after validation, or bot restart).
         """
-        if self._session and not self._session.closed:
-            try:
-                await self._session.close()
-            except Exception:
-                pass
-        self._session = None  # Always clear so next get_session() creates fresh
+        async with self._session_lock:
+            if self._session and not self._session.closed:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+            self._session = None
 
     async def close(self):
         """Cleanly close HTTP session and connection pool"""
-        if self._session and not self._session.closed:
+        async with self._session_lock:
+            sess = self._session
+            self._session = None
+            if not sess or sess.closed:
+                return
             try:
-                await self._session.close()
+                await sess.close()
                 await asyncio.sleep(0.5)  # Allow pending requests to finish
-                if hasattr(self._session, '_connector') and self._session._connector:
-                    await self._session._connector.close()
+                if hasattr(sess, '_connector') and sess._connector:
+                    await sess._connector.close()
             except Exception:
                 pass
-            finally:
-                self._session = None
 
 
 # ============ DISCORD LOGGING ============
@@ -224,6 +242,9 @@ class DiscordLogHandler(logging.Handler):
     """Send log messages to Discord channel"""
     
     EMOJI_MAP = {"WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}
+    # Cap dedupe keys so unusual log spam cannot grow this dict without bound
+    _DEDUPE_MAX_KEYS = 512
+    _DEDUPE_WINDOW_SEC = 60.0
     
     def __init__(self, log_channel_id: int):
         super().__init__()
@@ -231,12 +252,12 @@ class DiscordLogHandler(logging.Handler):
         self.bot: Optional[disnake.Client] = None
         self.message_queue = asyncio.Queue(maxsize=50)
         self.sender_task: Optional[asyncio.Task] = None
-        self._last_message = {}  # Rate limiting
+        self._last_message: OrderedDict[str, float] = OrderedDict()
     
     def set_bot(self, bot: disnake.Client):
         """Set bot instance and start sender task"""
         self.bot = bot
-        if not self.sender_task:
+        if self.sender_task is None or self.sender_task.done():
             self.sender_task = asyncio.create_task(self._sender_loop())
     
     def emit(self, record: logging.LogRecord):
@@ -247,8 +268,13 @@ class DiscordLogHandler(logging.Handler):
         # Rate limit duplicate messages
         msg_key = f"{record.levelname}:{record.getMessage()[:50]}"
         now = time.time()
-        if msg_key in self._last_message and (now - self._last_message[msg_key]) < 60:
+        last = self._last_message.get(msg_key)
+        if last is not None and (now - last) < self._DEDUPE_WINDOW_SEC:
             return
+        if last is not None:
+            self._last_message.move_to_end(msg_key)
+        elif len(self._last_message) >= self._DEDUPE_MAX_KEYS:
+            self._last_message.popitem(last=False)
         self._last_message[msg_key] = now
         
         # Format message

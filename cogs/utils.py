@@ -101,15 +101,19 @@ class RateLimiter:
         """
         async with self._lock:
             now = time.time()
-            if key not in self.tokens:
-                self.tokens[key] = deque()
+            token_deque = self.tokens.get(key)
+            if token_deque is not None:
+                while token_deque and now - token_deque[0] >= self.window:
+                    token_deque.popleft()
+                # Drop idle buckets so per-user keys cannot accumulate forever
+                if not token_deque:
+                    del self.tokens[key]
+                    token_deque = None
 
-            token_deque = self.tokens[key]
-            # Remove timestamps outside the sliding window (O(1) per old request)
-            while token_deque and now - token_deque[0] >= self.window:
-                token_deque.popleft()
+            if token_deque is None:
+                token_deque = deque()
+                self.tokens[key] = token_deque
 
-            # Check if we're under the limit
             if len(token_deque) < self.limit:
                 token_deque.append(now)
                 return True
@@ -337,11 +341,7 @@ class LRUCache(Generic[T]):
         """
         async with self._lock:
             now = time.time()
-            # Iterate from beginning (oldest) for efficiency
-            expired_keys = [
-                k for k, (_, ts) in self._cache.items()
-                if now - ts >= self.ttl
-            ]
+            expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self.ttl]
             for key in expired_keys:
                 del self._cache[key]
 
@@ -449,9 +449,15 @@ class RequestCache:
         """
         async with self._lock:
             if self.max_size is not None and key not in self.cache and len(self.cache) >= self.max_size:
-                # Evict soonest-to-expire entry
-                soonest_key = min(self.cache, key=lambda k: self.cache[k][1])
-                del self.cache[soonest_key]
+                # Evict soonest-to-expire entry (single pass, no per-key lambda)
+                soonest_key = None
+                soonest_exp = float("inf")
+                for k, (_, exp) in self.cache.items():
+                    if exp < soonest_exp:
+                        soonest_exp = exp
+                        soonest_key = k
+                if soonest_key is not None:
+                    del self.cache[soonest_key]
             self.cache[key] = (value, time.time() + self.ttl)
 
     async def cleanup(self):
