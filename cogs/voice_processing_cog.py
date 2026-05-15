@@ -106,6 +106,10 @@ VOICE_DISCONNECT_DELAY = 3.0  # Seconds to wait before checking voice channel ag
 VOICE_CLEANUP_DELAY = 0.3  # Seconds to wait after cleanup before reconnecting
 VOICE_CONNECTION_RETRY_DELAY = 0.8  # Seconds between connection retry attempts
 
+# Discord DAVE (E2EE voice): packets sent before the MLS key ratchet is ready are inaudible to clients.
+DAVE_ENCRYPT_READY_TIMEOUT = 20.0  # Max seconds to wait after connecting / before play
+DAVE_ENCRYPT_READY_POLL = 0.05  # Poll interval while waiting for key ratchet
+
 
 @dataclass
 class TTSQueueItem:
@@ -918,6 +922,34 @@ class VoiceProcessingCog(commands.Cog):
             self.total_failed += 1
         return None
 
+    async def _wait_for_voice_media_ready(self, vc: disnake.VoiceClient, timeout: float = DAVE_ENCRYPT_READY_TIMEOUT) -> bool:
+        """
+        Block until Discord DAVE can encrypt outgoing audio.
+
+        If we call play() before the MLS ratchet is ready, disnake falls back to sending
+        legacy (non-DAVE) frames; modern voice servers accept this as "success" locally but
+        clients hear nothing — matching "playback completed" with silent channel audio.
+        """
+        dave_state = getattr(vc, "dave", None)
+        if dave_state is None:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if dave_state.can_encrypt():
+                    self.logger.debug("DAVE voice encryption ready (key ratchet active)")
+                    return True
+            except Exception as e:
+                self.logger.warning(f"DAVE readiness check error: {e}")
+                return False
+            await asyncio.sleep(DAVE_ENCRYPT_READY_POLL)
+        self.logger.error(
+            "DAVE encryption did not become ready within %.1fs — TTS would be silent for listeners. "
+            "Check voice connection, gateway, and dave-py compatibility.",
+            timeout,
+        )
+        return False
+
     # ============ AUDIO PLAYBACK ============
     async def _play_audio(self, vc: disnake.VoiceClient, audio_data: bytes) -> bool:
         """
@@ -990,6 +1022,14 @@ class VoiceProcessingCog(commands.Cog):
             if not vc.is_connected():
                 if temp_file and os.path.exists(temp_file):
                     os.unlink(temp_file)
+                return False
+
+            if not await self._wait_for_voice_media_ready(vc):
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except Exception:
+                        pass
                 return False
 
             # Start playback
@@ -1083,12 +1123,18 @@ class VoiceProcessingCog(commands.Cog):
 
         vc = guild.voice_client
 
-        # Already connected to this exact channel - verify and return
+        # Already connected to this exact channel - verify DAVE/media then return
         if vc and vc.is_connected():
             ch = getattr(vc, "channel", None)
             if ch and ch.id == channel.id:
-                return vc
-            # Connected elsewhere - disconnect first
+                if await self._wait_for_voice_media_ready(vc):
+                    return vc
+                self.logger.warning("DAVE not ready on existing voice connection — reconnecting")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception as e:
+                    self.logger.debug(f"Disconnect for DAVE retry: {e}")
+                await asyncio.sleep(VOICE_CLEANUP_DELAY)
             try:
                 await vc.disconnect()
             except Exception as e:
@@ -1112,10 +1158,18 @@ class VoiceProcessingCog(commands.Cog):
                     timeout=timeout + 5
                 )
                 self.logger.info(f"Connected to {channel.name} (attempt {attempt + 1})")
-                try:
-                    await guild.change_voice_state(channel=channel, self_deaf=True)
-                except Exception:
-                    pass
+                # Do not self-deaf the bot: it is unnecessary for TTS and can break or confuse
+                # voice media on some clients/gateways. DAVE readiness is handled before play().
+                if not await self._wait_for_voice_media_ready(vc):
+                    self.logger.error(
+                        "Voice connected but DAVE not ready — disconnecting and retrying if attempts remain"
+                    )
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(VOICE_CLEANUP_DELAY * 2)
+                    continue
                 return vc
             except disnake.ClientException as e:
                 err_lower = str(e).lower()
@@ -1124,7 +1178,14 @@ class VoiceProcessingCog(commands.Cog):
                     if vc and vc.is_connected():
                         ch = getattr(vc, "channel", None)
                         if ch and ch.id == channel.id:
-                            return vc
+                            if await self._wait_for_voice_media_ready(vc):
+                                return vc
+                            try:
+                                await vc.disconnect(force=True)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(VOICE_CLEANUP_DELAY * 2)
+                            continue
                     try:
                         if vc:
                             await vc.disconnect(force=True)
