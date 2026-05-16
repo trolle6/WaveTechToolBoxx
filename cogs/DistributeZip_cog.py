@@ -496,6 +496,41 @@ class DistributeZipCog(commands.Cog):
             members = [member for member in guild.members if not member.bot]
             return members, "all server members"
 
+    async def _distribute_uploaded_files(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        successful_uploads: List[Dict[str, Any]],
+        requester_user: disnake.User,
+        *,
+        status_message: Optional[str] = None,
+    ) -> None:
+        """Distribute saved uploads, or explain when DM/server context is missing."""
+        if not successful_uploads:
+            return
+        if not inter.guild:
+            lines = "\n".join(f"• {u['file_name']}" for u in successful_uploads)
+            await self._safe_edit_response(
+                inter,
+                content=(
+                    f"✅ **File(s) saved** ({len(successful_uploads)})\n{lines}\n\n"
+                    "📤 To distribute, run upload again in a **server channel** "
+                    "(the bot needs a server to know who receives the file)."
+                ),
+            )
+            return
+        if status_message:
+            await self._safe_edit_response(inter, content=status_message)
+        for index, file_info in enumerate(successful_uploads):
+            await self._distribute_file(
+                inter,
+                file_info["file_id"],
+                file_info["file_name"],
+                file_info["file_path"],
+                requester_user,
+            )
+            if index + 1 < len(successful_uploads):
+                await asyncio.sleep(1)
+
     async def _distribute_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -522,24 +557,15 @@ class DistributeZipCog(commands.Cog):
             )
             return
         guild = inter.guild
-        
-        # If in DM, try to find a guild from the bot (use first available guild)
         if not guild:
-            # In DM context - find a guild to distribute to
-            bot_guilds = [g for g in self.bot.guilds if g]
-            if not bot_guilds:
-                await self._safe_followup_send(inter, 
-                    content="❌ **Cannot distribute in DM**\n\n"
-                           "✅ File has been uploaded and saved.\n"
-                           "📤 To distribute: Use `/distributezip upload` in a server channel.\n\n"
-                           "💡 **Tip:** Files uploaded in DMs are stored and can be distributed later from a server.",
-                    ephemeral=True
-                )
-                return
-            
-            # Use first available guild (or could let user choose, but simpler to use first)
-            guild = bot_guilds[0]
-            self.logger.info(f"DM upload detected, using guild {guild.id} ({guild.name}) for distribution")
+            await self._safe_followup_send(
+                inter,
+                content="❌ **Cannot distribute from a DM**\n\n"
+                        "✅ The file is saved on the bot.\n"
+                        "📤 Run the upload command again **in a server channel** to distribute to members.",
+                ephemeral=True,
+            )
+            return
         
         # Get requester as Member if possible (for DM context, use guild.get_member)
         # required_by is a User object (from upload_file), try to get Member from guild
@@ -932,26 +958,17 @@ class DistributeZipCog(commands.Cog):
         
         # Send summary
         if successful_uploads and not failed_uploads:
-            # All successful
             if len(successful_uploads) == 1:
-                file_info = successful_uploads[0]
-                await self._safe_edit_response(inter,
-                    content=f"✅ File '{file_info['file_name']}' uploaded successfully!\n📤 Starting distribution..."
-                )
-                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
+                name = successful_uploads[0]["file_name"]
+                status = f"✅ File '{name}' uploaded successfully!\n📤 Starting distribution..."
             else:
-                # Multiple files - show summary then distribute all
                 summary = f"✅ **{len(successful_uploads)} files uploaded successfully!**\n\n"
                 for file_info in successful_uploads:
                     summary += f"• {file_info['file_name']}\n"
-                summary += "\n📤 Starting distribution for all files..."
-                await self._safe_edit_response(inter, content=summary)
-                
-                # Distribute each file
-                for file_info in successful_uploads:
-                    await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
-                    # Small delay between distributions to avoid overwhelming
-                    await asyncio.sleep(1)
+                status = summary + "\n📤 Starting distribution for all files..."
+            await self._distribute_uploaded_files(
+                inter, successful_uploads, requester_user, status_message=status
+            )
         
         elif successful_uploads and failed_uploads:
             # Partial success
@@ -970,11 +987,7 @@ class DistributeZipCog(commands.Cog):
                     summary += f"• {fail_info['filename']}: {fail_info['error']}\n"
             
             await self._safe_edit_response(inter, content=summary)
-            
-            # Distribute successful files
-            for file_info in successful_uploads:
-                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
-                await asyncio.sleep(1)
+            await self._distribute_uploaded_files(inter, successful_uploads, requester_user)
         
         else:
             # All failed

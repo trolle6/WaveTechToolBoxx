@@ -339,7 +339,9 @@ class VoiceProcessingCog(commands.Cog):
                         "voice": voice,
                         "timestamp": current_time
                     }
-                    self.logger.info(f"Upgraded old voice assignment format for user {user_id} (display_name: {member.display_name}) in guild {guild_id}: '{voice}'")
+                    self.logger.debug(
+                        f"Upgraded old voice assignment format for user {user_id} in guild {guild_id}: '{voice}'"
+                    )
                 elif isinstance(assignment, dict):
                     voice = assignment.get("voice")
                     old_timestamp = assignment.get("timestamp", 0)
@@ -352,7 +354,9 @@ class VoiceProcessingCog(commands.Cog):
                 
                 # Validate voice is still available
                 if voice and voice in self.available_voices:
-                    self.logger.info(f"Returning existing voice '{voice}' for user {user_id} (display_name: {member.display_name}) in guild {guild_id}")
+                    self.logger.debug(
+                        f"Returning existing voice '{voice}' for user {user_id} in guild {guild_id}"
+                    )
                     return voice
                 else:
                     # Invalid assignment, will reassign below
@@ -371,20 +375,10 @@ class VoiceProcessingCog(commands.Cog):
                 "timestamp": current_time
             }
             
-            # Log assignment with detailed info for debugging
-            self.logger.info(
-                f"Assigned voice '{new_voice}' (index {voice_index} of {len(self.available_voices)}) "
-                f"to user {user_id} (display_name: {member.display_name}) in guild {guild_id} "
-                f"at timestamp {current_time}. Calculation: {user_id} % {len(self.available_voices)} = {voice_index}"
+            self.logger.debug(
+                f"Assigned voice '{new_voice}' to user {user_id} in guild {guild_id} "
+                f"({user_id} % {len(self.available_voices)} = {voice_index})"
             )
-            
-            # Log all current assignments for debugging (at INFO level to help diagnose live server issues)
-            active_assignments = {
-                uid: (data.get("voice") if isinstance(data, dict) else data)
-                for uid, data in guild_assignments.items()
-            }
-            self.logger.info(f"Current voice assignments for guild {guild_id}: {active_assignments}")
-            
             return new_voice
 
     # ============ SYSTEM DIAGNOSTICS ============

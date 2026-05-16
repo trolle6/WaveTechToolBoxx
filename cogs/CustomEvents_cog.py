@@ -8,8 +8,7 @@ A flexible event system supporting multiple matching algorithms:
 - History-aware matching
 - And more!
 
-Separate from SecretSanta_cog - that stays untouched and perfect for annual Secret Santa!
-This handles everything else.
+Separate from SecretSanta_cog (annual Secret Santa). This handles other group-matching events.
 """
 
 import asyncio
@@ -134,7 +133,7 @@ class FullyRandomMatcher(MatcherInterface):
         teams = {}
         for i in range(0, len(shuffled), team_size):
             team_members = shuffled[i:i + team_size]
-            team_name = f"Team {chr(65 + i // team_size)}"
+            team_name = f"Team {(i // team_size) + 1}"
             teams[team_name] = team_members
         
         return {"teams": teams}
@@ -181,7 +180,7 @@ class TimezoneGroupedMatcher(MatcherInterface):
             
             for i in range(0, len(users), team_size):
                 team_members = users[i:i + team_size]
-                team_name = f"Team {chr(65 + team_counter)}"
+                team_name = f"Team {team_counter + 1}"
                 teams[team_name] = team_members
                 team_counter += 1
         
@@ -197,11 +196,6 @@ class TimezoneGroupedMatcher(MatcherInterface):
                 "default": 2,
                 "description": "Number of people per team"
             },
-            "timezone_tolerance": {
-                "type": "int",
-                "default": 2,
-                "description": "How many hours difference is acceptable"
-            }
         }
 
 
@@ -270,6 +264,21 @@ class CustomEventsCog(commands.Cog):
     def _get_event(self, event_id: int) -> Optional[Event]:
         """Get event by ID"""
         return self.events.get(event_id)
+
+    def _resolve_event(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        event_id: int,
+    ) -> tuple[Optional[Event], Optional[str]]:
+        """Return (event, None) or (None, user-facing error message)."""
+        if not inter.guild:
+            return None, "❌ This command must be used in a server"
+        event = self._get_event(event_id)
+        if not event:
+            return None, "❌ Event not found"
+        if event.guild_id != inter.guild.id:
+            return None, "❌ That event belongs to another server"
+        return event, None
     
     def _get_available_events(self, guild_id: int) -> List[Tuple[int, Event]]:
         """Get list of available events for a guild"""
@@ -345,6 +354,10 @@ class CustomEventsCog(commands.Cog):
     ):
         """Create new event"""
         await inter.response.defer(ephemeral=True)
+
+        if not inter.guild:
+            await inter.edit_original_response(content="❌ This command must be used in a server")
+            return
         
         try:
             if len(name) > 100:
@@ -400,9 +413,9 @@ class CustomEventsCog(commands.Cog):
         """Join an event"""
         await inter.response.defer(ephemeral=True)
         
-        event = self._get_event(event_id)
-        if not event:
-            await inter.edit_original_response(content="❌ Event not found")
+        event, err = self._resolve_event(inter, event_id)
+        if err:
+            await inter.edit_original_response(content=err)
             return
         
         if event.status != "setup":
@@ -410,18 +423,22 @@ class CustomEventsCog(commands.Cog):
             return
         
         user_id = str(inter.author.id)
-        
-        if user_id in event.participants:
+
+        async with self._lock:
+            if user_id in event.participants:
+                already_joined = True
+            else:
+                already_joined = False
+                event.participants[user_id] = {
+                    "name": safe_display_name(inter.author),
+                    "timezone": timezone,
+                    "joined_at": time.time(),
+                }
+                self._save_event(event)
+
+        if already_joined:
             await inter.edit_original_response(content="❌ You've already joined this event")
             return
-        
-        async with self._lock:
-            event.participants[user_id] = {
-                "name": safe_display_name(inter.author),
-                "timezone": timezone,
-                "joined_at": time.time()
-            }
-            self._save_event(event)
         
         embed = disnake.Embed(
             title="✅ Joined Event!",
@@ -444,9 +461,9 @@ class CustomEventsCog(commands.Cog):
         """Run matching algorithm"""
         await inter.response.defer(ephemeral=True)
         
-        event = self._get_event(event_id)
-        if not event:
-            await inter.edit_original_response(content="❌ Event not found")
+        event, err = self._resolve_event(inter, event_id)
+        if err:
+            await inter.edit_original_response(content=err)
             return
         
         if len(event.participants) < 2:
@@ -512,9 +529,9 @@ class CustomEventsCog(commands.Cog):
         """View event results"""
         await inter.response.defer(ephemeral=True)
         
-        event = self._get_event(event_id)
-        if not event:
-            await inter.edit_original_response(content="❌ Event not found")
+        event, err = self._resolve_event(inter, event_id)
+        if err:
+            await inter.edit_original_response(content=err)
             return
         
         if not event.results:
@@ -557,9 +574,9 @@ class CustomEventsCog(commands.Cog):
         """Stop event"""
         await inter.response.defer(ephemeral=True)
         
-        event = self._get_event(event_id)
-        if not event:
-            await inter.edit_original_response(content="❌ Event not found")
+        event, err = self._resolve_event(inter, event_id)
+        if err:
+            await inter.edit_original_response(content=err)
             return
         
         async with self._lock:
@@ -572,7 +589,9 @@ class CustomEventsCog(commands.Cog):
             event_file = EVENTS_DIR / f"event_{event.event_id}.json"
             
             try:
-                event_file.rename(archive_file)
+                if event_file.exists():
+                    event_file.rename(archive_file)
+                self.events.pop(event_id, None)
             except Exception as e:
                 self.logger.error(f"Failed to archive: {e}")
         
@@ -583,11 +602,14 @@ class CustomEventsCog(commands.Cog):
         """List events"""
         await inter.response.defer(ephemeral=True)
         
-        if not self.events:
-            await inter.edit_original_response(content="❌ No active events")
+        if not inter.guild:
+            await inter.edit_original_response(content="❌ This command must be used in a server")
             return
-        
-        events_list = list(self.events.values())
+
+        events_list = [e for e in self.events.values() if e.guild_id == inter.guild.id]
+        if not events_list:
+            await inter.edit_original_response(content="❌ No active events in this server")
+            return
         
         # Use paginator if more than 10 events, otherwise show all
         if len(events_list) > 10:
