@@ -50,7 +50,7 @@ load_dotenv("config.env", override=True)
 #   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
 #   BOT_OWNER_USERNAME     - owner checks (fallback if BOT_OWNER_USER_ID not set)
 #   BOT_OWNER_USER_ID      - (optional) Discord user ID for owner-only commands; if set, used instead of username (cannot be impersonated)
-# Per-event guild_id (not config): Secret Santa and Custom Events store guild_id per event (inter.guild.id).
+# Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
 #
 REQUIRED_CONFIG_KEYS = {
     "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID",
@@ -812,7 +812,6 @@ def load_cogs() -> int:
         "cogs.voice_processing_cog",
         "cogs.DALLE_cog",
         "cogs.SecretSanta_cog",
-        "cogs.CustomEvents_cog",
         "cogs.DistributeZip_cog"
     ]
     

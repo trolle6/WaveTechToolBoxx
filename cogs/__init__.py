@@ -5,6 +5,5 @@ Discord bot extension modules:
 - voice_processing_cog: TTS with OpenAI
 - DALLE_cog: AI image generation
 - SecretSanta_cog: Event management
-- CustomEvents_cog: Generic event framework
 - DistributeZip_cog: File distribution
 """

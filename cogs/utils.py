@@ -45,7 +45,7 @@ def autocomplete_safety_wrapper(func):
 
     Discord autocomplete requires a list of choices. This wrapper catches
     exceptions and normalizes return values so autocomplete never crashes.
-    Used by SecretSanta, DistributeZip, and CustomEvents cogs.
+    Used by SecretSanta and DistributeZip cogs.
     """
     @functools.wraps(func)
     async def wrapper(self, inter, string: str):
