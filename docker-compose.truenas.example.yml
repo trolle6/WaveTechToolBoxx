@@ -1,0 +1,39 @@
+# TrueNAS SCALE custom app / Compose example for WaveTechToolBox
+#
+# 1. Copy this file (or paste sections into the TrueNAS UI).
+# 2. Put secrets in /mnt/HDDs/discord-bot/config.env — NOT inline in compose.
+# 3. Set GIT_BRANCH to the branch you want (simplify PR branch, or master after merge).
+# 4. First boot installs ffmpeg+git once (.truenas-deps-ready marker on the volume).
+#
+# Do NOT commit real tokens to git.
+
+services:
+  wave-bot:
+    image: python:3.11-slim
+    container_name: wave-bot
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /mnt/HDDs/discord-bot:/app
+    env_file:
+      - /mnt/HDDs/discord-bot/config.env
+    environment:
+      # Deploy branch (NOT origin default — that was resetting you to master @ 69fb076)
+      GIT_BRANCH: cursor/ss-command-simplify-c0c2
+      # Production: DEBUG_MODE=false, LOG_LEVEL=INFO
+      DEBUG_MODE: "false"
+      LOG_LEVEL: "INFO"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        if [ ! -f /app/.truenas-deps-ready ]; then
+          apt-get update
+          apt-get install -y --no-install-recommends ffmpeg git ca-certificates
+          apt-get clean
+          rm -rf /var/lib/apt/lists/*
+          touch /app/.truenas-deps-ready
+        fi
+        chmod +x /app/truenas-start.sh 2>/dev/null || true
+        exec /app/truenas-start.sh
