@@ -1,133 +1,86 @@
 # Secret Santa Commands Reference
 
-## 🔧 MODERATOR COMMANDS
-*(Server administrator or `DISCORD_MODERATOR_ROLE_ID` from config)*
+Permissions: **Moderator** = server Administrator OR role `DISCORD_MODERATOR_ROLE_ID` in `config.env`.  
+**Participant** = joined the active event (reacted on the signup message).  
+Testing: `SS_DEBUG_START=true` in `config.env` skips the “year already archived” warning on `/ss start`.
 
-### Event Management
-- `/ss start [announcement_message_id] [role_id]`
-  - Start a new Secret Santa event
-  - Requires: Message ID (where reactions will be tracked) and Role ID (for participants)
-
-- `/ss shuffle`
-  - Make Secret Santa assignments (distributes assignments via DM)
-  - Must have at least 2 participants
-
-- `/ss stop`
-  - Stop the active event and archive data to `archive/YYYY.json`
-
-### Viewing (Moderator)
-- `/ss participants`
-  - View all current participants in the active event
-
-- `/ss view_gifts`
-  - View all submitted gifts in the active event
-
-- `/ss view_comms`
-  - View all communication threads in the active event
+File sharing uses **`/distribute`** (not under `/ss`).
 
 ---
 
-## 👥 PARTICIPANT COMMANDS
-*(Requires being a participant in active event)*
+## Moderator — run the event
 
-### Communication
-- `/ss ask_giftee [question] [use_ai_rewrite]`
-  - Ask your giftee a question anonymously
-  - Optional: `use_ai_rewrite` (true/false) - uses AI to rewrite for extra anonymity
-
-- `/ss reply_santa [reply]`
-  - Reply to your Secret Santa anonymously
-
-### Gift Submission
-- `/ss submit_gift [gift_description]`
-  - Record your gift description
-
-- `/ss edit_gift [year] [gift_description]`
-  - Edit your own gift submission from any past year
-  - Example: `/ss edit_gift year:2025 gift_description:Updated gift description`
-
-### Wishlist Management
-- `/ss wishlist add [item]`
-  - Add an item to your wishlist
-
-- `/ss wishlist remove [number]`
-  - Remove an item from your wishlist (by number)
-
-- `/ss wishlist view`
-  - View your own wishlist
-
-- `/ss wishlist clear`
-  - Clear your entire wishlist
-
-- `/ss giftee`
-  - View your giftee's wishlist (what they want)
+| Command | Description |
+|---------|-------------|
+| `/ss start` | Start event. **Required:** `message` (signup post). **Optional:** `role` (added on react), `shuffle`, `end` (auto times; uses your Discord language timezone, else UTC). |
+| `/ss status` | Dashboard: participant count, names, schedules, assignments, signup link. |
+| `/ss shuffle` | Pair participants and DM assignments. Cancels pending auto-shuffle. |
+| `/ss stop` | End event and archive to `cogs/archive/YYYY.json`. |
+| `/ss oversight` | Spoilers: view gift submissions and/or anonymous Q&A (`view`: gifts, comms, all). |
 
 ---
 
-## 🌐 PUBLIC COMMANDS
-*(Available to anyone)*
+## Participant — play
 
-### History & Archives
-- `/ss history`
-  - View overview of all archived years
+| Command | Description |
+|---------|-------------|
+| `/ss ask_giftee` | Ask your giftee anonymously (DM includes **Reply to Santa** button). |
+| `/ss giftee` | View your giftee's wishlist (after shuffle). |
+| `/ss wishlist add` | Add wishlist item. |
+| `/ss wishlist remove` | Remove item by number. |
+| `/ss wishlist view` | View your wishlist. |
+| `/ss wishlist clear` | Clear your wishlist. |
+| `/ss submit_gift` | Log what you gave (active event or current-year archive). |
 
-- `/ss history [year]`
-  - View detailed information for a specific year
-  - Example: `/ss history year:2025`
-
-- `/ss user_history [user]`
-  - View a user's complete participation history across all years
-  - Example: `/ss user_history user:@username`
-
-### Testing/Debug
-- `/ss test_emoji_consistency [user]`
-  - Test emoji consistency across years for a user
-  - Example: `/ss test_emoji_consistency user:@username`
+Giftees reply via the **button on the DM**, not a slash command.
 
 ---
 
-## 📋 TESTING WORKFLOW
+## Anyone — history
 
-### Full Event Cycle:
-1. **Setup**: `/ss start [message_id] [role_id]`
-2. **Collect Participants**: Users react to the announcement message
-3. **Check Participants**: `/ss participants` (moderator)
-4. **Make Assignments**: `/ss shuffle` (moderator)
-5. **Test Participant Features**:
-   - `/ss ask_giftee [question]`
-   - `/ss reply_santa [reply]`
-   - `/ss wishlist add [item]`
-   - `/ss view_giftee_wishlist`
-   - `/ss submit_gift [description]`
-6. **View Progress**: `/ss view_gifts`, `/ss view_comms` (moderator)
-7. **End Event**: `/ss stop` (moderator)
-8. **View Archive**: `/ss history`, `/ss history [year]`
-9. **Edit Past Gift**: `/ss edit_gift [year] [description]`
-
-### Quick Test Checklist:
-- [ ] Start event
-- [ ] Add participants (via reactions)
-- [ ] View participants
-- [ ] Shuffle assignments
-- [ ] Test wishlist (add, view, remove, clear)
-- [ ] Test giftee wishlist viewing
-- [ ] Test anonymous communication (ask, reply)
-- [ ] Submit gift
-- [ ] View gifts/comms (moderator)
-- [ ] Stop event
-- [ ] View history
-- [ ] Edit past gift
-- [ ] View user history
-- [ ] Test emoji consistency
+| Command | Description |
+|---------|-------------|
+| `/ss history` | All archived years, or one year with `year`. |
+| `/ss edit_gift` | Edit your own gift text for a past year. |
 
 ---
 
-## 💡 NOTES
+## Moderator — archives
 
-- All commands are ephemeral (only visible to you) except DMs sent by the bot
-- Assignments are sent via DM when `/ss shuffle` is run
-- Events are archived to `archive/YYYY.json` when stopped
-- Gift editing works for any past year where you participated
-- Communication is fully anonymous (AI rewriting available for extra anonymity)
-- Wishlists are only visible to you and your Secret Santa (via `/ss view_giftee_wishlist`)
+| Command | Description |
+|---------|-------------|
+| `/ss archive delete` | Delete an archive year (careful). |
+| `/ss archive restore` | Restore a year from `cogs/archive/backups/`. |
+| `/ss archive backups` | List backup files. |
+| `/ss user_history` | Full participation history for one user. |
 
+---
+
+## File distribution (`/distribute`)
+
+| Command | Who |
+|---------|-----|
+| `/distribute upload` | Active SS participant |
+| `/distribute list`, `browse`, `get` | Active SS participant |
+| `/distribute remove` | Moderator |
+
+---
+
+## Typical workflow
+
+1. `/ss start` with signup message (+ optional role, shuffle, end).
+2. Members **react** to join (role applied on react if set).
+3. `/ss status` — check headcount.
+4. `/ss shuffle` (or wait for auto-shuffle).
+5. Participants: `/ss giftee`, `/ss ask_giftee`, wishlist, `/ss submit_gift`.
+6. Mods: `/ss oversight` as needed.
+7. `/ss stop` — archive.
+8. `/ss history` — browse results.
+
+---
+
+## Notes
+
+- Commands are ephemeral unless noted; assignment DMs are sent by the bot.
+- Join role: bot role must be **above** the SS role in Server Settings → Roles; bot needs **Manage Roles**.
+- Shuffle uses past archives to avoid repeat pairings.

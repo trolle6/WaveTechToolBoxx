@@ -14,11 +14,9 @@ FEATURES:
 - 🚦 Improved rate limiting (Discord API compliant)
 
 COMMANDS:
-- /distributezip upload [attachment] [required_by] - Upload file(s) and distribute them
-- /distributezip list - List all uploaded files (with pagination for 10+ files)
-- /distributezip browse - Browse files using interactive file browser
-- /distributezip get [file_name] - Get a specific file (use browse for easier selection)
-- /distributezip remove [file_name] - Remove a file (moderator only, use browse for easier selection)
+- /distribute upload [attachment] [required_by] - Upload and DM files (SS participants)
+- /distribute list / browse / get - Download shared files (SS participants)
+- /distribute remove - Remove a file (moderator only)
 
 DESIGN DECISIONS:
 - ThreadPoolExecutor: All file I/O operations run in executor to avoid blocking event loop
@@ -796,18 +794,12 @@ class DistributeZipCog(commands.Cog):
         )
 
     # ============ COMMANDS ============
-    # Commands will be registered under /ss distribute via cog_load hook
-    # Keep legacy /distributezip for backward compatibility (deprecated)
-    
-    @commands.slash_command(name="distributezip", description="Zip file distribution management")
-    async def distributezip(self, inter: disnake.ApplicationCommandInteraction):
-        """Main distributezip command group (legacy - use /ss distribute instead)"""
-        await inter.response.send_message(
-            "⚠️ This command is deprecated. Please use `/ss distribute` commands instead.",
-            ephemeral=True
-        )
+    @commands.slash_command(name="distribute", description="Share files with Secret Santa participants")
+    async def distribute_root(self, inter: disnake.ApplicationCommandInteraction):
+        """File distribution for active SS participants"""
+        pass
 
-    @distributezip.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
+    @distribute_root.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
     @participant_check()
     async def upload_file(
         self,
@@ -984,7 +976,8 @@ class DistributeZipCog(commands.Cog):
                 summary += f"• {fail_info['filename']}: {fail_info['error']}\n"
             await self._safe_edit_response(inter, content=summary)
 
-    @distributezip.sub_command(name="list", description="List all uploaded files")
+    @distribute_root.sub_command(name="list", description="List all uploaded files")
+    @participant_check()
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
         """List all uploaded files"""
         await inter.response.defer(ephemeral=True)
@@ -1031,7 +1024,8 @@ class DistributeZipCog(commands.Cog):
             embed.set_footer(text=f"Total: {len(sorted_files)} file(s)")
             await self._safe_edit_response(inter, embed=embed)
     
-    @distributezip.sub_command(name="browse", description="Browse and select files using an interactive file browser")
+    @distribute_root.sub_command(name="browse", description="Browse and select files using an interactive file browser")
+    @participant_check()
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):
         """Browse files using an interactive file browser"""
         await inter.response.defer(ephemeral=True)
@@ -1041,12 +1035,13 @@ class DistributeZipCog(commands.Cog):
             embed.add_field(name="Size", value=f"{file_data.get('size', 0) / 1024 / 1024:.2f} MB", inline=True)
             embed.add_field(name="Required By", value="🎅 A Secret Santa", inline=True)
             embed.add_field(name="Uploaded", value=f"<t:{int(file_data.get('uploaded_at', 0))}:R>", inline=False)
-            embed.set_footer(text="Use /distributezip get [file_name] to download this file")
+            embed.set_footer(text="Use /distribute get to download this file")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         
         await self._handle_file_browser(inter, "browse", handler)
 
-    @distributezip.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
+    @distribute_root.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
+    @participant_check()
     async def get_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -1071,7 +1066,7 @@ class DistributeZipCog(commands.Cog):
         result = self._find_file_by_name(file_name)
         if not result:
             await self._safe_edit_response(inter,
-                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distributezip get` (without file_name) to browse all files!"
+                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distribute get` (without file_name) to browse all files!"
             )
             return
         
@@ -1088,7 +1083,7 @@ class DistributeZipCog(commands.Cog):
         file = disnake.File(file_path, filename=filename)
         await self._safe_edit_response(inter, embed=embed, file=file)
 
-    @distributezip.sub_command(name="remove", description="Remove a file (mod only, use browse for easier selection)")
+    @distribute_root.sub_command(name="remove", description="Remove a file (mod only, use browse for easier selection)")
     @mod_check()
     async def remove_file(
         self,
@@ -1132,7 +1127,7 @@ class DistributeZipCog(commands.Cog):
         result = self._find_file_by_name(file_name)
         if not result:
             await self._safe_edit_response(inter,
-                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distributezip remove` (without file_name) to browse all files!"
+                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distribute remove` (without file_name) to browse all files!"
             )
             return
         
