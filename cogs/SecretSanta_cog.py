@@ -9,13 +9,13 @@ FEATURES:
 - 📊 Multi-year history viewing (by year or by user)
 - 🔒 Archive protection (prevents accidental data loss)
 
-COMMANDS (Moderator):
-- /ss start [message] [role] [shuffle_at] [end_at] - Start new event (optional auto-shuffle and auto-stop)
-- /ss shuffle - Make Secret Santa assignments
-- /ss stop - Stop event and archive data (manual stop, cancels scheduled stop if set)
-- /ss participants - View current participants
-- /ss view_gifts - View submitted gifts
-- /ss view_comms - View communication threads
+COMMANDS (Owner — run the event):
+- /ss start [message] — Signup message (reactions = join). Optional: role, shuffle, end (times use your Discord language timezone, else UTC)
+- /ss status — Who joined, assignments done?, scheduled shuffle/stop
+- /ss shuffle — Pair people now (cancels a pending auto-shuffle)
+- /ss stop — Archive the year and end the event
+- /ss participants — Participant list (owner)
+- /ss view_gifts / /ss view_comms — Oversight during event (owner)
 
 COMMANDS (Participant):
 - /ss ask_giftee [question] - Ask your giftee anonymously (includes instant reply button)
@@ -28,11 +28,15 @@ COMMANDS (Participant):
 - /ss giftee - See your giftee's wishlist
 
 COMMANDS (Anyone):
-- /ss history - View all years overview
-- /ss history [year] - View specific year details
-- /ss user_history @user - View one user's complete history
-- /ss test_emoji_consistency @user - Test emoji consistency across years
-- /ss edit_gift [year] [description] - Edit your gift submission from any past year
+- /ss history — Past years (overview or one year)
+- /ss edit_gift — Fix your own gift text in an old archive
+
+COMMANDS (Owner — archives):
+- /ss user_history @user — Full history for one person
+- /ss delete_year / /ss restore_year / /ss list_backups — Archive maintenance
+
+COMMANDS (Owner — files):
+- /ss distribute * — Modpack/file DM distribution (see DistributeZip cog)
 
 SAFETY FEATURES:
 - ✅ Cryptographic randomness for assignments (secret_santa_assignments)
@@ -95,7 +99,6 @@ from .secret_santa_views import (
 from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
-    participant_check,
     safe_display_name,
 )
 
@@ -116,7 +119,7 @@ ANONYMIZE_RETRY_MAX = 3  # Retries for OpenAI API (429, 5xx, connection)
 ANONYMIZE_RETRY_BASE_DELAY = 1.0  # Exponential backoff base
 ANONYMIZE_TIMEOUT = 20  # Request timeout (seconds)
 
-# Discord locale (language) -> IANA timezone for schedule parsing when user doesn't set schedule_timezone.
+# Discord locale (language) -> IANA timezone for parsing /ss start shuffle & end times.
 # Discord doesn't provide timezone, so this is a best-effort guess from their app language.
 DISCORD_LOCALE_TO_IANA: Dict[str, str] = {
     "id": "Asia/Jakarta",
@@ -1386,34 +1389,31 @@ class SecretSantaCog(commands.Cog):
     # START command – full logic path:
     # 1. Defer ephemeral → 2. Require guild + message → 3. Message must have guild and same guild as inter
     # 4. Optional: warn if current_year archive already exists (continue anyway) → 5. Collect participants from message.reactions (safe)
-    # 6. Resolve timezone (param or locale) → 7. Parse shuffle_at / end_at if set; validate future and stop > shuffle
+    # 6. Resolve timezone from Discord locale → 7. Parse shuffle / end if set; validate future and stop > shuffle
     # 8. Build new_event dict → 9. Under lock: if event already active return; else state.current_year + state.current_event = new_event; save
     # 10. Send join DMs to participants → 11. Edit response with success + schedule info → 12. Optional Discord log
-    @ss_root.sub_command(name="start", description="Start a Secret Santa event")
+    @ss_root.sub_command(name="start", description="Start Secret Santa (react on message to join)")
     @owner_check()
     async def ss_start(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        message: disnake.Message = commands.Param(description="Message to track reactions on"),
-        role: Optional[disnake.Role] = commands.Param(default=None, description="Optional: Role to assign participants"),
-        shuffle_at: Optional[str] = commands.Param(
+        message: disnake.Message = commands.Param(description="Signup message — members react to join"),
+        shuffle: Optional[str] = commands.Param(
             default=None,
-            description="Optional: Date and time to auto-shuffle (e.g. 2025-12-25 14:30 or Dec 25 2:30 PM)"
+            name="shuffle",
+            description="Optional: auto-shuffle at this date/time (e.g. 2025-12-24 18:00). Uses your Discord language timezone, else UTC",
         ),
-        schedule_timezone: Optional[str] = commands.Param(
+        end: Optional[str] = commands.Param(
             default=None,
-            description="Optional: Timezone for shuffle/end times (e.g. Europe/Stockholm)"
+            name="end",
+            description="Optional: auto-stop and archive at this date/time (must be after shuffle if both set)",
         ),
-        end_at: Optional[str] = commands.Param(
+        role: Optional[disnake.Role] = commands.Param(
             default=None,
-            description="Optional: Date and time to auto-stop (e.g. 2025-12-31 23:59 or Dec 31 11:59 PM)"
+            description="Optional: give this role to everyone after shuffle (does not limit who can react to join)",
         ),
-        debug: bool = commands.Param(
-            default=False,
-            description="Skip archive-exists check (testing only)"
-        )
     ):
-        """Start new Secret Santa event (optionally schedule automatic shuffle)"""
+        """Start event; optional auto-shuffle and auto-stop times"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
         if not inter.guild:
@@ -1434,12 +1434,14 @@ class SecretSantaCog(commands.Cog):
         # Get role ID if provided
         role_id_int = role.id if role else None
 
+        debug_start = bool(getattr(getattr(self.bot, "config", None), "SS_DEBUG_START", False))
+
         # SAFETY WARNING: Check if current year is already archived
         # Prevents accidental data loss if you test on wrong server or run twice
-        # Debug mode: skip this warning so you can test algorithm with 2021–2025 history
+        # SS_DEBUG_START in config.env skips this warning for algorithm testing
         current_year = dt.date.today().year
         existing_archive = ARCHIVE_DIR / f"{current_year}.json"
-        if existing_archive.exists() and not debug:
+        if existing_archive.exists() and not debug_start:
             embed = disnake.Embed(
                 title="⚠️ Year Already Archived",
                 description=f"An archive already exists for {current_year}!\n\n"
@@ -1466,8 +1468,8 @@ class SecretSantaCog(commands.Cog):
                     "WARNING"
                 )
 
-        if existing_archive.exists() and debug:
-            self.logger.info(f"Debug start: skipping archive warning, will use history from other years (excluding {current_year})")
+        if existing_archive.exists() and debug_start:
+            self.logger.info(f"SS_DEBUG_START: skipping archive warning, will use history from other years (excluding {current_year})")
 
         # Collect participants from the message reactions (may be empty if no one reacted yet)
         participants = {}
@@ -1485,36 +1487,24 @@ class SecretSantaCog(commands.Cog):
         except Exception as e:
             self.logger.warning(f"Could not load reactions from message: {e}")
 
-        # Resolve timezone: explicit schedule_timezone, or guess from Discord locale (language)
+        # Timezone for parsing shuffle/end: guess from command author's Discord language, else UTC
         tz_info = None
-        used_locale_tz: Optional[str] = None  # IANA zone we guessed from locale, for response message
-        if schedule_timezone:
-            try:
-                tz_info = ZoneInfo(schedule_timezone)
-            except Exception:
-                await self._safe_edit_response(
-                    inter,
-                    content=f"❌ Invalid timezone: `{schedule_timezone}`.\n\n"
-                            "Use a valid IANA name, e.g. `Europe/Stockholm`, `America/New_York`, `UTC`."
-                )
-                return
-        else:
-            # No timezone given – try to use command author's Discord locale (language) as hint
-            locale_raw = getattr(inter, "locale", None)
-            if locale_raw is not None:
-                locale_str = getattr(locale_raw, "value", str(locale_raw)).replace("_", "-")
-                tz_name = DISCORD_LOCALE_TO_IANA.get(locale_str)
-                if tz_name:
-                    try:
-                        tz_info = ZoneInfo(tz_name)
-                        used_locale_tz = tz_name
-                    except Exception:
-                        pass
+        used_locale_tz: Optional[str] = None
+        locale_raw = getattr(inter, "locale", None)
+        if locale_raw is not None:
+            locale_str = getattr(locale_raw, "value", str(locale_raw)).replace("_", "-")
+            tz_name = DISCORD_LOCALE_TO_IANA.get(locale_str)
+            if tz_name:
+                try:
+                    tz_info = ZoneInfo(tz_name)
+                    used_locale_tz = tz_name
+                except Exception:
+                    pass
 
         # Parse and validate shuffle schedule if provided
         scheduled_timestamp = None
-        if shuffle_at:
-            scheduled_timestamp = self._parse_datetime_combined(shuffle_at, tz_info=tz_info)
+        if shuffle:
+            scheduled_timestamp = self._parse_datetime_combined(shuffle, tz_info=tz_info)
             if not scheduled_timestamp:
                 await self._safe_edit_response(
                     inter,
@@ -1537,8 +1527,8 @@ class SecretSantaCog(commands.Cog):
 
         # Parse and validate stop schedule if provided
         scheduled_stop_timestamp = None
-        if end_at:
-            scheduled_stop_timestamp = self._parse_datetime_combined(end_at, tz_info=tz_info)
+        if end:
+            scheduled_stop_timestamp = self._parse_datetime_combined(end, tz_info=tz_info)
             if not scheduled_stop_timestamp:
                 await self._safe_edit_response(
                     inter,
@@ -1568,10 +1558,12 @@ class SecretSantaCog(commands.Cog):
                 return
 
         # Create event (current_year already set above during safety check)
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
         new_event = {
             "active": True,
             "join_closed": False,
             "announcement_message_id": msg_id,
+            "announcement_channel_id": channel_id,
             "role_id": role_id_int,
             "participants": participants,
             "assignments": {},
@@ -1615,25 +1607,22 @@ class SecretSantaCog(commands.Cog):
             f"• Participants: {len(participants)}\n"
             f"• DMs sent: {successful}/{len(participants)}"
         )
-        if debug:
-            response_msg += f"\n• 🔧 Debug: archive warning skipped (shuffle will use history from other archived years)"
+        if debug_start:
+            response_msg += "\n• 🔧 SS_DEBUG_START: archive warning skipped"
         if role:
-            response_msg += f"\n• Role: {role.mention}"
+            response_msg += f"\n• Role after shuffle: {role.mention}"
         
         if scheduled_timestamp:
-            response_msg += f"\n\n📅 **Shuffle scheduled for:** <t:{int(scheduled_timestamp)}:F>\n"
-            if schedule_timezone:
-                response_msg += f"⏰ Times in: **{schedule_timezone}**\n"
-            elif used_locale_tz:
-                response_msg += f"⏰ Times in: **{used_locale_tz}** (from your Discord language)\n"
-            response_msg += f"🎉 You'll be notified when it happens!"
+            response_msg += f"\n\n📅 **Auto-shuffle:** <t:{int(scheduled_timestamp)}:F>"
+            if used_locale_tz:
+                response_msg += f" _(parsed in {used_locale_tz} from your Discord language)_"
+            else:
+                response_msg += " _(parsed in UTC — change Discord app language for local parsing)_"
+            response_msg += "\n💡 Or run `/ss shuffle` anytime before then."
         
         if scheduled_stop_timestamp:
-            response_msg += f"\n\n🛑 **Event will auto-stop on:** <t:{int(scheduled_stop_timestamp)}:F>\n"
-            response_msg += f"✨ Event will archive automatically!"
-        
-        if (scheduled_timestamp or scheduled_stop_timestamp) and not schedule_timezone and not used_locale_tz:
-            response_msg += "\n\n⏰ _Times are in **server (UTC)**. Discord shows them above in your local time. Set `schedule_timezone` (e.g. Europe/Stockholm) or use a Discord language we can map to a timezone._"
+            response_msg += f"\n\n🛑 **Auto-stop & archive:** <t:{int(scheduled_stop_timestamp)}:F>"
+            response_msg += "\n💡 Or run `/ss stop` manually."
         
         await self._safe_edit_response(inter, content=response_msg)
         
@@ -2023,10 +2012,87 @@ class SecretSantaCog(commands.Cog):
             self.logger.debug(f"Combined date/time parsing error: {e}")
             return None
 
-    @ss_root.sub_command(name="shuffle", description="🔧 Manually assign Secret Santas (emergency/fallback)")
+    @ss_root.sub_command(name="status", description="Event dashboard: participants, schedule, assignments (owner)")
+    @owner_check()
+    async def ss_status(self, inter: disnake.ApplicationCommandInteraction):
+        """Show current event state for the organizer"""
+        if not await self._safe_defer(inter, ephemeral=True):
+            return
+
+        event = self._get_current_event()
+        year = self.state.get("current_year", dt.date.today().year)
+        if not event or not event.get("active"):
+            await self._safe_edit_response(
+                inter,
+                content=f"📭 No active Secret Santa event for **{year}**.\n\nRun `/ss start` with your signup message.",
+            )
+            return
+
+        participants = event.get("participants") or {}
+        n_participants = len(participants) if isinstance(participants, dict) else 0
+        assignments = event.get("assignments") or {}
+        n_assigned = len(assignments) if isinstance(assignments, dict) else 0
+        shuffled = n_assigned > 0
+
+        embed = disnake.Embed(
+            title=f"🎄 Secret Santa {year} — Status",
+            color=disnake.Color.green() if shuffled else disnake.Color.gold(),
+        )
+        embed.add_field(name="Participants", value=str(n_participants), inline=True)
+        embed.add_field(
+            name="Assignments",
+            value="✅ Done" if shuffled else "⏳ Not yet — run `/ss shuffle`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Join via reactions",
+            value="🔒 Closed" if event.get("join_closed") else "✅ Open",
+            inline=True,
+        )
+
+        msg_id = event.get("announcement_message_id")
+        chan_id = event.get("announcement_channel_id")
+        if msg_id and inter.guild and chan_id:
+            link = f"https://discord.com/channels/{inter.guild.id}/{chan_id}/{msg_id}"
+            embed.add_field(name="Signup message", value=f"[Open signup post]({link})", inline=False)
+        elif msg_id:
+            embed.add_field(name="Signup message ID", value=f"`{msg_id}`", inline=False)
+
+        role_id = event.get("role_id")
+        if role_id and inter.guild:
+            role = inter.guild.get_role(role_id)
+            embed.add_field(
+                name="Role after shuffle",
+                value=role.mention if role else f"`{role_id}` (role missing)",
+                inline=False,
+            )
+
+        sched_shuffle = event.get("scheduled_shuffle_time")
+        if sched_shuffle:
+            embed.add_field(
+                name="Auto-shuffle",
+                value=f"<t:{int(sched_shuffle)}:F> (<t:{int(sched_shuffle)}:R>)",
+                inline=False,
+            )
+        sched_stop = event.get("scheduled_stop_time")
+        if sched_stop:
+            embed.add_field(
+                name="Auto-stop",
+                value=f"<t:{int(sched_stop)}:F> (<t:{int(sched_stop)}:R>)",
+                inline=False,
+            )
+
+        if not sched_shuffle and not shuffled:
+            embed.set_footer(text="Tip: set shuffle on /ss start, or run /ss shuffle when everyone has joined")
+        elif shuffled:
+            embed.set_footer(text="Participants use /ss ask_giftee, /ss giftee, /ss submit_gift")
+
+        await self._safe_edit_response(inter, embed=embed)
+
+    @ss_root.sub_command(name="shuffle", description="Pair participants and DM assignments (owner)")
     @owner_check()
     async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
-        """Make assignments manually (use /ss start with shuffle_at for automatic execution)"""
+        """Make assignments now (cancels a pending auto-shuffle from /ss start)"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
         
@@ -2045,7 +2111,7 @@ class SecretSantaCog(commands.Cog):
             # Error already sent to inter
             pass
 
-    @ss_root.sub_command(name="stop", description="Stop the Secret Santa event")
+    @ss_root.sub_command(name="stop", description="End event and archive this year (owner)")
     @owner_check()
     async def ss_stop(self, inter: disnake.ApplicationCommandInteraction):
         """Stop event"""
@@ -2110,7 +2176,8 @@ class SecretSantaCog(commands.Cog):
             else:
                 await self._safe_edit_response(inter, content=f"✅ Event stopped and archived → `{saved_filename}`")
 
-    @ss_root.sub_command(name="participants", description="View participants")
+    @ss_root.sub_command(name="participants", description="List who joined (owner)")
+    @owner_check()
     async def ss_participants(self, inter: disnake.ApplicationCommandInteraction):
         """Show participants"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2166,7 +2233,10 @@ class SecretSantaCog(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         question: str = commands.Param(description="Your question (sent as-is for anonymity)", max_length=2000),
-        use_ai_rewrite: bool = commands.Param(default=False, description="Use AI to rewrite for extra anonymity")
+        use_ai_rewrite: bool = commands.Param(
+            default=False,
+            description="Rare: OpenAI rewrites your question (default sends your text as typed)",
+        )
     ):
         """Ask giftee anonymously with AI rewriting"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2862,7 +2932,8 @@ class SecretSantaCog(commands.Cog):
         
         await self._safe_edit_response(inter, embed=embed)
 
-    @ss_root.sub_command(name="view_gifts", description="View submitted gifts")
+    @ss_root.sub_command(name="view_gifts", description="See all gift submissions (owner, spoilers)")
+    @owner_check()
     async def ss_view_gifts(self, inter: disnake.ApplicationCommandInteraction):
         """Show gift submissions"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2918,7 +2989,8 @@ class SecretSantaCog(commands.Cog):
 
         await self._safe_edit_response(inter, embed=embed)
 
-    @ss_root.sub_command(name="view_comms", description="View communications (documented during/after event)")
+    @ss_root.sub_command(name="view_comms", description="See anonymous Q&A threads (owner, spoilers)")
+    @owner_check()
     async def ss_view_comms(self, inter: disnake.ApplicationCommandInteraction):
         """Show communication threads"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -3335,84 +3407,6 @@ class SecretSantaCog(commands.Cog):
         
         embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
         embed.set_footer(text=f"Requested by {safe_display_name(inter.author)}")
-        
-        await self._safe_edit_response(inter, embed=embed)
-
-    @ss_root.sub_command(name="test_emoji_consistency", description="🎨 Test emoji consistency across years for a user")
-    @owner_check()
-    async def ss_test_emoji_consistency(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        user: disnake.User = commands.Param(description="User to check emoji consistency for")
-    ):
-        """Test that a user gets the same emoji across all years"""
-        if not await self._safe_defer(inter, ephemeral=True):
-            return  # Interaction expired, can't proceed
-        
-        user_id = str(user.id)
-        
-        # Load all archives
-        archives = load_all_archives(logger=self.logger)
-        
-        if not archives:
-            await self._safe_edit_response(inter, content="❌ No archived events found")
-            return
-        
-        # Check emoji for this user across all years
-        emoji_results = []
-        
-        for year in sorted(archives.keys()):
-            event_data = archives[year].get("event", {})
-            participants = event_data.get("participants", {})
-            
-            # Check if user participated this year
-            if user_id in participants:
-                # Generate emoji mapping for this year
-                emoji_mapping = self._get_year_emoji_mapping(participants)
-                user_emoji = emoji_mapping.get(user_id, "❓")
-                user_name = participants[user_id]
-                
-                emoji_results.append(f"**{year}**: {user_emoji} {user_name}")
-        
-        if not emoji_results:
-            await inter.edit_original_response(
-                content=f"❌ {user.mention} has never participated in Secret Santa"
-            )
-            return
-        
-        # Build response
-        embed = disnake.Embed(
-            title=f"🎨 Emoji Consistency Test",
-            description=f"Testing emoji assignment for {user.mention} across all years",
-            color=disnake.Color.blue()
-        )
-        
-        embed.add_field(
-            name="📅 Participation History",
-            value="\n".join(emoji_results),
-            inline=False
-        )
-        
-        # Check if all emojis are the same (they should be!)
-        emojis = [line.split()[1] for line in emoji_results]
-        all_same = len(set(emojis)) == 1
-        
-        if all_same:
-            embed.add_field(
-                name="✅ Consistency Check",
-                value=f"**PASS**: {user.display_name} has the same emoji ({emojis[0]}) across all {len(emoji_results)} years!",
-                inline=False
-            )
-            embed.color = disnake.Color.green()
-        else:
-            embed.add_field(
-                name="⚠️ Consistency Check",
-                value=f"**INCONSISTENT**: Found different emojis: {', '.join(set(emojis))}",
-                inline=False
-            )
-            embed.color = disnake.Color.red()
-        
-        embed.set_footer(text="Each user should have the same emoji across all years based on their user ID")
         
         await self._safe_edit_response(inter, embed=embed)
 

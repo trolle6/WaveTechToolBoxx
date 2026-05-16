@@ -71,6 +71,7 @@ CONFIG_DEFAULTS = {
     "TTS_ROLE_ID": None,
     "BOT_OWNER_USERNAME": "trolle6",
     "BOT_OWNER_USER_ID": None,  # Optional: set to your Discord user ID (integer) for secure owner checks; username can be impersonated
+    "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }
 
 
