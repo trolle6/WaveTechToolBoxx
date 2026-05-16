@@ -2,7 +2,7 @@
 #
 # 1. Copy this file (or paste sections into the TrueNAS UI).
 # 2. Put secrets in /mnt/HDDs/discord-bot/config.env — NOT inline in compose.
-# 3. Set GIT_BRANCH to the branch you want (simplify PR branch, or master after merge).
+# 3. Set GIT_BRANCH to the branch you deploy (usually master).
 # 4. First boot installs ffmpeg+git once (.truenas-deps-ready marker on the volume).
 #
 # Do NOT commit real tokens to git.
@@ -19,7 +19,7 @@ services:
       - /mnt/HDDs/discord-bot/config.env
     environment:
       # Deploy branch (NOT origin default — that was resetting you to master @ 69fb076)
-      GIT_BRANCH: cursor/ss-command-simplify-c0c2
+      GIT_BRANCH: master
       # Production: DEBUG_MODE=false, LOG_LEVEL=INFO
       DEBUG_MODE: "false"
       LOG_LEVEL: "INFO"

@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd /app 2>/dev/null || cd "$(dirname "$0")/.." || true
 
-GIT_BRANCH="${GIT_BRANCH:-cursor/ss-command-simplify-c0c2}"
+GIT_BRANCH="${GIT_BRANCH:-master}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_UPDATE="${GIT_UPDATE:-true}"
 PIP_INSTALL_ON_START="${PIP_INSTALL_ON_START:-true}"

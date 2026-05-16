@@ -21,7 +21,7 @@ COPY . .
 RUN mkdir -p cogs/archive/backups logs \
     && chmod +x docker-entrypoint.sh
 
-ENV GIT_BRANCH=cursor/ss-command-simplify-c0c2 \
+ENV GIT_BRANCH=master \
     GIT_UPDATE=true \
     PIP_INSTALL_ON_START=true
 

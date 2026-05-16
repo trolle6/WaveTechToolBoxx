@@ -39,7 +39,6 @@ load_dotenv("config.env", override=True)
 #
 # Required (config.env):
 #   DISCORD_TOKEN          - Bot token
-#   DISCORD_GUILD_ID       - Required at load (validation)
 #   DISCORD_CHANNEL_ID     - main: send_discord_message; voice_processing: optional TTS channel restriction
 #   DISCORD_LOG_CHANNEL_ID - DiscordLogHandler, send_to_discord_log, reconnect notifications
 #   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
@@ -51,8 +50,8 @@ load_dotenv("config.env", override=True)
 # Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
 #
 REQUIRED_CONFIG_KEYS = {
-    "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID",
-    "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY"
+    "DISCORD_TOKEN", "DISCORD_CHANNEL_ID",
+    "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY",
 }
 
 CONFIG_DEFAULTS = {
@@ -848,8 +847,7 @@ def _log_deploy_identity() -> None:
     logger.info("Deploy identity: branch=%s commit=%s ss_layout=%s", branch, commit, layout)
     if not split_layout:
         logger.warning(
-            "secret_santa_core.py missing — old /ss command set. "
-            "Deploy branch cursor/ss-command-simplify-c0c2 (see docker-entrypoint.sh)."
+            "secret_santa_core.py missing — outdated code tree; check GIT_BRANCH / git pull."
         )
 
 

@@ -97,8 +97,18 @@ def check_file_structure():
     required_files = [
         'main.py',
         'cogs/SecretSanta_cog.py',
-        'requirements.txt'
+        'cogs/secret_santa_core.py',
+        'requirements.txt',
     ]
+    state_file = Path('cogs/secret_santa_state.json')
+    if not state_file.exists():
+        example = Path('cogs/secret_santa_state.json.example')
+        if example.exists():
+            print("⚠️ cogs/secret_santa_state.json missing — copy from secret_santa_state.json.example")
+        else:
+            missing_files = ['cogs/secret_santa_state.json']
+            print(f"❌ Missing files: {missing_files}")
+            return False
     
     missing_files = []
     for file in required_files:
@@ -116,7 +126,8 @@ def create_directories():
     """Create required directories"""
     dirs = [
         'cogs/archive',
-        'cogs/archive/backups'
+        'cogs/archive/backups',
+        'cogs/distributed_files',
     ]
     
     for dir_path in dirs:
