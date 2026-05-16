@@ -35,8 +35,9 @@ COMMANDS (Moderator — archives):
 - /ss user_history @user — Full history for one person
 - /ss delete_year / /ss restore_year / /ss list_backups — Archive maintenance
 
-COMMANDS (Moderator — files):
-- /ss distribute * — Modpack/file DM distribution (see DistributeZip cog)
+COMMANDS (Participant — files):
+- /ss distribute upload — Share files with all participants (active SS members)
+- /ss distribute get/list/browse — Download shared files
 
 SAFETY FEATURES:
 - ✅ Cryptographic randomness for assignments (secret_santa_assignments)
@@ -99,6 +100,7 @@ from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
     mod_check,
+    participant_check,
     safe_display_name,
 )
 
@@ -854,6 +856,73 @@ class SecretSantaCog(commands.Cog):
             f"Your spot has been cleared and you won't be matched with anyone.\n\n"
             f"Changed your mind? You can always rejoin before the shuffle happens! ❤️"
         )
+
+    async def _resolve_guild_member(
+        self, guild: disnake.Guild, user_id: int
+    ) -> Optional[disnake.Member]:
+        """Return guild member, fetching from API if not in cache."""
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except (disnake.NotFound, disnake.HTTPException) as e:
+            self.logger.warning(f"Could not fetch member {user_id} in guild {guild.id}: {e}")
+            return None
+
+    async def _apply_participant_role(
+        self,
+        guild: Optional[disnake.Guild],
+        user_id: int,
+        *,
+        add: bool,
+        reason: str,
+    ) -> bool:
+        """Add or remove the event participant role. Returns True if Discord roles changed."""
+        if not guild:
+            return False
+        event = self._get_current_event()
+        if not event:
+            return False
+        role_id = event.get("role_id")
+        if not role_id:
+            return False
+        role = guild.get_role(int(role_id))
+        if not role:
+            self.logger.warning(f"Secret Santa role {role_id} not found in guild {guild.id}")
+            return False
+        me = guild.me
+        if not me or not me.guild_permissions.manage_roles:
+            self.logger.warning(f"Bot lacks Manage Roles in guild {guild.id}")
+            return False
+        if role >= me.top_role:
+            self.logger.warning(
+                f"Cannot assign role '{role.name}': it must be **below** the bot's highest role "
+                f"('{me.top_role.name}') in Server Settings → Roles."
+            )
+            return False
+        member = await self._resolve_guild_member(guild, user_id)
+        if not member:
+            return False
+        try:
+            if add:
+                if role in member.roles:
+                    return False
+                await member.add_roles(role, reason=reason)
+                self.logger.info(f"Added SS role '{role.name}' to {member.display_name} ({user_id})")
+                return True
+            if role not in member.roles:
+                return False
+            await member.remove_roles(role, reason=reason)
+            self.logger.info(f"Removed SS role '{role.name}' from {member.display_name} ({user_id})")
+            return True
+        except disnake.Forbidden:
+            self.logger.warning(
+                f"Forbidden managing role for user {user_id} — check bot permissions and role order"
+            )
+        except disnake.HTTPException as e:
+            self.logger.error(f"HTTP error managing role for user {user_id}: {e}")
+        return False
     
     # State loading now uses load_state_with_fallback from secret_santa_storage module
 
@@ -1410,7 +1479,7 @@ class SecretSantaCog(commands.Cog):
         ),
         role: Optional[disnake.Role] = commands.Param(
             default=None,
-            description="Optional: give this role to everyone after shuffle (does not limit who can react to join)",
+            description="Optional: Discord role added when someone joins (react) and removed if they leave",
         ),
     ):
         """Start event; optional auto-shuffle and auto-stop times"""
@@ -1595,6 +1664,16 @@ class SecretSantaCog(commands.Cog):
             self.state["current_event"] = new_event
             await self._save_async()
 
+        # Participant role for everyone already on the signup message
+        if role_id_int and inter.guild:
+            for uid in participants:
+                try:
+                    await self._apply_participant_role(
+                        inter.guild, int(uid), add=True, reason="Secret Santa signup"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Role assign at start for {uid}: {e}", exc_info=True)
+
         # Send confirmation DMs (rate-limited to avoid Discord 429)
         join_msg = self._get_join_message(current_year)
         dm_items = [(int(uid), join_msg) for uid in participants]
@@ -1610,7 +1689,7 @@ class SecretSantaCog(commands.Cog):
         if debug_start:
             response_msg += "\n• 🔧 SS_DEBUG_START: archive warning skipped"
         if role:
-            response_msg += f"\n• Role after shuffle: {role.mention}"
+            response_msg += f"\n• Join role: {role.mention} _(added on react; bot role must be above this role)_"
         
         if scheduled_timestamp:
             response_msg += f"\n\n📅 **Auto-shuffle:** <t:{int(scheduled_timestamp)}:F>"
@@ -1775,21 +1854,12 @@ class SecretSantaCog(commands.Cog):
         # Release lock before sending DMs (they can take time, don't block other operations)
         # Assignments are already saved, so concurrent shuffle attempts will see them and fail
         
-        # Assign role to participants (if role_id was provided)
-        if guild and event.get("role_id"):
-            role = guild.get_role(event["role_id"])
-            if role and guild.me.guild_permissions.manage_roles:
-                for user_id in participants:
-                    try:
-                        member = guild.get_member(user_id)
-                        if member and role not in member.roles:
-                            await member.add_roles(role, reason="Secret Santa participant")
-                    except disnake.Forbidden:
-                        self.logger.warning(f"Missing permissions to add role to user {user_id}")
-                    except disnake.HTTPException as e:
-                        self.logger.error(f"Failed to add role to user {user_id}: {e}")
-                    except Exception as e:
-                        self.logger.error(f"Unexpected error adding role to user {user_id}: {e}", exc_info=True)
+        # Ensure participant role on everyone (covers anyone who joined before role was set or missed on react)
+        if guild:
+            for user_id in participants:
+                await self._apply_participant_role(
+                    guild, user_id, add=True, reason="Secret Santa participant (shuffle)"
+                )
 
         # Send assignment DMs with rate limiting (avoids 429) and track failures
         participants_dict = event.get("participants", {})
@@ -2062,7 +2132,7 @@ class SecretSantaCog(commands.Cog):
         if role_id and inter.guild:
             role = inter.guild.get_role(role_id)
             embed.add_field(
-                name="Role after shuffle",
+                name="Join role",
                 value=role.mention if role else f"`{role_id}` (role missing)",
                 inline=False,
             )
@@ -3625,7 +3695,7 @@ class SecretSantaCog(commands.Cog):
         pass
     
     @ss_distribute.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
-    @mod_check()
+    @participant_check()
     async def ss_distribute_upload(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3803,6 +3873,14 @@ class SecretSantaCog(commands.Cog):
             current["participants"][user_id] = name
             await self._save_async()
 
+        # Participant role on join (if configured on /ss start)
+        if payload.guild_id:
+            guild = self.bot.get_guild(payload.guild_id)
+            if guild:
+                await self._apply_participant_role(
+                    guild, payload.user_id, add=True, reason="Secret Santa signup (reaction)"
+                )
+
         # Send confirmation (same message as /ss start)
         join_msg = self._get_join_message(self.state.get("current_year", dt.date.today().year))
         await self._send_dm(payload.user_id, join_msg)
@@ -3853,6 +3931,13 @@ class SecretSantaCog(commands.Cog):
                     if isinstance(participants, dict):
                         participants.pop(user_id, None)
                     await self._save_async()
+
+                if payload.guild_id:
+                    guild = self.bot.get_guild(payload.guild_id)
+                    if guild:
+                        await self._apply_participant_role(
+                            guild, payload.user_id, add=False, reason="Left Secret Santa signup"
+                        )
 
                 leave_msg = self._get_leave_message(self.state.get("current_year", dt.date.today().year))
                 await self._send_dm(payload.user_id, leave_msg)

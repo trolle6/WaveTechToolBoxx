@@ -5,7 +5,7 @@ FEATURES:
 - 📦 Upload and distribute files (any type: ZIP, JAR, RAR, etc. - up to 25MB)
 - 👤 Track who required the file
 - 📨 Automatically send files to Secret Santa participants (if active) or all server members via DM
-- 🔒 Permission checks (mods/admins can upload)
+- 🔒 Upload: active Secret Santa participants; remove: mods/admins
 - 💾 Persistent storage of file metadata with atomic writes
 - 💻 Cross-platform compatible (Windows, Linux, macOS)
 - ⚡ Non-blocking file I/O operations (ThreadPoolExecutor)
@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
-from .secret_santa_checks import mod_check
+from .secret_santa_checks import mod_check, participant_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
 from .utils import autocomplete_safety_wrapper
@@ -808,7 +808,7 @@ class DistributeZipCog(commands.Cog):
         )
 
     @distributezip.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
-    @mod_check()
+    @participant_check()
     async def upload_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
