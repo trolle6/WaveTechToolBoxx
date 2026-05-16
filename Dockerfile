@@ -14,10 +14,16 @@ COPY install_dependencies.sh .
 RUN chmod +x install_dependencies.sh && ./install_dependencies.sh
 
 # Copy application code
+COPY docker-entrypoint.sh .
 COPY . .
 
 # Create required directories
-RUN mkdir -p cogs/archive/backups logs
+RUN mkdir -p cogs/archive/backups logs \
+    && chmod +x docker-entrypoint.sh
 
-# Run the bot
+ENV GIT_BRANCH=cursor/ss-command-simplify-c0c2 \
+    GIT_UPDATE=true \
+    PIP_INSTALL_ON_START=true
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["python", "main.py"]

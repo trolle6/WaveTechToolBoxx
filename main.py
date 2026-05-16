@@ -818,9 +818,45 @@ def load_cogs() -> int:
     return loaded
 
 
+def _resolve_git_short_commit() -> str:
+    """Best-effort commit id (entrypoint env, then .git/HEAD)."""
+    short = os.getenv("GIT_COMMIT_SHORT")
+    if short:
+        return short
+    full = os.getenv("GIT_COMMIT")
+    if full:
+        return full[:12]
+    git_dir = Path(__file__).resolve().parent / ".git"
+    head_file = git_dir / "HEAD"
+    if not head_file.is_file():
+        return "unknown"
+    head = head_file.read_text(encoding="utf-8").strip()
+    if head.startswith("ref: "):
+        ref_path = git_dir / head[5:]
+        if ref_path.is_file():
+            return ref_path.read_text(encoding="utf-8").strip()[:12]
+    return head[:12]
+
+
+def _log_deploy_identity() -> None:
+    """Log branch/commit and whether SS simplify layout is present."""
+    commit = _resolve_git_short_commit()
+    branch = os.getenv("GIT_BRANCH_ACTUAL") or os.getenv("GIT_BRANCH") or "unknown"
+    root = Path(__file__).resolve().parent
+    split_layout = (root / "cogs" / "secret_santa_core.py").is_file()
+    layout = "split" if split_layout else "legacy-monolith"
+    logger.info("Deploy identity: branch=%s commit=%s ss_layout=%s", branch, commit, layout)
+    if not split_layout:
+        logger.warning(
+            "secret_santa_core.py missing — old /ss command set. "
+            "Deploy branch cursor/ss-command-simplify-c0c2 (see docker-entrypoint.sh)."
+        )
+
+
 # ============ MAIN ============
 if __name__ == "__main__":
     logger.info("Starting bot...")
+    _log_deploy_identity()
     
     # Python version check - disnake 2.12+ (DAVE voice) requires Python 3.10+
     if sys.version_info < PYTHON_MIN_VERSION:
