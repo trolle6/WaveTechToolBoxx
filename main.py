@@ -18,6 +18,8 @@ import os
 import signal
 import sys
 import time
+import warnings
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,7 +39,6 @@ load_dotenv("config.env", override=True)
 #
 # Required (config.env):
 #   DISCORD_TOKEN          - Bot token
-#   DISCORD_GUILD_ID       - Required at load (validation)
 #   DISCORD_CHANNEL_ID     - main: send_discord_message; voice_processing: optional TTS channel restriction
 #   DISCORD_LOG_CHANNEL_ID - DiscordLogHandler, send_to_discord_log, reconnect notifications
 #   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
@@ -46,13 +47,11 @@ load_dotenv("config.env", override=True)
 # Optional (CONFIG_DEFAULTS below or in config.env):
 #   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
 #   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
-#   BOT_OWNER_USERNAME     - owner checks (fallback if BOT_OWNER_USER_ID not set)
-#   BOT_OWNER_USER_ID      - (optional) Discord user ID for owner-only commands; if set, used instead of username (cannot be impersonated)
-# Per-event guild_id (not config): Secret Santa and Custom Events store guild_id per event (inter.guild.id).
+# Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
 #
 REQUIRED_CONFIG_KEYS = {
-    "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID",
-    "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY"
+    "DISCORD_TOKEN", "DISCORD_CHANNEL_ID",
+    "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY",
 }
 
 CONFIG_DEFAULTS = {
@@ -67,8 +66,7 @@ CONFIG_DEFAULTS = {
     "VOICE_TIMEOUT": 10,
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
-    "BOT_OWNER_USERNAME": "trolle6",
-    "BOT_OWNER_USER_ID": None,  # Optional: set to your Discord user ID (integer) for secure owner checks; username can be impersonated
+    "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }
 
 
@@ -103,14 +101,8 @@ class Config:
                 try:
                     self.data[key] = int(val)
                 except ValueError:
-                    print(f"Warning: Invalid integer for {key}, using default {default}")
+                    warnings.warn(f"Invalid integer for {key!r}, using default {default!r}", UserWarning)
                     self.data[key] = default
-            elif key == "BOT_OWNER_USER_ID" and val:
-                try:
-                    self.data[key] = int(val)
-                except ValueError:
-                    print(f"Warning: Invalid BOT_OWNER_USER_ID '{val}', using None")
-                    self.data[key] = None
             else:
                 self.data[key] = val
     
@@ -139,12 +131,28 @@ class HttpManager:
     """
     _instance = None
     _session: Optional[aiohttp.ClientSession] = None
-    
+
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            inst = super().__new__(cls)
+            inst._session_lock = asyncio.Lock()
+            cls._instance = inst
         return cls._instance
-    
+
+    def _session_needs_rebuild(
+        self,
+        session: Optional[aiohttp.ClientSession],
+        current_loop: Optional[asyncio.AbstractEventLoop],
+    ) -> bool:
+        if session is None or session.closed:
+            return True
+        session_loop = getattr(session, "_loop", None)
+        if session_loop is None or session_loop.is_closed():
+            return True
+        if current_loop is not None and session_loop is not current_loop:
+            return True
+        return False
+
     async def get_session(self, timeout: int = HTTP_DEFAULT_TIMEOUT) -> aiohttp.ClientSession:
         """
         Get or create HTTP session with connection pooling.
@@ -163,16 +171,13 @@ class HttpManager:
         except RuntimeError:
             current_loop = None
 
-        session_loop = getattr(self._session, "_loop", None) if self._session else None
-        need_new = (
-            self._session is None
-            or self._session.closed
-            or session_loop is None
-            or session_loop.is_closed()
-            or (current_loop is not None and session_loop != current_loop)
-        )
+        if not self._session_needs_rebuild(self._session, current_loop):
+            return self._session  # hot path: no lock
 
-        if need_new:
+        async with self._session_lock:
+            if not self._session_needs_rebuild(self._session, current_loop):
+                return self._session
+
             if self._session and not self._session.closed:
                 try:
                     await self._session.close()
@@ -192,31 +197,34 @@ class HttpManager:
                 connector=connector,
                 headers={"Connection": "keep-alive"},
             )
-        return self._session
+            return self._session
 
     async def invalidate_session(self):
         """Force-close current session so next get_session() creates a fresh one.
         Use when the session's event loop has closed (e.g. after validation, or bot restart).
         """
-        if self._session and not self._session.closed:
-            try:
-                await self._session.close()
-            except Exception:
-                pass
-        self._session = None  # Always clear so next get_session() creates fresh
+        async with self._session_lock:
+            if self._session and not self._session.closed:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+            self._session = None
 
     async def close(self):
         """Cleanly close HTTP session and connection pool"""
-        if self._session and not self._session.closed:
+        async with self._session_lock:
+            sess = self._session
+            self._session = None
+            if not sess or sess.closed:
+                return
             try:
-                await self._session.close()
+                await sess.close()
                 await asyncio.sleep(0.5)  # Allow pending requests to finish
-                if hasattr(self._session, '_connector') and self._session._connector:
-                    await self._session._connector.close()
+                if hasattr(sess, '_connector') and sess._connector:
+                    await sess._connector.close()
             except Exception:
                 pass
-            finally:
-                self._session = None
 
 
 # ============ DISCORD LOGGING ============
@@ -224,6 +232,9 @@ class DiscordLogHandler(logging.Handler):
     """Send log messages to Discord channel"""
     
     EMOJI_MAP = {"WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}
+    # Cap dedupe keys so unusual log spam cannot grow this dict without bound
+    _DEDUPE_MAX_KEYS = 512
+    _DEDUPE_WINDOW_SEC = 60.0
     
     def __init__(self, log_channel_id: int):
         super().__init__()
@@ -231,12 +242,12 @@ class DiscordLogHandler(logging.Handler):
         self.bot: Optional[disnake.Client] = None
         self.message_queue = asyncio.Queue(maxsize=50)
         self.sender_task: Optional[asyncio.Task] = None
-        self._last_message = {}  # Rate limiting
+        self._last_message: OrderedDict[str, float] = OrderedDict()
     
     def set_bot(self, bot: disnake.Client):
         """Set bot instance and start sender task"""
         self.bot = bot
-        if not self.sender_task:
+        if self.sender_task is None or self.sender_task.done():
             self.sender_task = asyncio.create_task(self._sender_loop())
     
     def emit(self, record: logging.LogRecord):
@@ -247,8 +258,13 @@ class DiscordLogHandler(logging.Handler):
         # Rate limit duplicate messages
         msg_key = f"{record.levelname}:{record.getMessage()[:50]}"
         now = time.time()
-        if msg_key in self._last_message and (now - self._last_message[msg_key]) < 60:
+        last = self._last_message.get(msg_key)
+        if last is not None and (now - last) < self._DEDUPE_WINDOW_SEC:
             return
+        if last is not None:
+            self._last_message.move_to_end(msg_key)
+        elif len(self._last_message) >= self._DEDUPE_MAX_KEYS:
+            self._last_message.popitem(last=False)
         self._last_message[msg_key] = now
         
         # Format message
@@ -388,6 +404,62 @@ async def validate_openai_key(key: str, logger: logging.Logger, http_mgr: "HttpM
 
 # ============ BOT SETUP ============
 PYTHON_MIN_VERSION = (3, 10)  # disnake 2.12+ (DAVE voice) requires Python 3.10+
+MIN_DISNAKE_VERSION = (2, 12, 0)  # Discord mandates DAVE (E2EE) for voice; older libs get close 4017
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...]:
+    """Parse '2.12.0' -> (2, 12, 0) for minimum-version checks."""
+    parts: list[int] = []
+    for piece in version.split(".")[:3]:
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
+def validate_runtime_dependencies(logger: logging.Logger) -> bool:
+    """
+    Verify disnake and Discord voice (DAVE) dependencies before loading cogs.
+
+    Returns False if requirements are not met (caller should exit).
+    """
+    import importlib.util
+
+    if _parse_version_tuple(disnake.__version__) < MIN_DISNAKE_VERSION:
+        logger.critical(
+            f"disnake {disnake.__version__} is too old; need "
+            f"{MIN_DISNAKE_VERSION[0]}.{MIN_DISNAKE_VERSION[1]}+ for Discord voice (DAVE/E2EE). "
+            f'Run: pip install -r requirements.txt'
+        )
+        return False
+
+    if importlib.util.find_spec("dave") is None:
+        logger.critical(
+            "dave-py is not installed (required for Discord voice since 2026). "
+            'Install with: pip install "disnake[voice]>=2.12.0"'
+        )
+        return False
+
+    try:
+        import aiohttp
+        from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+        try:
+            dotenv_ver = pkg_version("python-dotenv")
+        except PackageNotFoundError:
+            dotenv_ver = "unknown"
+        logger.info(
+            f"Runtime deps OK: disnake {disnake.__version__}, "
+            f"aiohttp {aiohttp.__version__}, python-dotenv {dotenv_ver}, dave-py present"
+        )
+    except ImportError as e:
+        logger.critical(f"Missing dependency: {e}. Run: pip install -r requirements.txt")
+        return False
+
+    return True
+
+
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
 MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)
@@ -458,13 +530,11 @@ bot.send_to_discord_channel = send_to_discord_channel
 
 
 # ============ DAILY MAINTENANCE ============
-SECONDS_PER_DAY_MAINTENANCE = 86400  # 24 hours
-
-
 async def daily_maintenance_loop():
     """
-    Run once per day at midnight UTC: cache cleanups and optional cog maintenance.
-    Cogs can implement daily_maintenance() to clear caches or soft-reset state.
+    Run once per day at midnight UTC. Cogs may implement async daily_maintenance()
+    for work that should not run on a tight loop (e.g. DALL-E image URL cache).
+    Voice uses its own 5-minute cleanup task instead.
     """
     while True:
         now = datetime.now(timezone.utc)
@@ -472,7 +542,7 @@ async def daily_maintenance_loop():
         next_midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
         wait_seconds = (next_midnight - now).total_seconds()
         if wait_seconds <= 0:
-            wait_seconds = SECONDS_PER_DAY_MAINTENANCE
+            wait_seconds = SECONDS_PER_DAY
         logger.info(f"Daily maintenance next at midnight UTC (in {wait_seconds/3600:.1f}h)")
         await asyncio.sleep(wait_seconds)
         logger.info("Daily maintenance (midnight UTC) — running cog cleanups")
@@ -521,13 +591,8 @@ async def on_ready():
         
         bot.ready_once = True
     else:
-        # Reconnection - update connection start
+        # Reconnect after disconnect: on_resumed logs downtime; only track connect time here.
         stats["last_connect"] = now
-        if stats["last_disconnect"]:
-            # Calculate uptime since last disconnect
-            downtime = now - stats["last_disconnect"]
-            if downtime > 60:
-                logger.info(f"📊 Connection restored after {downtime:.1f}s downtime")
 
 
 @bot.event
@@ -549,9 +614,6 @@ async def on_disconnect():
         # Record this connection period (start, end)
         stats["connection_periods"].append((stats["last_connect"], now))
         
-        # Track longest uptime
-        # Note: This grows indefinitely, but it's just one float (8 bytes) so it's fine even over millions of years
-        # The value itself doesn't affect calculations, it's just for logging/monitoring
         if uptime > stats["longest_uptime"]:
             stats["longest_uptime"] = uptime
         
@@ -620,14 +682,11 @@ async def on_disconnect():
             f"🚨 HIGH DISCONNECTION RATE: {stats['disconnect_count_24h']} disconnects in 24h "
             f"(uptime: {uptime_percent:.1f}%)"
         )
-        try:
-            await send_to_discord_log(
-                f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
-                f"(uptime: {uptime_percent:.1f}%)",
-                "WARNING"
-            )
-        except Exception:
-            pass
+        await send_to_discord_log(
+            f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
+            f"(uptime: {uptime_percent:.1f}%)",
+            "WARNING"
+        )
 
 
 @bot.event
@@ -653,13 +712,10 @@ async def on_resumed():
             logger.warning(f"⚠️ Bot reconnected after {duration:.1f}s downtime")
         else:
             logger.error(f"🚨 Bot reconnected after {duration:.1f}s - very long disconnection!")
-            try:
-                await send_to_discord_log(
-                    f"Long disconnection: {duration:.1f}s - may have interrupted operations",
-                    "ERROR"
-                )
-            except Exception:
-                pass
+            await send_to_discord_log(
+                f"Long disconnection: {duration:.1f}s - may have interrupted operations",
+                "ERROR"
+            )
         
         stats["last_disconnect"] = None
     else:
@@ -746,7 +802,6 @@ def load_cogs() -> int:
         "cogs.voice_processing_cog",
         "cogs.DALLE_cog",
         "cogs.SecretSanta_cog",
-        "cogs.CustomEvents_cog",
         "cogs.DistributeZip_cog"
     ]
     
@@ -762,9 +817,44 @@ def load_cogs() -> int:
     return loaded
 
 
+def _resolve_git_short_commit() -> str:
+    """Best-effort commit id (entrypoint env, then .git/HEAD)."""
+    short = os.getenv("GIT_COMMIT_SHORT")
+    if short:
+        return short
+    full = os.getenv("GIT_COMMIT")
+    if full:
+        return full[:12]
+    git_dir = Path(__file__).resolve().parent / ".git"
+    head_file = git_dir / "HEAD"
+    if not head_file.is_file():
+        return "unknown"
+    head = head_file.read_text(encoding="utf-8").strip()
+    if head.startswith("ref: "):
+        ref_path = git_dir / head[5:]
+        if ref_path.is_file():
+            return ref_path.read_text(encoding="utf-8").strip()[:12]
+    return head[:12]
+
+
+def _log_deploy_identity() -> None:
+    """Log branch/commit and whether SS simplify layout is present."""
+    commit = _resolve_git_short_commit()
+    branch = os.getenv("GIT_BRANCH_ACTUAL") or os.getenv("GIT_BRANCH") or "unknown"
+    root = Path(__file__).resolve().parent
+    split_layout = (root / "cogs" / "secret_santa_core.py").is_file()
+    layout = "split" if split_layout else "legacy-monolith"
+    logger.info("Deploy identity: branch=%s commit=%s ss_layout=%s", branch, commit, layout)
+    if not split_layout:
+        logger.warning(
+            "secret_santa_core.py missing — outdated code tree; check GIT_BRANCH / git pull."
+        )
+
+
 # ============ MAIN ============
 if __name__ == "__main__":
     logger.info("Starting bot...")
+    _log_deploy_identity()
     
     # Python version check - disnake 2.12+ (DAVE voice) requires Python 3.10+
     if sys.version_info < PYTHON_MIN_VERSION:
@@ -787,6 +877,9 @@ if __name__ == "__main__":
             sys.exit(1)
     
     logger.info("Production checks passed")
+
+    if not validate_runtime_dependencies(logger):
+        sys.exit(1)
     
     # Validate API key (uses shared HttpManager for connection reuse)
     if not config.SKIP_API_VALIDATION:

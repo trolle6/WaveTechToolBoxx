@@ -27,30 +27,35 @@ Thumbs.db
 *.tmp
 *.temp
 
-# Test files (removed from repo)
-tests/
-test_*.py
-*_test.py
+# Test fixtures (manual only)
+test_tts_long_message.txt
+cogs/archive/test_tts_long_message.txt
 
-# Local notes and reminders (not for version control)
+# Local notes (not for version control)
 things todo and remember in the future.txt
 features_done_and_logic.txt
 CODEBASE_CHECK.md
-
-# DeepSeek prompt files (local development only)
 *DEEPSEEK*.md
 DEEPSEEK*.md
-
-# Secret Santa message documentation (local development only)
 SECRET_SANTA_MESSAGES.md
+CODE_REVIEW*.md
+temp_working_version.py
 
-# Deployment scripts (keep deploy.sh, remove others if not needed)
+# Runtime bot state (use *.example.json templates in repo)
+cogs/secret_santa_state.json
+cogs/secret_santa_state.backup
+cogs/secret_santa_state.bak
+cogs/distributed_files_metadata.json
+cogs/distributed_files/*
+!cogs/distributed_files/.gitkeep
+cogs/gift_submissions.json
+cogs/santa_questions.json
+cogs/secret_santa_data.json
+
+# Generated deploy output
+deployment_report.json
+
+# Legacy deploy scripts (removed — use deploy.sh + deploy.py)
 deploy_cross_platform.py
 deploy_windows.ps1
 deploy_linux.sh
-
-# Code review documents (local development only)
-CODE_REVIEW*.md
-
-# Temporary / working copies (do not commit)
-temp_working_version.py

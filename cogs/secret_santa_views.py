@@ -15,9 +15,11 @@ ISOLATION:
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple
 
 import disnake
+
+from .secret_santa_checks import format_gift_description_for_display, GIFT_NO_SUBMISSION_ROW
 
 
 class SecretSantaReplyView(disnake.ui.View):
@@ -157,14 +159,16 @@ class YearHistoryPaginator(disnake.ui.View):
             submission = gifts.get(str(giver_id))
             if submission and isinstance(submission, dict):
                 raw = submission.get("gift")
-                if isinstance(raw, str) and raw.strip():
-                    gift_desc = raw[:57] + "..." if len(raw) > 60 else raw
-                else:
-                    gift_desc = "(not yet submitted)"
+                gift_desc = format_gift_description_for_display(
+                    raw if isinstance(raw, str) else None,
+                    max_length=60,
+                )
                 self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
-                self.all_lines.append(f"    ⤷ *{gift_desc}*")
+                self.all_lines.append(f"    ⤷ {gift_desc}")
             else:
-                self.all_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *(no gift recorded)*")
+                self.all_lines.append(
+                    f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *{GIFT_NO_SUBMISSION_ROW}*"
+                )
         
         # Calculate pages (10 assignments per page = ~20 lines with gifts)
         self.items_per_page = 10
@@ -334,74 +338,6 @@ class FileListPaginator(disnake.ui.View):
             embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages} • Showing {len(page_files)} of {len(self.files)} files")
         else:
             embed.set_footer(text=f"Total: {len(self.files)} file(s)")
-        
-        return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
-
-
-class EventListPaginator(disnake.ui.View):
-    """Paginated view for event listings"""
-    def __init__(self, events: List[Any], timeout: float = 300):
-        super().__init__(timeout=timeout)
-        self.events = events
-        self.current_page = 0
-        self.items_per_page = 10
-        self.total_pages = (len(events) + self.items_per_page - 1) // self.items_per_page
-        self._update_buttons()
-    
-    def _update_buttons(self):
-        """Update button enabled/disabled state"""
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
-    def get_embed(self) -> disnake.Embed:
-        """Generate embed for current page"""
-        start_idx = self.current_page * self.items_per_page
-        end_idx = min(start_idx + self.items_per_page, len(self.events))
-        page_events = self.events[start_idx:end_idx]
-        
-        embed = disnake.Embed(
-            title="🎲 Active Events",
-            description=f"{len(self.events)} event(s)",
-            color=disnake.Color.blue(),
-            timestamp=dt.datetime.now()
-        )
-        
-        for event in page_events:
-            status_emoji = {"setup": "⏳", "active": "✅", "completed": "🏁"}.get(event.status, "❓")
-            
-            embed.add_field(
-                name=f"{status_emoji} {event.name} (ID: {event.event_id})",
-                value=f"Algorithm: {event.matcher_type}\n"
-                      f"Participants: {len(event.participants)}\n"
-                      f"Status: {event.status}",
-                inline=False
-            )
-        
-        if self.total_pages > 1:
-            embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages} • Showing {len(page_events)} of {len(self.events)} events")
-        else:
-            embed.set_footer(text=f"Total: {len(self.events)} event(s)")
         
         return embed
     

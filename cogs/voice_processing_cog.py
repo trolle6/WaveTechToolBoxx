@@ -106,6 +106,10 @@ VOICE_DISCONNECT_DELAY = 3.0  # Seconds to wait before checking voice channel ag
 VOICE_CLEANUP_DELAY = 0.3  # Seconds to wait after cleanup before reconnecting
 VOICE_CONNECTION_RETRY_DELAY = 0.8  # Seconds between connection retry attempts
 
+# Discord DAVE (E2EE voice): packets sent before the MLS key ratchet is ready are inaudible to clients.
+DAVE_ENCRYPT_READY_TIMEOUT = 20.0  # Max seconds to wait after connecting / before play
+DAVE_ENCRYPT_READY_POLL = 0.05  # Poll interval while waiting for key ratchet
+
 
 @dataclass
 class TTSQueueItem:
@@ -190,8 +194,9 @@ class VoiceProcessingCog(commands.Cog):
         self.enabled = True
         self.logger.info("TTS enabled")
         
-        # Check FFmpeg availability and log diagnostics
+        # Check FFmpeg and Discord DAVE (E2EE voice) dependencies
         self._check_ffmpeg_availability()
+        self._check_dave_availability()
         
         # Pre-compile regex patterns
         self._compiled_corrections = self._compile_correction_patterns()
@@ -334,7 +339,9 @@ class VoiceProcessingCog(commands.Cog):
                         "voice": voice,
                         "timestamp": current_time
                     }
-                    self.logger.info(f"Upgraded old voice assignment format for user {user_id} (display_name: {member.display_name}) in guild {guild_id}: '{voice}'")
+                    self.logger.debug(
+                        f"Upgraded old voice assignment format for user {user_id} in guild {guild_id}: '{voice}'"
+                    )
                 elif isinstance(assignment, dict):
                     voice = assignment.get("voice")
                     old_timestamp = assignment.get("timestamp", 0)
@@ -347,7 +354,9 @@ class VoiceProcessingCog(commands.Cog):
                 
                 # Validate voice is still available
                 if voice and voice in self.available_voices:
-                    self.logger.info(f"Returning existing voice '{voice}' for user {user_id} (display_name: {member.display_name}) in guild {guild_id}")
+                    self.logger.debug(
+                        f"Returning existing voice '{voice}' for user {user_id} in guild {guild_id}"
+                    )
                     return voice
                 else:
                     # Invalid assignment, will reassign below
@@ -366,23 +375,30 @@ class VoiceProcessingCog(commands.Cog):
                 "timestamp": current_time
             }
             
-            # Log assignment with detailed info for debugging
-            self.logger.info(
-                f"Assigned voice '{new_voice}' (index {voice_index} of {len(self.available_voices)}) "
-                f"to user {user_id} (display_name: {member.display_name}) in guild {guild_id} "
-                f"at timestamp {current_time}. Calculation: {user_id} % {len(self.available_voices)} = {voice_index}"
+            self.logger.debug(
+                f"Assigned voice '{new_voice}' to user {user_id} in guild {guild_id} "
+                f"({user_id} % {len(self.available_voices)} = {voice_index})"
             )
-            
-            # Log all current assignments for debugging (at INFO level to help diagnose live server issues)
-            active_assignments = {
-                uid: (data.get("voice") if isinstance(data, dict) else data)
-                for uid, data in guild_assignments.items()
-            }
-            self.logger.info(f"Current voice assignments for guild {guild_id}: {active_assignments}")
-            
             return new_voice
 
     # ============ SYSTEM DIAGNOSTICS ============
+    def _check_dave_availability(self) -> bool:
+        """
+        Verify dave-py is installed for Discord's mandatory E2EE voice (DAVE).
+
+        Without it, voice connections fail with WebSocket close code 4017.
+        """
+        import importlib.util
+
+        if importlib.util.find_spec("dave") is None:
+            self.logger.error(
+                "dave-py is not installed. Discord voice requires DAVE (E2EE) as of 2026.\n"
+                'Install: pip install "disnake[voice]>=2.12.0"'
+            )
+            return False
+        self.logger.info("Discord voice DAVE (dave-py) dependency OK")
+        return True
+
     def _check_ffmpeg_availability(self):
         """
         Check if FFmpeg is available and log diagnostic information.
@@ -900,6 +916,34 @@ class VoiceProcessingCog(commands.Cog):
             self.total_failed += 1
         return None
 
+    async def _wait_for_voice_media_ready(self, vc: disnake.VoiceClient, timeout: float = DAVE_ENCRYPT_READY_TIMEOUT) -> bool:
+        """
+        Block until Discord DAVE can encrypt outgoing audio.
+
+        If we call play() before the MLS ratchet is ready, disnake falls back to sending
+        legacy (non-DAVE) frames; modern voice servers accept this as "success" locally but
+        clients hear nothing — matching "playback completed" with silent channel audio.
+        """
+        dave_state = getattr(vc, "dave", None)
+        if dave_state is None:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if dave_state.can_encrypt():
+                    self.logger.debug("DAVE voice encryption ready (key ratchet active)")
+                    return True
+            except Exception as e:
+                self.logger.warning(f"DAVE readiness check error: {e}")
+                return False
+            await asyncio.sleep(DAVE_ENCRYPT_READY_POLL)
+        self.logger.error(
+            "DAVE encryption did not become ready within %.1fs — TTS would be silent for listeners. "
+            "Check voice connection, gateway, and dave-py compatibility.",
+            timeout,
+        )
+        return False
+
     # ============ AUDIO PLAYBACK ============
     async def _play_audio(self, vc: disnake.VoiceClient, audio_data: bytes) -> bool:
         """
@@ -972,6 +1016,14 @@ class VoiceProcessingCog(commands.Cog):
             if not vc.is_connected():
                 if temp_file and os.path.exists(temp_file):
                     os.unlink(temp_file)
+                return False
+
+            if not await self._wait_for_voice_media_ready(vc):
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except Exception:
+                        pass
                 return False
 
             # Start playback
@@ -1065,12 +1117,18 @@ class VoiceProcessingCog(commands.Cog):
 
         vc = guild.voice_client
 
-        # Already connected to this exact channel - verify and return
+        # Already connected to this exact channel - verify DAVE/media then return
         if vc and vc.is_connected():
             ch = getattr(vc, "channel", None)
             if ch and ch.id == channel.id:
-                return vc
-            # Connected elsewhere - disconnect first
+                if await self._wait_for_voice_media_ready(vc):
+                    return vc
+                self.logger.warning("DAVE not ready on existing voice connection — reconnecting")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception as e:
+                    self.logger.debug(f"Disconnect for DAVE retry: {e}")
+                await asyncio.sleep(VOICE_CLEANUP_DELAY)
             try:
                 await vc.disconnect()
             except Exception as e:
@@ -1094,10 +1152,18 @@ class VoiceProcessingCog(commands.Cog):
                     timeout=timeout + 5
                 )
                 self.logger.info(f"Connected to {channel.name} (attempt {attempt + 1})")
-                try:
-                    await guild.change_voice_state(channel=channel, self_deaf=True)
-                except Exception:
-                    pass
+                # Do not self-deaf the bot: it is unnecessary for TTS and can break or confuse
+                # voice media on some clients/gateways. DAVE readiness is handled before play().
+                if not await self._wait_for_voice_media_ready(vc):
+                    self.logger.error(
+                        "Voice connected but DAVE not ready — disconnecting and retrying if attempts remain"
+                    )
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(VOICE_CLEANUP_DELAY * 2)
+                    continue
                 return vc
             except disnake.ClientException as e:
                 err_lower = str(e).lower()
@@ -1106,7 +1172,14 @@ class VoiceProcessingCog(commands.Cog):
                     if vc and vc.is_connected():
                         ch = getattr(vc, "channel", None)
                         if ch and ch.id == channel.id:
-                            return vc
+                            if await self._wait_for_voice_media_ready(vc):
+                                return vc
+                            try:
+                                await vc.disconnect(force=True)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(VOICE_CLEANUP_DELAY * 2)
+                            continue
                     try:
                         if vc:
                             await vc.disconnect(force=True)
@@ -1503,9 +1576,11 @@ class VoiceProcessingCog(commands.Cog):
             while not self._shutdown.is_set():
                 await asyncio.sleep(300)  # Every 5 minutes
 
-                # Cleanup cache
-                if hasattr(self.cache, 'cleanup'):
+                # Expire stale LRU entries (access path also evicts; this catches cold keys)
+                if hasattr(self.cache, "cleanup"):
                     await self.cache.cleanup()
+                if hasattr(self.pronunciation_cache, "cleanup"):
+                    await self.pronunciation_cache.cleanup()
 
                 # Cleanup message deduplication (keep most recent 500 entries)
                 async with self._processed_messages_lock:
@@ -1569,16 +1644,6 @@ class VoiceProcessingCog(commands.Cog):
             pass
         except Exception as e:
             self.logger.error(f"Cleanup loop error: {e}", exc_info=True)
-
-    async def daily_maintenance(self):
-        """Called by main at midnight UTC — clear expired cache entries."""
-        if not self.enabled:
-            return
-        if hasattr(self, "cache") and hasattr(self.cache, "cleanup"):
-            await self.cache.cleanup()
-        if hasattr(self, "pronunciation_cache") and hasattr(self.pronunciation_cache, "cleanup"):
-            await self.pronunciation_cache.cleanup()
-        self.logger.debug("Voice: daily cache cleanup done")
 
     # ============ COG LIFECYCLE ============
     async def cog_load(self):

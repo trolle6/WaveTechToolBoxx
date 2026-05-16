@@ -23,26 +23,40 @@ def _get_member_from_inter(inter: disnake.ApplicationCommandInteraction) -> Opti
     return inter.guild.get_member(inter.author.id)
 
 
+def _has_mod_access(member: disnake.Member, bot: disnake.Client) -> bool:
+    """True if member is guild admin or has DISCORD_MODERATOR_ROLE_ID from config."""
+    if member.guild_permissions.administrator:
+        return True
+    config = getattr(bot, "config", None)
+    if not config:
+        return False
+    mod_role_id = getattr(config, "DISCORD_MODERATOR_ROLE_ID", None)
+    if mod_role_id is None:
+        return False
+    if not isinstance(mod_role_id, int):
+        try:
+            mod_role_id = int(mod_role_id)
+        except (TypeError, ValueError):
+            return False
+    return any(r.id == mod_role_id for r in member.roles)
+
+
+def is_moderator(inter: "disnake.ApplicationCommandInteraction") -> bool:
+    """Return True if the user can run mod-gated commands (admin or mod role)."""
+    member = _get_member_from_inter(inter)
+    return _has_mod_access(member, inter.bot) if member else False
+
+
 def mod_check():
-    """Check if user is mod or admin."""
+    """Check if user is server admin or has the configured moderator role."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         member = _get_member_from_inter(inter)
-        if not member:
-            return False
-
-        # Check administrator permission
-        if member.guild_permissions.administrator:
+        if member and _has_mod_access(member, inter.bot):
             return True
-
-        # Check config for mod role
-        try:
-            if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
-                mod_role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
-                if mod_role_id and any(r.id == mod_role_id for r in member.roles):
-                    return True
-        except (AttributeError, TypeError):
-            pass
-
+        if hasattr(inter.bot, "logger"):
+            inter.bot.logger.warning(
+                f"User {inter.author.name} ({inter.author.id}) attempted to use mod-only command"
+            )
         return False
 
     return commands.check(predicate)
@@ -97,3 +111,31 @@ def safe_display_name(author: disnake.User | disnake.Member | None) -> str:
     if isinstance(author, disnake.Member):
         return author.display_name or author.name or "Unknown"
     return getattr(author, "name", None) or "Unknown"
+
+
+# Wording for history/embeds: avoid plain "nothing" / ambiguous empty states
+GIFT_EMPTY_DESCRIPTION = "*(no description saved yet)*"
+GIFT_NO_SUBMISSION_ROW = "*(no submission on file)*"
+
+
+def format_gift_description_for_display(
+    raw: Optional[str],
+    *,
+    max_length: int = 200,
+    empty_label: str = GIFT_EMPTY_DESCRIPTION,
+) -> str:
+    """
+    Format gift text for Discord embeds.
+
+    Non-empty text is wrapped in inline `` `...` `` so a literal joke like "nothing"
+    is clearly the participant's wording, not a missing gift. Empty strings use a
+    clear meta label instead of looking like a real gift name.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return empty_label
+    single_line = " ".join(raw.split())
+    if len(single_line) > max_length:
+        single_line = single_line[: max_length - 1] + "…"
+    if "`" in single_line:
+        single_line = single_line.replace("`", "′")
+    return f"`{single_line}`"

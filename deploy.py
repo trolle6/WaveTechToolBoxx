@@ -11,31 +11,61 @@ import subprocess
 import sys
 from pathlib import Path
 
+PYTHON_MIN = (3, 10)
+DISNAKE_MIN = (2, 12, 0)
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in version.split(".")[:3]:
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
 def check_python_version():
     """Check Python version"""
     version = sys.version_info
-    if version.major < 3 or (version.major == 3 and version.minor < 9):
-        print("❌ Python 3.9+ required")
+    if version < PYTHON_MIN:
+        print(
+            f"❌ Python {PYTHON_MIN[0]}.{PYTHON_MIN[1]}+ required "
+            f"(disnake 2.12+ / Discord DAVE voice). Current: {version.major}.{version.minor}"
+        )
         return False
     print(f"✅ Python {version.major}.{version.minor}.{version.micro}")
     return True
 
 def check_dependencies():
     """Check if all dependencies are installed"""
+    import importlib.util
+
     try:
         import disnake
+        if _parse_version_tuple(disnake.__version__) < DISNAKE_MIN:
+            print(
+                f"❌ disnake {disnake.__version__} is too old; need "
+                f"{DISNAKE_MIN[0]}.{DISNAKE_MIN[1]}+ for Discord voice"
+            )
+            return False
         print(f"✅ disnake {disnake.__version__}")
     except ImportError:
         print("❌ disnake not installed")
         return False
-    
-    try:
-        import asyncio
-        print("✅ asyncio available")
-    except ImportError:
-        print("❌ asyncio not available")
+
+    if importlib.util.find_spec("dave") is None:
+        print('❌ dave-py missing — run: pip install "disnake[voice]>=2.12.0"')
         return False
-    
+    print("✅ dave-py (Discord voice E2EE) available")
+
+    try:
+        import aiohttp
+        print(f"✅ aiohttp {aiohttp.__version__}")
+    except ImportError:
+        print("❌ aiohttp not installed")
+        return False
+
     return True
 
 def check_environment():
@@ -67,8 +97,18 @@ def check_file_structure():
     required_files = [
         'main.py',
         'cogs/SecretSanta_cog.py',
-        'requirements.txt'
+        'cogs/secret_santa_core.py',
+        'requirements.txt',
     ]
+    state_file = Path('cogs/secret_santa_state.json')
+    if not state_file.exists():
+        example = Path('cogs/secret_santa_state.json.example')
+        if example.exists():
+            print("⚠️ cogs/secret_santa_state.json missing — copy from secret_santa_state.json.example")
+        else:
+            missing_files = ['cogs/secret_santa_state.json']
+            print(f"❌ Missing files: {missing_files}")
+            return False
     
     missing_files = []
     for file in required_files:
@@ -86,7 +126,8 @@ def create_directories():
     """Create required directories"""
     dirs = [
         'cogs/archive',
-        'cogs/archive/backups'
+        'cogs/archive/backups',
+        'cogs/distributed_files',
     ]
     
     for dir_path in dirs:

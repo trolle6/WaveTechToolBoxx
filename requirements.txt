@@ -1,16 +1,17 @@
-# WaveTechToolBox Dependencies
+# WaveTechToolBox Dependencies (2026)
+# Python 3.10+ required (disnake 2.12+ drops 3.8/3.9)
 
-# Core Discord library - requires 2.12+ for DAVE (E2EE) voice support (Discord enforces 4017 otherwise)
-# [voice] extra pulls in dave-py, PyNaCl, audioop-lts for voice connections
-disnake[voice]>=2.12.0
+# Core Discord library — 2.12+ required for DAVE (E2EE) voice (Discord close code 4017)
+# [voice] extra installs dave-py, PyNaCl, audioop-lts
+disnake[voice]>=2.12.0,<3.0.0
 
-# HTTP client for API calls (OpenAI TTS, DALL-E)
-aiohttp>=3.9.0
+# HTTP client for OpenAI TTS, DALL-E, chat completions
+aiohttp>=3.10.0,<4.0.0
 
 # Environment variable management
-python-dotenv>=1.0.0
+python-dotenv>=1.0.0,<2.0.0
 
-# Voice encryption (required by disnake for voice features)
-PyNaCl>=1.5.0
+# Voice encryption (also pulled in by disnake[voice]; explicit for clarity)
+PyNaCl>=1.5.0,<2.0.0
 
 # Note: OpenAI API is accessed via HTTP (aiohttp), not the openai package

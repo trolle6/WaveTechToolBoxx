@@ -416,12 +416,16 @@ class DALLECog(commands.Cog):
                     raise
                 except Exception as e:
                     self.logger.error(f"Queue processing error: {e}", exc_info=True)
-                    try:
-                        await self._send_result(
-                            job, {"success": False, "error": "An error occurred during generation"}, 0.0
-                        )
-                    except Exception:
-                        pass
+                    failed_job = locals().get("job")
+                    if failed_job is not None:
+                        try:
+                            await self._send_result(
+                                failed_job,
+                                {"success": False, "error": "An error occurred during generation"},
+                                0.0,
+                            )
+                        except Exception:
+                            pass
                     await asyncio.sleep(1)
                 finally:
                     self.is_processing = False

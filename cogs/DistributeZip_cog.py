@@ -5,7 +5,7 @@ FEATURES:
 - 📦 Upload and distribute files (any type: ZIP, JAR, RAR, etc. - up to 25MB)
 - 👤 Track who required the file
 - 📨 Automatically send files to Secret Santa participants (if active) or all server members via DM
-- 🔒 Permission checks (only authorized users can upload)
+- 🔒 Upload: active Secret Santa participants; remove: mods/admins
 - 💾 Persistent storage of file metadata with atomic writes
 - 💻 Cross-platform compatible (Windows, Linux, macOS)
 - ⚡ Non-blocking file I/O operations (ThreadPoolExecutor)
@@ -14,11 +14,9 @@ FEATURES:
 - 🚦 Improved rate limiting (Discord API compliant)
 
 COMMANDS:
-- /distributezip upload [attachment] [required_by] - Upload file(s) and distribute them
-- /distributezip list - List all uploaded files (with pagination for 10+ files)
-- /distributezip browse - Browse files using interactive file browser
-- /distributezip get [file_name] - Get a specific file (use browse for easier selection)
-- /distributezip remove [file_name] - Remove a file (moderator only, use browse for easier selection)
+- /distribute upload [attachment] [required_by] - Upload and DM files (SS participants)
+- /distribute list / browse / get - Download shared files (SS participants)
+- /distribute remove - Remove a file (moderator only)
 
 DESIGN DECISIONS:
 - ThreadPoolExecutor: All file I/O operations run in executor to avoid blocking event loop
@@ -40,7 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
-from .owner_utils import owner_check, get_owner_mention, is_owner
+from .secret_santa_checks import mod_check, participant_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
 from .utils import autocomplete_safety_wrapper
@@ -496,6 +494,41 @@ class DistributeZipCog(commands.Cog):
             members = [member for member in guild.members if not member.bot]
             return members, "all server members"
 
+    async def _distribute_uploaded_files(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        successful_uploads: List[Dict[str, Any]],
+        requester_user: disnake.User,
+        *,
+        status_message: Optional[str] = None,
+    ) -> None:
+        """Distribute saved uploads, or explain when DM/server context is missing."""
+        if not successful_uploads:
+            return
+        if not inter.guild:
+            lines = "\n".join(f"• {u['file_name']}" for u in successful_uploads)
+            await self._safe_edit_response(
+                inter,
+                content=(
+                    f"✅ **File(s) saved** ({len(successful_uploads)})\n{lines}\n\n"
+                    "📤 To distribute, run upload again in a **server channel** "
+                    "(the bot needs a server to know who receives the file)."
+                ),
+            )
+            return
+        if status_message:
+            await self._safe_edit_response(inter, content=status_message)
+        for index, file_info in enumerate(successful_uploads):
+            await self._distribute_file(
+                inter,
+                file_info["file_id"],
+                file_info["file_name"],
+                file_info["file_path"],
+                requester_user,
+            )
+            if index + 1 < len(successful_uploads):
+                await asyncio.sleep(1)
+
     async def _distribute_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -522,24 +555,15 @@ class DistributeZipCog(commands.Cog):
             )
             return
         guild = inter.guild
-        
-        # If in DM, try to find a guild from the bot (use first available guild)
         if not guild:
-            # In DM context - find a guild to distribute to
-            bot_guilds = [g for g in self.bot.guilds if g]
-            if not bot_guilds:
-                await self._safe_followup_send(inter, 
-                    content="❌ **Cannot distribute in DM**\n\n"
-                           "✅ File has been uploaded and saved.\n"
-                           "📤 To distribute: Use `/distributezip upload` in a server channel.\n\n"
-                           "💡 **Tip:** Files uploaded in DMs are stored and can be distributed later from a server.",
-                    ephemeral=True
-                )
-                return
-            
-            # Use first available guild (or could let user choose, but simpler to use first)
-            guild = bot_guilds[0]
-            self.logger.info(f"DM upload detected, using guild {guild.id} ({guild.name}) for distribution")
+            await self._safe_followup_send(
+                inter,
+                content="❌ **Cannot distribute from a DM**\n\n"
+                        "✅ The file is saved on the bot.\n"
+                        "📤 Run the upload command again **in a server channel** to distribute to members.",
+                ephemeral=True,
+            )
+            return
         
         # Get requester as Member if possible (for DM context, use guild.get_member)
         # required_by is a User object (from upload_file), try to get Member from guild
@@ -770,18 +794,13 @@ class DistributeZipCog(commands.Cog):
         )
 
     # ============ COMMANDS ============
-    # Commands will be registered under /ss distribute via cog_load hook
-    # Keep legacy /distributezip for backward compatibility (deprecated)
-    
-    @commands.slash_command(name="distributezip", description="Zip file distribution management")
-    async def distributezip(self, inter: disnake.ApplicationCommandInteraction):
-        """Main distributezip command group (legacy - use /ss distribute instead)"""
-        await inter.response.send_message(
-            "⚠️ This command is deprecated. Please use `/ss distribute` commands instead.",
-            ephemeral=True
-        )
+    @commands.slash_command(name="distribute", description="Share files with Secret Santa participants")
+    async def distribute_root(self, inter: disnake.ApplicationCommandInteraction):
+        """File distribution for active SS participants"""
+        pass
 
-    @distributezip.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
+    @distribute_root.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
+    @participant_check()
     async def upload_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -796,19 +815,6 @@ class DistributeZipCog(commands.Cog):
         """
         # Defer with ephemeral for privacy (only uploader sees the response)
         await inter.response.defer(ephemeral=True)
-        
-        # Permission check
-        if not is_owner(inter):
-            owner_name = get_owner_mention(inter.bot)
-            await self._safe_edit_response(inter,
-                content=f"❌ **Permission Denied**\n"
-                       f"Only {owner_name} can upload files for distribution.\n"
-                       f"\n"
-                       f"💡 **Note:** This restriction only applies to file uploads.\n"
-                       f"Secret Santa commands (`/ss ask_giftee`, `/ss reply_santa`, etc.) are **NOT affected** and work normally for all participants."
-            )
-            self.logger.warning(f"User {inter.author.name} ({inter.author.id}) attempted to upload file but is not authorized")
-            return
         
         # Get all attachments - Discord allows attaching multiple files to slash commands
         attachments = []
@@ -932,26 +938,17 @@ class DistributeZipCog(commands.Cog):
         
         # Send summary
         if successful_uploads and not failed_uploads:
-            # All successful
             if len(successful_uploads) == 1:
-                file_info = successful_uploads[0]
-                await self._safe_edit_response(inter,
-                    content=f"✅ File '{file_info['file_name']}' uploaded successfully!\n📤 Starting distribution..."
-                )
-                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
+                name = successful_uploads[0]["file_name"]
+                status = f"✅ File '{name}' uploaded successfully!\n📤 Starting distribution..."
             else:
-                # Multiple files - show summary then distribute all
                 summary = f"✅ **{len(successful_uploads)} files uploaded successfully!**\n\n"
                 for file_info in successful_uploads:
                     summary += f"• {file_info['file_name']}\n"
-                summary += "\n📤 Starting distribution for all files..."
-                await self._safe_edit_response(inter, content=summary)
-                
-                # Distribute each file
-                for file_info in successful_uploads:
-                    await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
-                    # Small delay between distributions to avoid overwhelming
-                    await asyncio.sleep(1)
+                status = summary + "\n📤 Starting distribution for all files..."
+            await self._distribute_uploaded_files(
+                inter, successful_uploads, requester_user, status_message=status
+            )
         
         elif successful_uploads and failed_uploads:
             # Partial success
@@ -970,11 +967,7 @@ class DistributeZipCog(commands.Cog):
                     summary += f"• {fail_info['filename']}: {fail_info['error']}\n"
             
             await self._safe_edit_response(inter, content=summary)
-            
-            # Distribute successful files
-            for file_info in successful_uploads:
-                await self._distribute_file(inter, file_info['file_id'], file_info['file_name'], file_info['file_path'], requester_user)
-                await asyncio.sleep(1)
+            await self._distribute_uploaded_files(inter, successful_uploads, requester_user)
         
         else:
             # All failed
@@ -983,7 +976,8 @@ class DistributeZipCog(commands.Cog):
                 summary += f"• {fail_info['filename']}: {fail_info['error']}\n"
             await self._safe_edit_response(inter, content=summary)
 
-    @distributezip.sub_command(name="list", description="List all uploaded files")
+    @distribute_root.sub_command(name="list", description="List all uploaded files")
+    @participant_check()
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
         """List all uploaded files"""
         await inter.response.defer(ephemeral=True)
@@ -1030,7 +1024,8 @@ class DistributeZipCog(commands.Cog):
             embed.set_footer(text=f"Total: {len(sorted_files)} file(s)")
             await self._safe_edit_response(inter, embed=embed)
     
-    @distributezip.sub_command(name="browse", description="Browse and select files using an interactive file browser")
+    @distribute_root.sub_command(name="browse", description="Browse and select files using an interactive file browser")
+    @participant_check()
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):
         """Browse files using an interactive file browser"""
         await inter.response.defer(ephemeral=True)
@@ -1040,12 +1035,13 @@ class DistributeZipCog(commands.Cog):
             embed.add_field(name="Size", value=f"{file_data.get('size', 0) / 1024 / 1024:.2f} MB", inline=True)
             embed.add_field(name="Required By", value="🎅 A Secret Santa", inline=True)
             embed.add_field(name="Uploaded", value=f"<t:{int(file_data.get('uploaded_at', 0))}:R>", inline=False)
-            embed.set_footer(text="Use /distributezip get [file_name] to download this file")
+            embed.set_footer(text="Use /distribute get to download this file")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         
         await self._handle_file_browser(inter, "browse", handler)
 
-    @distributezip.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
+    @distribute_root.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
+    @participant_check()
     async def get_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -1070,7 +1066,7 @@ class DistributeZipCog(commands.Cog):
         result = self._find_file_by_name(file_name)
         if not result:
             await self._safe_edit_response(inter,
-                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distributezip get` (without file_name) to browse all files!"
+                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distribute get` (without file_name) to browse all files!"
             )
             return
         
@@ -1087,8 +1083,8 @@ class DistributeZipCog(commands.Cog):
         file = disnake.File(file_path, filename=filename)
         await self._safe_edit_response(inter, embed=embed, file=file)
 
-    @distributezip.sub_command(name="remove", description="Remove a file (owner only, use browse for easier selection)")
-    @owner_check()
+    @distribute_root.sub_command(name="remove", description="Remove a file (mod only, use browse for easier selection)")
+    @mod_check()
     async def remove_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -1131,7 +1127,7 @@ class DistributeZipCog(commands.Cog):
         result = self._find_file_by_name(file_name)
         if not result:
             await self._safe_edit_response(inter,
-                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distributezip remove` (without file_name) to browse all files!"
+                content=f"❌ File '{file_name}' not found\n\n💡 Try `/distribute remove` (without file_name) to browse all files!"
             )
             return
         
