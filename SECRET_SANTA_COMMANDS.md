@@ -1,7 +1,7 @@
 # Secret Santa Commands Reference
 
-## 🔧 MODERATOR/OWNER COMMANDS
-*(Requires moderator role or owner permissions)*
+## 🔧 MODERATOR COMMANDS
+*(Server administrator or `DISCORD_MODERATOR_ROLE_ID` from config)*
 
 ### Event Management
 - `/ss start [announcement_message_id] [role_id]`

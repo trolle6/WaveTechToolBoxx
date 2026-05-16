@@ -5,7 +5,7 @@ FEATURES:
 - 📦 Upload and distribute files (any type: ZIP, JAR, RAR, etc. - up to 25MB)
 - 👤 Track who required the file
 - 📨 Automatically send files to Secret Santa participants (if active) or all server members via DM
-- 🔒 Permission checks (only authorized users can upload)
+- 🔒 Permission checks (mods/admins can upload)
 - 💾 Persistent storage of file metadata with atomic writes
 - 💻 Cross-platform compatible (Windows, Linux, macOS)
 - ⚡ Non-blocking file I/O operations (ThreadPoolExecutor)
@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
-from .owner_utils import owner_check, get_owner_mention, is_owner
+from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
 from .utils import autocomplete_safety_wrapper
@@ -808,6 +808,7 @@ class DistributeZipCog(commands.Cog):
         )
 
     @distributezip.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
+    @mod_check()
     async def upload_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -822,19 +823,6 @@ class DistributeZipCog(commands.Cog):
         """
         # Defer with ephemeral for privacy (only uploader sees the response)
         await inter.response.defer(ephemeral=True)
-        
-        # Permission check
-        if not is_owner(inter):
-            owner_name = get_owner_mention(inter.bot)
-            await self._safe_edit_response(inter,
-                content=f"❌ **Permission Denied**\n"
-                       f"Only {owner_name} can upload files for distribution.\n"
-                       f"\n"
-                       f"💡 **Note:** This restriction only applies to file uploads.\n"
-                       f"Secret Santa commands (`/ss ask_giftee`, `/ss reply_santa`, etc.) are **NOT affected** and work normally for all participants."
-            )
-            self.logger.warning(f"User {inter.author.name} ({inter.author.id}) attempted to upload file but is not authorized")
-            return
         
         # Get all attachments - Discord allows attaching multiple files to slash commands
         attachments = []
@@ -1100,8 +1088,8 @@ class DistributeZipCog(commands.Cog):
         file = disnake.File(file_path, filename=filename)
         await self._safe_edit_response(inter, embed=embed, file=file)
 
-    @distributezip.sub_command(name="remove", description="Remove a file (owner only, use browse for easier selection)")
-    @owner_check()
+    @distributezip.sub_command(name="remove", description="Remove a file (mod only, use browse for easier selection)")
+    @mod_check()
     async def remove_file(
         self,
         inter: disnake.ApplicationCommandInteraction,

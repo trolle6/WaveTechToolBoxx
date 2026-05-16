@@ -23,26 +23,40 @@ def _get_member_from_inter(inter: disnake.ApplicationCommandInteraction) -> Opti
     return inter.guild.get_member(inter.author.id)
 
 
+def _has_mod_access(member: disnake.Member, bot: disnake.Client) -> bool:
+    """True if member is guild admin or has DISCORD_MODERATOR_ROLE_ID from config."""
+    if member.guild_permissions.administrator:
+        return True
+    config = getattr(bot, "config", None)
+    if not config:
+        return False
+    mod_role_id = getattr(config, "DISCORD_MODERATOR_ROLE_ID", None)
+    if mod_role_id is None:
+        return False
+    if not isinstance(mod_role_id, int):
+        try:
+            mod_role_id = int(mod_role_id)
+        except (TypeError, ValueError):
+            return False
+    return any(r.id == mod_role_id for r in member.roles)
+
+
+def is_moderator(inter: "disnake.ApplicationCommandInteraction") -> bool:
+    """Return True if the user can run mod-gated commands (admin or mod role)."""
+    member = _get_member_from_inter(inter)
+    return _has_mod_access(member, inter.bot) if member else False
+
+
 def mod_check():
-    """Check if user is mod or admin."""
+    """Check if user is server admin or has the configured moderator role."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         member = _get_member_from_inter(inter)
-        if not member:
-            return False
-
-        # Check administrator permission
-        if member.guild_permissions.administrator:
+        if member and _has_mod_access(member, inter.bot):
             return True
-
-        # Check config for mod role
-        try:
-            if hasattr(inter.bot, 'config') and hasattr(inter.bot.config, 'DISCORD_MODERATOR_ROLE_ID'):
-                mod_role_id = inter.bot.config.DISCORD_MODERATOR_ROLE_ID
-                if mod_role_id and any(r.id == mod_role_id for r in member.roles):
-                    return True
-        except (AttributeError, TypeError):
-            pass
-
+        if hasattr(inter.bot, "logger"):
+            inter.bot.logger.warning(
+                f"User {inter.author.name} ({inter.author.id}) attempted to use mod-only command"
+            )
         return False
 
     return commands.check(predicate)

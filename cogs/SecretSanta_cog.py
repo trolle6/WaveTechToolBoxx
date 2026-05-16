@@ -9,13 +9,13 @@ FEATURES:
 - 📊 Multi-year history viewing (by year or by user)
 - 🔒 Archive protection (prevents accidental data loss)
 
-COMMANDS (Owner — run the event):
+COMMANDS (Moderator — run the event):
 - /ss start [message] — Signup message (reactions = join). Optional: role, shuffle, end (times use your Discord language timezone, else UTC)
 - /ss status — Who joined, assignments done?, scheduled shuffle/stop
 - /ss shuffle — Pair people now (cancels a pending auto-shuffle)
 - /ss stop — Archive the year and end the event
-- /ss participants — Participant list (owner)
-- /ss view_gifts / /ss view_comms — Oversight during event (owner)
+- /ss participants — Participant list (mod)
+- /ss view_gifts / /ss view_comms — Oversight during event (mod)
 
 COMMANDS (Participant):
 - /ss ask_giftee [question] - Ask your giftee anonymously (includes instant reply button)
@@ -31,11 +31,11 @@ COMMANDS (Anyone):
 - /ss history — Past years (overview or one year)
 - /ss edit_gift — Fix your own gift text in an old archive
 
-COMMANDS (Owner — archives):
+COMMANDS (Moderator — archives):
 - /ss user_history @user — Full history for one person
 - /ss delete_year / /ss restore_year / /ss list_backups — Archive maintenance
 
-COMMANDS (Owner — files):
+COMMANDS (Moderator — files):
 - /ss distribute * — Modpack/file DM distribution (see DistributeZip cog)
 
 SAFETY FEATURES:
@@ -80,7 +80,6 @@ from zoneinfo import ZoneInfo
 import disnake
 from disnake.ext import commands
 
-from .owner_utils import owner_check, get_owner_mention
 from .utils import autocomplete_safety_wrapper
 
 # Import from modular components
@@ -99,6 +98,7 @@ from .secret_santa_views import (
 from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
+    mod_check,
     safe_display_name,
 )
 
@@ -1393,7 +1393,7 @@ class SecretSantaCog(commands.Cog):
     # 8. Build new_event dict → 9. Under lock: if event already active return; else state.current_year + state.current_event = new_event; save
     # 10. Send join DMs to participants → 11. Edit response with success + schedule info → 12. Optional Discord log
     @ss_root.sub_command(name="start", description="Start Secret Santa (react on message to join)")
-    @owner_check()
+    @mod_check()
     async def ss_start(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -2012,8 +2012,8 @@ class SecretSantaCog(commands.Cog):
             self.logger.debug(f"Combined date/time parsing error: {e}")
             return None
 
-    @ss_root.sub_command(name="status", description="Event dashboard: participants, schedule, assignments (owner)")
-    @owner_check()
+    @ss_root.sub_command(name="status", description="Event dashboard: participants, schedule, assignments (mod)")
+    @mod_check()
     async def ss_status(self, inter: disnake.ApplicationCommandInteraction):
         """Show current event state for the organizer"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2089,8 +2089,8 @@ class SecretSantaCog(commands.Cog):
 
         await self._safe_edit_response(inter, embed=embed)
 
-    @ss_root.sub_command(name="shuffle", description="Pair participants and DM assignments (owner)")
-    @owner_check()
+    @ss_root.sub_command(name="shuffle", description="Pair participants and DM assignments (mod)")
+    @mod_check()
     async def ss_shuffle(self, inter: disnake.ApplicationCommandInteraction):
         """Make assignments now (cancels a pending auto-shuffle from /ss start)"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2111,8 +2111,8 @@ class SecretSantaCog(commands.Cog):
             # Error already sent to inter
             pass
 
-    @ss_root.sub_command(name="stop", description="End event and archive this year (owner)")
-    @owner_check()
+    @ss_root.sub_command(name="stop", description="End event and archive this year (mod)")
+    @mod_check()
     async def ss_stop(self, inter: disnake.ApplicationCommandInteraction):
         """Stop event"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2176,8 +2176,8 @@ class SecretSantaCog(commands.Cog):
             else:
                 await self._safe_edit_response(inter, content=f"✅ Event stopped and archived → `{saved_filename}`")
 
-    @ss_root.sub_command(name="participants", description="List who joined (owner)")
-    @owner_check()
+    @ss_root.sub_command(name="participants", description="List who joined (mod)")
+    @mod_check()
     async def ss_participants(self, inter: disnake.ApplicationCommandInteraction):
         """Show participants"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2932,8 +2932,8 @@ class SecretSantaCog(commands.Cog):
         
         await self._safe_edit_response(inter, embed=embed)
 
-    @ss_root.sub_command(name="view_gifts", description="See all gift submissions (owner, spoilers)")
-    @owner_check()
+    @ss_root.sub_command(name="view_gifts", description="See all gift submissions (mod, spoilers)")
+    @mod_check()
     async def ss_view_gifts(self, inter: disnake.ApplicationCommandInteraction):
         """Show gift submissions"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -2989,8 +2989,8 @@ class SecretSantaCog(commands.Cog):
 
         await self._safe_edit_response(inter, embed=embed)
 
-    @ss_root.sub_command(name="view_comms", description="See anonymous Q&A threads (owner, spoilers)")
-    @owner_check()
+    @ss_root.sub_command(name="view_comms", description="See anonymous Q&A threads (mod, spoilers)")
+    @mod_check()
     async def ss_view_comms(self, inter: disnake.ApplicationCommandInteraction):
         """Show communication threads"""
         if not await self._safe_defer(inter, ephemeral=True):
@@ -3253,7 +3253,7 @@ class SecretSantaCog(commands.Cog):
         return await self.autocomplete_year_history(inter, string)
 
     @ss_root.sub_command(name="user_history", description="View a specific user's Secret Santa history across all years")
-    @owner_check()
+    @mod_check()
     async def ss_user_history(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3411,7 +3411,7 @@ class SecretSantaCog(commands.Cog):
         await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="delete_year", description="🗑️ Delete an archive year (CAREFUL!)")
-    @owner_check()
+    @mod_check()
     async def ss_delete_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3527,7 +3527,7 @@ class SecretSantaCog(commands.Cog):
         return await self.autocomplete_year_delete(inter, string)
 
     @ss_root.sub_command(name="restore_year", description="♻️ Restore a year from backups")
-    @owner_check()
+    @mod_check()
     async def ss_restore_year(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3625,6 +3625,7 @@ class SecretSantaCog(commands.Cog):
         pass
     
     @ss_distribute.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
+    @mod_check()
     async def ss_distribute_upload(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3674,8 +3675,8 @@ class SecretSantaCog(commands.Cog):
         else:
             await self._safe_edit_response(inter, content="❌ DistributeZip cog not available")
     
-    @ss_distribute.sub_command(name="remove", description="Remove a file (owner only, use browse for easier selection)")
-    @owner_check()
+    @ss_distribute.sub_command(name="remove", description="Remove a file (mod only, use browse for easier selection)")
+    @mod_check()
     async def ss_distribute_remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -3706,7 +3707,7 @@ class SecretSantaCog(commands.Cog):
         return []
     
     @ss_root.sub_command(name="list_backups", description="📋 View all backed-up years")
-    @owner_check()
+    @mod_check()
     async def ss_list_backups(self, inter: disnake.ApplicationCommandInteraction):
         """List all years in the backups folder (admin only)"""
         if not await self._safe_defer(inter, ephemeral=True):
