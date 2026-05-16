@@ -1582,9 +1582,11 @@ class VoiceProcessingCog(commands.Cog):
             while not self._shutdown.is_set():
                 await asyncio.sleep(300)  # Every 5 minutes
 
-                # Cleanup cache
-                if hasattr(self.cache, 'cleanup'):
+                # Expire stale LRU entries (access path also evicts; this catches cold keys)
+                if hasattr(self.cache, "cleanup"):
                     await self.cache.cleanup()
+                if hasattr(self.pronunciation_cache, "cleanup"):
+                    await self.pronunciation_cache.cleanup()
 
                 # Cleanup message deduplication (keep most recent 500 entries)
                 async with self._processed_messages_lock:
@@ -1648,16 +1650,6 @@ class VoiceProcessingCog(commands.Cog):
             pass
         except Exception as e:
             self.logger.error(f"Cleanup loop error: {e}", exc_info=True)
-
-    async def daily_maintenance(self):
-        """Called by main at midnight UTC — clear expired cache entries."""
-        if not self.enabled:
-            return
-        if hasattr(self, "cache") and hasattr(self.cache, "cleanup"):
-            await self.cache.cleanup()
-        if hasattr(self, "pronunciation_cache") and hasattr(self.pronunciation_cache, "cleanup"):
-            await self.pronunciation_cache.cleanup()
-        self.logger.debug("Voice: daily cache cleanup done")
 
     # ============ COG LIFECYCLE ============
     async def cog_load(self):

@@ -540,13 +540,11 @@ bot.send_to_discord_channel = send_to_discord_channel
 
 
 # ============ DAILY MAINTENANCE ============
-SECONDS_PER_DAY_MAINTENANCE = 86400  # 24 hours
-
-
 async def daily_maintenance_loop():
     """
-    Run once per day at midnight UTC: cache cleanups and optional cog maintenance.
-    Cogs can implement daily_maintenance() to clear caches or soft-reset state.
+    Run once per day at midnight UTC. Cogs may implement async daily_maintenance()
+    for work that should not run on a tight loop (e.g. DALL-E image URL cache).
+    Voice uses its own 5-minute cleanup task instead.
     """
     while True:
         now = datetime.now(timezone.utc)
@@ -554,7 +552,7 @@ async def daily_maintenance_loop():
         next_midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
         wait_seconds = (next_midnight - now).total_seconds()
         if wait_seconds <= 0:
-            wait_seconds = SECONDS_PER_DAY_MAINTENANCE
+            wait_seconds = SECONDS_PER_DAY
         logger.info(f"Daily maintenance next at midnight UTC (in {wait_seconds/3600:.1f}h)")
         await asyncio.sleep(wait_seconds)
         logger.info("Daily maintenance (midnight UTC) — running cog cleanups")
@@ -603,13 +601,8 @@ async def on_ready():
         
         bot.ready_once = True
     else:
-        # Reconnection - update connection start
+        # Reconnect after disconnect: on_resumed logs downtime; only track connect time here.
         stats["last_connect"] = now
-        if stats["last_disconnect"]:
-            # Calculate uptime since last disconnect
-            downtime = now - stats["last_disconnect"]
-            if downtime > 60:
-                logger.info(f"📊 Connection restored after {downtime:.1f}s downtime")
 
 
 @bot.event
@@ -631,9 +624,6 @@ async def on_disconnect():
         # Record this connection period (start, end)
         stats["connection_periods"].append((stats["last_connect"], now))
         
-        # Track longest uptime
-        # Note: This grows indefinitely, but it's just one float (8 bytes) so it's fine even over millions of years
-        # The value itself doesn't affect calculations, it's just for logging/monitoring
         if uptime > stats["longest_uptime"]:
             stats["longest_uptime"] = uptime
         
@@ -702,14 +692,11 @@ async def on_disconnect():
             f"🚨 HIGH DISCONNECTION RATE: {stats['disconnect_count_24h']} disconnects in 24h "
             f"(uptime: {uptime_percent:.1f}%)"
         )
-        try:
-            await send_to_discord_log(
-                f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
-                f"(uptime: {uptime_percent:.1f}%)",
-                "WARNING"
-            )
-        except Exception:
-            pass
+        await send_to_discord_log(
+            f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
+            f"(uptime: {uptime_percent:.1f}%)",
+            "WARNING"
+        )
 
 
 @bot.event
@@ -735,13 +722,10 @@ async def on_resumed():
             logger.warning(f"⚠️ Bot reconnected after {duration:.1f}s downtime")
         else:
             logger.error(f"🚨 Bot reconnected after {duration:.1f}s - very long disconnection!")
-            try:
-                await send_to_discord_log(
-                    f"Long disconnection: {duration:.1f}s - may have interrupted operations",
-                    "ERROR"
-                )
-            except Exception:
-                pass
+            await send_to_discord_log(
+                f"Long disconnection: {duration:.1f}s - may have interrupted operations",
+                "ERROR"
+            )
         
         stats["last_disconnect"] = None
     else:
