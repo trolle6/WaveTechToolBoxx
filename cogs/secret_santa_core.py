@@ -563,7 +563,7 @@ class SecretSantaCore(commands.Cog):
             embed = self._error_embed(
                 title="⏳ No giftee yet",
                 description=(
-                    "Wait for `/ss shuffle` — you'll get a DM with an @mention of your match."
+                    "Wait for `/ss shuffle` — you'll get a DM with who your match is."
                 ),
             )
             await self._safe_edit_response(inter, embed=embed)
@@ -612,7 +612,7 @@ class SecretSantaCore(commands.Cog):
             await self._save_async()
     
     def _format_dm_question(self, rewritten_question: str, year: int) -> str:
-        """DM to giftee — anonymous question from their Santa."""
+        """DM to giftee — speak to *you*; never @mention the reader (no self-ping)."""
         return (
             f"❓ **Secret Santa {year}** — question from your Santa\n\n"
             f"*\"{rewritten_question}\"*\n\n"
@@ -620,39 +620,42 @@ class SecretSantaCore(commands.Cog):
         )
 
     def _format_dm_reply(self, rewritten_reply: str, year: int, giftee_id: Optional[int] = None) -> str:
-        """DM to Santa — match's answer."""
-        who = f"<@{giftee_id}>" if giftee_id else "Your match"
+        """DM to Santa — @mention the giftee once; Santa is always *you*, never @mentioned."""
+        match_line = (
+            f"<@{giftee_id}> replied:\n\n" if giftee_id else "Your match replied:\n\n"
+        )
         return (
-            f"🎅 **Secret Santa {year}** — {who} replied\n\n"
+            f"🎅 **Secret Santa {year}**\n\n"
+            f"{match_line}"
             f"*\"{rewritten_reply}\"*\n\n"
             f"Ask another question: `/ss ask_giftee`"
         )
 
     def _get_join_message(self, year: int) -> str:
-        """DM when someone joins (react) — brief, participant-focused."""
+        """DM when someone joins — *you* only; no @mentions until shuffle."""
         return (
             f"🎄 **Secret Santa {year}** — you're in\n\n"
-            f"You're signed up. After the organizer runs the shuffle, you'll get **another DM here** "
-            f"with an @mention of your match.\n\n"
+            f"You're signed up. After the shuffle, you'll get **another DM here** "
+            f"with who your match is.\n\n"
             f"**Useful now:**\n"
             f"• `/ss wishlist add` — ideas for your Santa\n"
             f"• `/ss wishlist view` — see your list\n\n"
-            f"Don't post your match publicly once you know who it is — keep it secret."
+            f"Keep your match secret once you know who it is."
         )
 
     def _get_assignment_message(self, year: int, receiver_id: int, receiver_name: str) -> str:
-        """DM after shuffle — who your match is and what to do next."""
-        mention = f"<@{receiver_id}>"
+        """DM to Santa (giver): one @mention of giftee (receiver); never @mention the Santa."""
+        match = f"<@{receiver_id}>"
         return (
             f"🎁 **Secret Santa {year}** — your match\n\n"
-            f"You're Secret Santa for: {mention}\n\n"
+            f"You're Secret Santa for **{match}**.\n\n"
             f"**Commands:**\n"
-            f"• `/ss giftee` — {mention}'s wishlist\n"
-            f"• `/ss ask_giftee` — ask {mention} (anonymous)\n"
-            f"• `/ss wishlist add` / `view` — your own wishlist\n"
+            f"• `/ss giftee` — your match's wishlist\n"
+            f"• `/ss ask_giftee` — ask your match (anonymous)\n"
+            f"• `/ss wishlist add` / `view` — your wishlist\n"
             f"• `/ss submit_gift` — log what you sent (optional)\n\n"
-            f"{mention} answers with **Reply to Santa** on the question DM.\n"
-            f"Don't reveal {mention} in the server. Have fun!"
+            f"Your match can answer with **Reply to Santa** on question DMs.\n"
+            f"Don't reveal who your match is in the server."
         )
     
     def _get_event_end_message(self, year: int) -> str:

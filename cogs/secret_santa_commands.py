@@ -1484,12 +1484,12 @@ class SecretSantaCommandsMixin:
         giftee_wishlist = wishlists.get(receiver_id)
         if not isinstance(giftee_wishlist, list):
             giftee_wishlist = []
-        mention = f"<@{receiver_id}>"
+        match = f"<@{receiver_id}>"
         if not giftee_wishlist:
             embed = disnake.Embed(
-                title=f"📋 Wishlist — {mention}",
+                title=f"📋 Your match's wishlist",
                 description=(
-                    f"{mention} hasn't added wishlist items yet.\n\n"
+                    f"**{match}** hasn't added items yet.\n\n"
                     f"Ask with `/ss ask_giftee`."
                 ),
                 color=disnake.Color.blue(),
@@ -1497,8 +1497,8 @@ class SecretSantaCommandsMixin:
             embed.set_footer(text="Check back later with `/ss giftee`.")
         else:
             embed = disnake.Embed(
-                title=f"📋 Wishlist — {mention}",
-                description=f"{mention} has **{len(giftee_wishlist)}** item{'s' if len(giftee_wishlist) != 1 else ''}:",
+                title="📋 Your match's wishlist",
+                description=f"**{match}** — **{len(giftee_wishlist)}** item{'s' if len(giftee_wishlist) != 1 else ''}:",
                 color=disnake.Color.gold(),
             )
             wishlist_text = "\n".join(f"{i+1}. {item}" for i, item in enumerate(giftee_wishlist))
