@@ -36,7 +36,27 @@ __all__ = [
     'LRUCache',
     'JsonFile',
     'RequestCache',
+    'safe_filename_in_dir',
 ]
+
+
+def safe_filename_in_dir(filename: str, directory: Path) -> Optional[Path]:
+    """
+    Resolve a stored filename to a path guaranteed under ``directory``.
+    Blocks path traversal (``../``, absolute paths, etc.).
+    """
+    if not filename or not str(filename).strip():
+        return None
+    name = Path(filename).name
+    if not name or name in (".", ".."):
+        return None
+    try:
+        root = directory.resolve()
+        resolved = (root / name).resolve()
+        resolved.relative_to(root)
+        return resolved
+    except (ValueError, OSError):
+        return None
 
 
 def autocomplete_safety_wrapper(func):

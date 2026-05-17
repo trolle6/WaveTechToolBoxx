@@ -11,6 +11,8 @@ from typing import Callable, Awaitable, List, Optional, Tuple
 
 import disnake
 
+from .utils import safe_filename_in_dir
+
 
 def create_file_browser_view(
     files_dir: Path,
@@ -97,8 +99,8 @@ class FileSelectMenu(disnake.ui.Select):
         if not filename:
             await inter.response.send_message("❌ File metadata missing filename", ephemeral=True)
             return
-        file_path = view.files_dir / filename
-        if not file_path.exists():
+        file_path = safe_filename_in_dir(filename, view.files_dir)
+        if file_path is None or not file_path.exists():
             display_name = file_data.get("name") or filename
             await inter.response.send_message(
                 f"❌ File '{display_name}' not found on disk",

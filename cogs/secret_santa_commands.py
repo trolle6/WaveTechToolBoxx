@@ -358,7 +358,7 @@ class SecretSantaCommandsMixin:
             # HISTORY LOADING: Load all past Secret Santa events from archive files (run in executor - sync file I/O)
             # CRITICAL: Exclude current year from history - we're creating a NEW event for this year
             current_year = self.state.get('current_year', dt.date.today().year)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             history, available_years = await loop.run_in_executor(
                 self._executor,
                 lambda: load_history_from_archives(ARCHIVE_DIR, exclude_years=[current_year], logger=self.logger)
@@ -798,7 +798,7 @@ class SecretSantaCommandsMixin:
             async with self._lock:
                 event.pop("scheduled_stop_time", None)
                 event.pop("scheduled_stop_by_user_id", None)
-                self._save()
+                await self._save_async()
             cancelled_scheduled = True
             self.logger.info(f"Manual stop cancelled scheduled stop (was scheduled for <t:{int(scheduled_time)}:F>)")
 
@@ -1022,7 +1022,7 @@ class SecretSantaCommandsMixin:
                 
                 # Save archive
                 async with self._lock:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     await loop.run_in_executor(
                         self._executor,
                         save_json,
@@ -1201,7 +1201,7 @@ class SecretSantaCommandsMixin:
             
             # Save updated archive (run in executor to avoid blocking event loop)
             async with self._lock:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     self._executor,
                     lambda: save_json(archive_path, archive_data, self.logger)

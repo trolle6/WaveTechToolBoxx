@@ -38,10 +38,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
-from .secret_santa_checks import mod_check, participant_check
+from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
-from .utils import autocomplete_safety_wrapper
+from .utils import autocomplete_safety_wrapper, safe_filename_in_dir
 
 # Paths
 ROOT = Path(__file__).parent
@@ -314,10 +314,39 @@ class DistributeZipCog(commands.Cog):
         """Autocomplete for remove file_name parameter."""
         return await self._autocomplete_file_name(inter, string)
     
+    async def _require_participant(self, inter: disnake.ApplicationCommandInteraction) -> bool:
+        """Active Secret Santa participant check (call after defer)."""
+        cog = self.bot.get_cog("SecretSantaCog")
+        if not cog:
+            await self._safe_edit_response(
+                inter, content="❌ Secret Santa is not loaded — cannot verify participant status."
+            )
+            return False
+        event = getattr(cog, "state", {}).get("current_event")
+        if not event or not isinstance(event, dict) or not event.get("active"):
+            await self._safe_edit_response(
+                inter,
+                content="❌ No active Secret Santa event — only participants can use this command.",
+            )
+            return False
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict) or str(inter.author.id) not in participants:
+            await self._safe_edit_response(
+                inter,
+                content="❌ You must be signed up for the active Secret Santa event to use this command.",
+            )
+            return False
+        return True
+
     def _validate_file(self, attachment: disnake.Attachment) -> Optional[str]:
         """Validate file. Returns error message if invalid, None if valid"""
         if not attachment:
             return "❌ No attachment provided"
+        raw_name = attachment.filename or ""
+        if not raw_name.strip() or Path(raw_name).name != raw_name or ".." in Path(raw_name).parts:
+            return "❌ Invalid filename (path characters not allowed)"
+        if safe_filename_in_dir(raw_name, FILES_DIR) is None:
+            return "❌ Invalid filename"
         # Allow any file type - Discord handles file distribution regardless of format
         # Size check is the main concern (Discord's 25MB limit)
         if attachment.size > MAX_FILE_SIZE:
@@ -800,7 +829,6 @@ class DistributeZipCog(commands.Cog):
         pass
 
     @distribute_root.sub_command(name="upload", description="Upload file(s) and distribute them (any file type, up to 25MB)")
-    @participant_check()
     async def upload_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -815,7 +843,9 @@ class DistributeZipCog(commands.Cog):
         """
         # Defer with ephemeral for privacy (only uploader sees the response)
         await inter.response.defer(ephemeral=True)
-        
+        if not await self._require_participant(inter):
+            return
+
         # Get all attachments - Discord allows attaching multiple files to slash commands
         attachments = []
         
@@ -882,13 +912,28 @@ class DistributeZipCog(commands.Cog):
                 
                 # Download the file
                 file_data = await att.read()
-                file_path = FILES_DIR / att.filename
-                
+                file_path = safe_filename_in_dir(att.filename, FILES_DIR)
+                if file_path is None:
+                    failed_uploads.append({
+                        "filename": att.filename,
+                        "error": "❌ Invalid filename",
+                    })
+                    continue
+
                 # Handle filename conflicts (add timestamp if file exists)
                 if file_path.exists():
                     timestamp = int(time.time())
                     name_part = file_path.stem
-                    file_path = FILES_DIR / f"{name_part}_{timestamp}{file_path.suffix}"
+                    conflict_path = safe_filename_in_dir(
+                        f"{name_part}_{timestamp}{file_path.suffix}", FILES_DIR
+                    )
+                    if conflict_path is None:
+                        failed_uploads.append({
+                            "filename": att.filename,
+                            "error": "❌ Could not allocate safe filename",
+                        })
+                        continue
+                    file_path = conflict_path
                     self.logger.info(f"File {att.filename} already exists, saving as {file_path.name}")
                 
                 # Save the file
@@ -977,10 +1022,11 @@ class DistributeZipCog(commands.Cog):
             await self._safe_edit_response(inter, content=summary)
 
     @distribute_root.sub_command(name="list", description="List all uploaded files")
-    @participant_check()
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
         """List all uploaded files"""
         await inter.response.defer(ephemeral=True)
+        if not await self._require_participant(inter):
+            return
         files = self.metadata.get("files") or {}
         if not isinstance(files, dict):
             files = {}
@@ -1025,10 +1071,11 @@ class DistributeZipCog(commands.Cog):
             await self._safe_edit_response(inter, embed=embed)
     
     @distribute_root.sub_command(name="browse", description="Browse and select files using an interactive file browser")
-    @participant_check()
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):
         """Browse files using an interactive file browser"""
         await inter.response.defer(ephemeral=True)
+        if not await self._require_participant(inter):
+            return
         
         async def handler(interaction, file_id, file_data, file_path):
             embed = disnake.Embed(title=f"📦 {file_data.get('name')}", color=disnake.Color.blue())
@@ -1041,7 +1088,6 @@ class DistributeZipCog(commands.Cog):
         await self._handle_file_browser(inter, "browse", handler)
 
     @distribute_root.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
-    @participant_check()
     async def get_file(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -1049,7 +1095,9 @@ class DistributeZipCog(commands.Cog):
     ):
         """Get/download a specific file"""
         await inter.response.defer(ephemeral=True)
-        
+        if not await self._require_participant(inter):
+            return
+
         if not file_name or (isinstance(file_name, str) and not file_name.strip()):
             async def handler(interaction, file_id, file_data, file_path):
                 embed = self._create_file_embed(file_data)
@@ -1075,12 +1123,12 @@ class DistributeZipCog(commands.Cog):
         if not filename:
             await self._safe_edit_response(inter, content="❌ File metadata missing filename")
             return
-        file_path = FILES_DIR / filename
-        if not file_path.exists():
+        file_path = safe_filename_in_dir(filename, FILES_DIR)
+        if file_path is None or not file_path.exists():
             await self._safe_edit_response(inter, content="❌ File not found on disk")
             return
         embed = self._create_file_embed(file_data)
-        file = disnake.File(file_path, filename=filename)
+        file = disnake.File(file_path, filename=file_path.name)
         await self._safe_edit_response(inter, embed=embed, file=file)
 
     @distribute_root.sub_command(name="remove", description="Remove a file (mod only, use browse for easier selection)")
@@ -1136,9 +1184,9 @@ class DistributeZipCog(commands.Cog):
         if not filename:
             await self._safe_edit_response(inter, content="❌ File metadata missing filename")
             return
-        file_path = FILES_DIR / filename
+        file_path = safe_filename_in_dir(filename, FILES_DIR)
         try:
-            if file_path.exists():
+            if file_path and file_path.exists():
                 file_path.unlink()
             async with self._metadata_lock:
                 del self.metadata["files"][file_id]

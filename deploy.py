@@ -92,6 +92,31 @@ def check_environment():
     
     return True
 
+def check_slash_descriptions(max_len: int = 100) -> bool:
+    """Ensure Discord slash option/command descriptions are 1–100 chars."""
+    import re
+
+    pattern = re.compile(
+        r'(?:@(?:commands\.)?(?:slash_command|sub_command(?:_group)?)|commands\.Param)\s*\('
+        r'[^)]*description\s*=\s*["\']([^"\']*)["\']',
+        re.DOTALL,
+    )
+    bad = []
+    for path in Path("cogs").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for m in pattern.finditer(text):
+            desc = m.group(1).strip()
+            if not desc or len(desc) > max_len:
+                bad.append((path.name, len(desc), desc[:70]))
+    if bad:
+        print(f"❌ Slash descriptions must be 1–{max_len} characters:")
+        for name, length, preview in bad:
+            print(f"   {name}: len={length} {preview!r}")
+        return False
+    print("✅ Slash command descriptions within Discord limits")
+    return True
+
+
 def check_file_structure():
     """Check if all required files exist"""
     required_files = [
@@ -172,7 +197,8 @@ def main():
         ("Dependencies", check_dependencies),
         ("Environment", check_environment),
         ("File Structure", check_file_structure),
-        ("Permissions", check_permissions)
+        ("Slash Descriptions", check_slash_descriptions),
+        ("Permissions", check_permissions),
     ]
     
     all_passed = True
