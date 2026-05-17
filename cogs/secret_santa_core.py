@@ -5,7 +5,6 @@ from __future__ import annotations
 import aiohttp
 import asyncio
 import datetime as dt
-import random
 import time
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -558,8 +557,10 @@ class SecretSantaCore(commands.Cog):
         assignments = event.get("assignments") or {}
         if not isinstance(assignments, dict) or user_id not in assignments:
             embed = self._error_embed(
-                title="🎅 Hold your reindeer!",
-                description="You don't have a giftee yet! The organizer still needs to run the shuffle. Good things come to those who wait!"
+                title="⏳ No giftee yet",
+                description=(
+                    "Wait for `/ss shuffle` — you'll get a DM with who you're buying for."
+                ),
             )
             await self._safe_edit_response(inter, embed=embed)
             return None
@@ -607,186 +608,62 @@ class SecretSantaCore(commands.Cog):
             await self._save_async()
     
     def _format_dm_question(self, rewritten_question: str, year: int) -> str:
-        """Format a question for DM"""
-        templates = [
-            # Variation A: Curious
-            lambda q: (
-                f"❓ **Secret Santa {year} – YOUR SANTA IS CURIOUS!** ❓\n\n"
-                f"Ooh, your Santa has a question for you! They're wondering:\n\n"
-                f"*\"{q}\"*\n\n"
-                f"---\n\n"
-                f"**Want to help them solve the puzzle?**\n"
-                f"Use the **Reply to Santa** button below to answer.\n\n"
-                f"Every hint helps them find that perfect gift! 🔍"
-            ),
-            # Variation B: Clue Request
-            lambda q: (
-                f"🔍 **Secret Santa {year} – CLUE REQUEST!** 🔍\n\n"
-                f"Your Santa's on a treasure hunt for the ideal gift! They need a little direction:\n\n"
-                f"*\"{q}\"*\n\n"
-                f"---\n\n"
-                f"**Care to drop a hint?**\n"
-                f"Use the **Reply to Santa** button below.\n\n"
-                f"You're their best guide to gift-giving success! 🗺️"
-            ),
-            # Variation C: Thinking of you
-            lambda q: (
-                f"💭 **Secret Santa {year} – YOUR SANTA IS THINKING OF YOU!** 💭\n\n"
-                f"Your Santa's brainstorming gift ideas and would love your input:\n\n"
-                f"*\"{q}\"*\n\n"
-                f"---\n\n"
-                f"**Want to share your thoughts?**\n"
-                f"Use the **Reply to Santa** button below.\n\n"
-                f"They're putting so much care into finding you something special! ❤️"
-            )
-        ]
-        return random.choice(templates)(rewritten_question)
-    
+        """DM to giftee — anonymous question from their Santa."""
+        return (
+            f"❓ **Secret Santa {year}** — question from your Santa\n\n"
+            f"*\"{rewritten_question}\"*\n\n"
+            f"Answer with the **Reply to Santa** button on this message."
+        )
+
     def _format_dm_reply(self, rewritten_reply: str, year: int) -> str:
-        """Format a reply for DM"""
-        templates = [
-            # Variation A: Wrote back
-            lambda r: (
-                f"🎅 **Secret Santa {year} – YOUR GIFTEE WROTE BACK!** 🎅\n\n"
-                f"Great news! Your giftee responded:\n\n"
-                f"*\"{r}\"*\n\n"
-                f"---\n\n"
-                f"**Need more info?**\n"
-                f"Ask another question with `/ss ask_giftee`\n\n"
-                f"You're getting closer to that \"perfect gift\" moment! ✨"
-            ),
-            # Variation B: Message incoming
-            lambda r: (
-                f"💌 **Secret Santa {year} – MESSAGE INCOMING!** 💌\n\n"
-                f"Your giftee sent a reply! Here's what they said:\n\n"
-                f"*\"{r}\"*\n\n"
-                f"---\n\n"
-                f"**Ready for another question?**\n"
-                f"Use `/ss ask_giftee` to keep the conversation going!\n\n"
-                f"The clues are adding up! 🧩"
-            ),
-            # Variation C: Plot thickens
-            lambda r: (
-                f"✨ **Secret Santa {year} – THE PLOT THICKENS!** ✨\n\n"
-                f"Interesting! Your giftee just shared this:\n\n"
-                f"*\"{r}\"*\n\n"
-                f"---\n\n"
-                f"**Want to dig deeper?**\n"
-                f"Ask follow-up questions with `/ss ask_giftee`\n\n"
-                f"You're like a gift detective on a holiday case! 🕵️‍♂️🎁"
-            )
-        ]
-        return random.choice(templates)(rewritten_reply)
+        """DM to Santa — giftee's answer."""
+        return (
+            f"🎅 **Secret Santa {year}** — your giftee replied\n\n"
+            f"*\"{rewritten_reply}\"*\n\n"
+            f"Ask another question: `/ss ask_giftee`"
+        )
     
     def _get_join_message(self, year: int) -> str:
-        """Get the join message for participants"""
-        templates = [
-            # Variation A: Welcome aboard
-            lambda y: (
-                f"🎉 **Secret Santa {y} – WELCOME ABOARD!** 🎉\n\n"
-                f"You're officially on the nice list! 🎅\n\n"
-                f"Get ready for some holiday magic! We'll message you here once you've been matched with your giftee.\n\n"
-                f"In the meantime, why not add some wishlist ideas? It helps your own Santa out! 🎄"
-            ),
-            # Variation B: So glad you're here
-            lambda y: (
-                f"✨ **Secret Santa {y} – SO GLAD YOU'RE HERE!** ✨\n\n"
-                f"Welcome to this year's Secret Santa adventure!\n\n"
-                f"We'll DM you with your special assignment once the shuffle happens. The magic begins soon! ❄️\n\n"
-                f"Pro tip: Add a few wishlist items now to give your Santa a head start! 🎁"
-            ),
-            # Variation C: You're in
-            lambda y: (
-                f"❤️ **Secret Santa {y} – YOU'RE IN!** ❤️\n\n"
-                f"Yay! You've joined the holiday fun!\n\n"
-                f"Keep an eye on your DMs - we'll send your giftee assignment here when everything's ready.\n\n"
-                f"Why not sprinkle some hints on your wishlist? Your Santa will thank you! 🤫"
-            )
-        ]
-        return random.choice(templates)(year)
-    
+        """DM when someone joins (react) — brief, participant-focused."""
+        return (
+            f"🎄 **Secret Santa {year}** — you're in\n\n"
+            f"You're signed up. After the organizer runs the shuffle, you'll get **another DM here** "
+            f"with who you're buying for.\n\n"
+            f"**Useful now:**\n"
+            f"• `/ss wishlist add` — ideas for *your* Santa\n"
+            f"• `/ss wishlist view` — see your list\n\n"
+            f"Don't tell anyone who you're matched with once you know — keep it secret."
+        )
+
     def _get_assignment_message(self, year: int, receiver_id: int, receiver_name: str) -> str:
-        """Get the assignment message for a Santa"""
-        opening_messages = [
-            "🎅 **The elves have spoken!** You're the Secret Santa for **{receiver}**!",
-            "🎄 **The festive stars have aligned!** You'll be gifting **{receiver}**!",
-            "✨ **You've been matched!** Get ready to spread some joy to **{receiver}**!",
-            "🦌 **Rudolph's nose lit up for you!** You're gifting **{receiver}** this year!",
-            "🎁 **Your mission, should you choose to accept it:** Make **{receiver}**'s holiday sparkle!",
-            "❄️ **A little winter magic just paired you with** **{receiver}**!",
-            "✨ **A sprinkle of holiday magic just paired you with** **{receiver}**!",
-            "🔮 **The festive crystal ball reveals...** your giftee is **{receiver}**!",
-            "🎇 **By the power of tinsel and cheer, you shall gift** **{receiver}**!",
-            "🕯️ **The candlelight of Yule shines upon...** **{receiver}**!",
-            "🌟 **A shooting star carried your name straight to** **{receiver}**!",
-            "🧙‍♂️ **The Great Holiday Wizard has decreed:** You shall gift **{receiver}**!"
-        ]
-        
-        # Three different message templates for variety
-        templates = [
-            # Template 1: Mission-focused
-            lambda opening, rid, rname: (
-                f"🎯 **Secret Santa {year} – YOUR SPECIAL MISSION!** 🎯\n\n"
-                f"{opening}\n\n"
-                f"---\n\n"
-                f"**Your giftee:** <@{rid}> ({rname})\n\n"
-                f"Let the gift planning begin! Check their wishlist with `/ss giftee` and remember... shhh, it's a secret! 🤫"
-            ),
-            # Template 2: Adventure-focused
-            lambda opening, rid, rname: (
-                f"🎁 **Secret Santa {year} – YOUR GIFTING ADVENTURE!** 🎁\n\n"
-                f"{opening}\n\n"
-                f"---\n\n"
-                f"**Your giftee:** <@{rid}> ({rname})\n\n"
-                f"Ready to make their holiday magical? Start by checking `/ss giftee` to see what they're hoping for! The journey begins now! ✨"
-            ),
-            # Template 3: Magic-focused
-            lambda opening, rid, rname: (
-                f"✨ **Secret Santa {year} – THE MAGIC BEGINS!** ✨\n\n"
-                f"{opening}\n\n"
-                f"---\n\n"
-                f"**Your giftee:** <@{rid}> ({rname})\n\n"
-                f"Time to work your Santa magic! Peek at their wishlist with `/ss giftee` and start planning something amazing. Keep it secret, keep it safe! 🎄"
-            )
-        ]
-        
-        opening = random.choice(opening_messages).format(receiver=f'<@{receiver_id}> ({receiver_name})')
-        return random.choice(templates)(opening, receiver_id, receiver_name)
+        """DM after shuffle — who your giftee is and what to do next."""
+        return (
+            f"🎁 **Secret Santa {year}** — your giftee\n\n"
+            f"You're buying for: **{receiver_name}** (<@{receiver_id}>)\n\n"
+            f"**Commands:**\n"
+            f"• `/ss giftee` — their wishlist\n"
+            f"• `/ss ask_giftee` — ask them anonymously\n"
+            f"• `/ss wishlist add` / `view` — your own wishlist\n"
+            f"• `/ss submit_gift` — log what you gave (optional)\n\n"
+            f"They can answer questions with the **Reply to Santa** button on your DM.\n"
+            f"Keep their name private. Have fun!"
+        )
     
     def _get_event_end_message(self, year: int) -> str:
-        """Get the event end message for participants"""
-        templates = [
-            # Variation A: And that's a wrap
-            lambda y: (
-                f"✨ **Secret Santa {y} – AND THAT'S A WRAP!** ✨\n\n"
-                f"A huge, heartfelt thank you to everyone who participated! 🎁\n\n"
-                f"Because of all of you, this holiday season just got a whole lot warmer and brighter. The joy you've shared is the real gift.\n\n"
-                f"Until next year! Stay merry and bright! 🎄❤️"
-            ),
-            # Variation B: Mission complete
-            lambda y: (
-                f"🎄 **Secret Santa {y} – MISSION COMPLETE!** 🎄\n\n"
-                f"And just like that, another wonderful Secret Santa comes to a close.\n\n"
-                f"Thank you for spreading so much joy and holiday magic. You've made someone's season truly special.\n\n"
-                f"Wishing you all the warmth and happiness this holiday brings! ❤️"
-            ),
-            # Variation C: Thanks for the magic
-            lambda y: (
-                f"🌟 **Secret Santa {y} – THANKS FOR THE MAGIC!** 🌟\n\n"
-                f"The final sleigh bell has rung! Secret Santa {y} is complete.\n\n"
-                f"What an amazing gift-giving journey it's been! Thank you for your kindness, creativity, and holiday spirit.\n\n"
-                f"May your holidays be as bright as the smiles you've created! ✨🎅"
-            )
-        ]
-        return random.choice(templates)(year)
-    
-    def _get_leave_message(self, year: int) -> str:
-        """Get the leave message for participants"""
+        """DM when the event stops — brief wrap-up."""
         return (
-            f"👋 **Secret Santa {year} – WE'LL MISS YOU!** 👋\n\n"
-            f"You've left this year's Secret Santa.\n\n"
-            f"Your spot has been cleared and you won't be matched with anyone.\n\n"
-            f"Changed your mind? You can always rejoin before the shuffle happens! ❤️"
+            f"🎄 **Secret Santa {year}** — event ended\n\n"
+            f"Thanks for taking part! This year's event is archived.\n\n"
+            f"• `/ss history` — browse past years\n"
+            f"• `/ss edit_gift` — fix your gift note for a past year"
+        )
+
+    def _get_leave_message(self, year: int) -> str:
+        """DM when someone removes their react / leaves before shuffle."""
+        return (
+            f"👋 **Secret Santa {year}** — you left the event\n\n"
+            f"You're no longer on the participant list.\n\n"
+            f"Changed your mind? React on the signup message again **before** the shuffle."
         )
 
     async def _resolve_guild_member(
