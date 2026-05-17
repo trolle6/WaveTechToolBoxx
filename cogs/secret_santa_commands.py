@@ -61,7 +61,7 @@ class SecretSantaCommandsMixin:
         shuffle: Optional[str] = commands.Param(
             default=None,
             name="shuffle",
-            description="Optional: auto-shuffle at this date/time (e.g. 2025-12-24 18:00). Uses your Discord language timezone, else UTC",
+            description="Optional shuffle time (e.g. 2025-12-24 18:00). Discord timezone, else UTC",
         ),
         end: Optional[str] = commands.Param(
             default=None,
