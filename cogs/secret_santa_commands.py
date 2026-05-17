@@ -1,6 +1,7 @@
 """Secret Santa slash commands (mixin — combined into SecretSantaCog)."""
 from __future__ import annotations
 
+import asyncio
 import random
 
 import disnake
