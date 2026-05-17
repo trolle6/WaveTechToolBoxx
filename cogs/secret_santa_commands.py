@@ -1484,22 +1484,26 @@ class SecretSantaCommandsMixin:
         giftee_wishlist = wishlists.get(receiver_id)
         if not isinstance(giftee_wishlist, list):
             giftee_wishlist = []
+        mention = f"<@{receiver_id}>"
         if not giftee_wishlist:
             embed = disnake.Embed(
-                title=f"📋 {receiver_name}'s Wishlist",
-                description=f"{receiver_name} hasn't added anything to their wishlist yet.\n\nYou can ask them questions with `/ss ask_giftee` to learn what they'd like!",
-                color=disnake.Color.blue()
+                title=f"📋 Wishlist — {mention}",
+                description=(
+                    f"{mention} hasn't added wishlist items yet.\n\n"
+                    f"Ask with `/ss ask_giftee`."
+                ),
+                color=disnake.Color.blue(),
             )
-            embed.set_footer(text="💡 Check back later - they might add items soon!")
+            embed.set_footer(text="Check back later with `/ss giftee`.")
         else:
             embed = disnake.Embed(
-                title=f"📋 {receiver_name}'s Wishlist",
-                description=f"Your giftee has **{len(giftee_wishlist)}** item{'s' if len(giftee_wishlist) != 1 else ''} on their list",
-                color=disnake.Color.gold()
+                title=f"📋 Wishlist — {mention}",
+                description=f"{mention} has **{len(giftee_wishlist)}** item{'s' if len(giftee_wishlist) != 1 else ''}:",
+                color=disnake.Color.gold(),
             )
             wishlist_text = "\n".join(f"{i+1}. {item}" for i, item in enumerate(giftee_wishlist))
-            embed.add_field(name="🎁 Their Wishes", value=wishlist_text, inline=False)
-            embed.set_footer(text="💡 Use these as inspiration for the perfect gift!")
+            embed.add_field(name="🎁 Wishlist", value=wishlist_text, inline=False)
+            embed.set_footer(text="Use `/ss ask_giftee` if you need more info.")
         
         await self._safe_edit_response(inter, embed=embed)
 

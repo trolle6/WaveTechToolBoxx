@@ -521,8 +521,12 @@ class SecretSantaCore(commands.Cog):
         receiver_id = assignments.get(user_id)
         if not receiver_id:
             embed = self._error_embed(
-                title="🎅 Hold your reindeer!",
-                description="You don't have a giftee yet! The organizer still needs to run the shuffle. Good things come to those who wait!"
+                title="⏳ No giftee yet",
+                description=(
+                    "The organizer hasn't run `/ss shuffle` yet.\n\n"
+                    "After shuffle you'll get a DM with your match. "
+                    "Until then: `/ss wishlist add` for your own list."
+                ),
             )
             await self._safe_edit_response(inter, embed=embed)
             return None
@@ -559,7 +563,7 @@ class SecretSantaCore(commands.Cog):
             embed = self._error_embed(
                 title="⏳ No giftee yet",
                 description=(
-                    "Wait for `/ss shuffle` — you'll get a DM with who you're buying for."
+                    "Wait for `/ss shuffle` — you'll get a DM with an @mention of your match."
                 ),
             )
             await self._safe_edit_response(inter, embed=embed)
@@ -615,38 +619,40 @@ class SecretSantaCore(commands.Cog):
             f"Answer with the **Reply to Santa** button on this message."
         )
 
-    def _format_dm_reply(self, rewritten_reply: str, year: int) -> str:
-        """DM to Santa — giftee's answer."""
+    def _format_dm_reply(self, rewritten_reply: str, year: int, giftee_id: Optional[int] = None) -> str:
+        """DM to Santa — match's answer."""
+        who = f"<@{giftee_id}>" if giftee_id else "Your match"
         return (
-            f"🎅 **Secret Santa {year}** — your giftee replied\n\n"
+            f"🎅 **Secret Santa {year}** — {who} replied\n\n"
             f"*\"{rewritten_reply}\"*\n\n"
             f"Ask another question: `/ss ask_giftee`"
         )
-    
+
     def _get_join_message(self, year: int) -> str:
         """DM when someone joins (react) — brief, participant-focused."""
         return (
             f"🎄 **Secret Santa {year}** — you're in\n\n"
             f"You're signed up. After the organizer runs the shuffle, you'll get **another DM here** "
-            f"with who you're buying for.\n\n"
+            f"with an @mention of your match.\n\n"
             f"**Useful now:**\n"
-            f"• `/ss wishlist add` — ideas for *your* Santa\n"
+            f"• `/ss wishlist add` — ideas for your Santa\n"
             f"• `/ss wishlist view` — see your list\n\n"
-            f"Don't tell anyone who you're matched with once you know — keep it secret."
+            f"Don't post your match publicly once you know who it is — keep it secret."
         )
 
     def _get_assignment_message(self, year: int, receiver_id: int, receiver_name: str) -> str:
-        """DM after shuffle — who your giftee is and what to do next."""
+        """DM after shuffle — who your match is and what to do next."""
+        mention = f"<@{receiver_id}>"
         return (
-            f"🎁 **Secret Santa {year}** — your giftee\n\n"
-            f"You're buying for: **{receiver_name}** (<@{receiver_id}>)\n\n"
+            f"🎁 **Secret Santa {year}** — your match\n\n"
+            f"You're Secret Santa for: {mention}\n\n"
             f"**Commands:**\n"
-            f"• `/ss giftee` — their wishlist\n"
-            f"• `/ss ask_giftee` — ask them anonymously\n"
+            f"• `/ss giftee` — {mention}'s wishlist\n"
+            f"• `/ss ask_giftee` — ask {mention} (anonymous)\n"
             f"• `/ss wishlist add` / `view` — your own wishlist\n"
-            f"• `/ss submit_gift` — log what you gave (optional)\n\n"
-            f"They can answer questions with the **Reply to Santa** button on your DM.\n"
-            f"Keep their name private. Have fun!"
+            f"• `/ss submit_gift` — log what you sent (optional)\n\n"
+            f"{mention} answers with **Reply to Santa** on the question DM.\n"
+            f"Don't reveal {mention} in the server. Have fun!"
         )
     
     def _get_event_end_message(self, year: int) -> str:
@@ -1059,7 +1065,7 @@ class SecretSantaCore(commands.Cog):
             text = (
                 f"🎄 **Secret Santa {year} – Assignment Fallback** 🎄\n\n"
                 f"We couldn't send your assignment via DM. {mentions}\n\n"
-                f"**You can still see your giftee:** Use `/ss giftee` in this server to view their wishlist. Your assignment is saved!"
+                f"**Your match is saved.** Use `/ss giftee` in this server to see your match's wishlist."
             )
         else:
             text = (
@@ -1089,7 +1095,7 @@ class SecretSantaCore(commands.Cog):
         """Process a reply from giftee to santa (called from Reply button modal or could be reused elsewhere)."""
         year = self.state.get("current_year", dt.date.today().year)
         try:
-            reply_msg = self._format_dm_reply(reply, year)
+            reply_msg = self._format_dm_reply(reply, year, giftee_id=giftee_id)
             success = await self._send_dm(santa_id, reply_msg)
 
             if success:
@@ -1097,16 +1103,16 @@ class SecretSantaCore(commands.Cog):
                 if event:
                     await self._save_communication(event, str(santa_id), str(giftee_id), "reply", reply, reply)
                 embed = self._success_embed(
-                    title=f"💌 Secret Santa {year} - REPLY DELIVERED! 💌",
-                    description="Your message is now in your Santa's hands! ✨\n\nThey'll be thrilled to get your response. Good hints make for great gifts! 🎁",
-                    footer=""
+                    title=f"✅ Reply sent — Secret Santa {year}",
+                    description="Your Santa got your message in DM.",
+                    footer="",
                 )
                 embed.add_field(name="What you sent", value=f"*{self._truncate_text(reply)}*", inline=False)
                 await self._safe_followup_send(inter, embed=embed, ephemeral=True)
             else:
                 embed = self._error_embed(
                     title="❌ Message couldn't be delivered",
-                    description="Looks like we couldn't send your reply. Your Secret Santa might have their DMs closed."
+                    description="Couldn't DM your Santa — they may have DMs closed."
                 )
                 await self._safe_followup_send(inter, embed=embed, ephemeral=True)
                 
