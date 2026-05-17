@@ -870,7 +870,12 @@ if __name__ == "__main__":
         Path(dir_path).mkdir(parents=True, exist_ok=True)
     
     # Check critical file permissions before starting
-    CRITICAL_FILES = ['main.py', 'cogs/SecretSanta_cog.py']
+    CRITICAL_FILES = [
+        'main.py',
+        'cogs/SecretSanta_cog.py',
+        'cogs/secret_santa_core.py',
+        'cogs/secret_santa_commands.py',
+    ]
     for file_path in CRITICAL_FILES:
         if not os.access(file_path, os.R_OK):
             logger.critical(f"Cannot read {file_path} - check permissions")
@@ -943,14 +948,9 @@ if __name__ == "__main__":
         if shutdown_flag[0]:
             logger.info("Performing graceful shutdown...")
             try:
-                # Try to get running loop - if bot.run() is still active, it will handle shutdown
-                try:
-                    loop = asyncio.get_running_loop()
-                    if loop.is_running():
-                        loop.create_task(graceful_shutdown())
-                except RuntimeError:
-                    # No running loop - bot.run() already stopped, cleanup already done
-                    pass
+                asyncio.run(asyncio.wait_for(graceful_shutdown(), timeout=20.0))
+            except asyncio.TimeoutError:
+                logger.error("Graceful shutdown timed out after 20s")
             except Exception as e:
                 logger.error(f"Cleanup failed: {e}")
             finally:

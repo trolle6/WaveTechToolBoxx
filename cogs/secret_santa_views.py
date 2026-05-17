@@ -15,7 +15,7 @@ ISOLATION:
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import disnake
 
@@ -125,7 +125,16 @@ class YearHistoryPaginator(disnake.ui.View):
     Paginated view for year history with assignments.
     Allows users to flip through pages if there are many assignments.
     """
-    def __init__(self, year: int, archive: dict, participants: dict, emoji_mapping: dict, timeout: float = 300):
+    def __init__(
+        self,
+        year: int,
+        archive: dict,
+        participants: dict,
+        emoji_mapping: dict,
+        timeout: float = 300,
+        *,
+        giver_filter: Optional[str] = None,
+    ):
         super().__init__(timeout=timeout)
         self.year = year
         self.archive = archive if isinstance(archive, dict) else {}
@@ -146,6 +155,8 @@ class YearHistoryPaginator(disnake.ui.View):
         
         self.all_lines = []
         for giver_id, receiver_id in assignments.items():
+            if giver_filter is not None and str(giver_id) != str(giver_filter):
+                continue
             giver_name = self.participants.get(str(giver_id), f"User {giver_id}")
             receiver_name = self.participants.get(str(receiver_id), f"User {receiver_id}")
             

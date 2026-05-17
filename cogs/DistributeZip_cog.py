@@ -519,9 +519,10 @@ class DistributeZipCog(commands.Cog):
                 except Exception:
                     pass
             return members, "Secret Santa participants"
-        else:
-            members = [member for member in guild.members if not member.bot]
-            return members, "all server members"
+        self.logger.warning(
+            "Distribute: no active Secret Santa participants — refusing guild-wide DM blast"
+        )
+        return [], "no eligible recipients"
 
     async def _distribute_uploaded_files(
         self,

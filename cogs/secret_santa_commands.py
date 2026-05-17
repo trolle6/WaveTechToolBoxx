@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 
 import disnake
 from disnake.ext import commands
@@ -19,6 +20,7 @@ from .secret_santa_assignments import (
 from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
+    is_moderator,
     mod_check,
     safe_display_name,
 )
@@ -894,7 +896,17 @@ class SecretSantaCommandsMixin:
             await self._safe_edit_response(inter, embed=embed)
             return
 
-        anonymized = await self._anonymize_text(cleaned, "question")
+        anonymized, anonymized_ok = await self._anonymize_text(cleaned, "question")
+        if not anonymized_ok:
+            embed = self._error_embed(
+                title="❌ Anonymization unavailable",
+                description=(
+                    "Your question was **not** sent. The anonymizer is down or busy — "
+                    "try again in a minute. Remove names and @mentions before retrying."
+                ),
+            )
+            await self._safe_edit_response(inter, embed=embed)
+            return
 
         # Send question with reply button (giftee only sees anonymized text)
         year = self.state.get("current_year", dt.date.today().year)
@@ -1707,84 +1719,111 @@ class SecretSantaCommandsMixin:
                 return
             event_data = archive.get("event", {})
             participants = event_data.get("participants", {})
+            if not isinstance(participants, dict):
+                participants = {}
             assignments = event_data.get("assignments", {})
-            
-            # Create consistent emoji mapping for all participants this year
+            if not isinstance(assignments, dict):
+                assignments = {}
+            gifts = event_data.get("gift_submissions", {})
+            if not isinstance(gifts, dict):
+                gifts = {}
+
+            show_full = is_moderator(inter)
+            viewer_id = str(inter.author.id)
+            giver_filter: Optional[str] = None
+            if not show_full:
+                if viewer_id in assignments:
+                    giver_filter = viewer_id
+                elif viewer_id in participants:
+                    embed = disnake.Embed(
+                        title=f"🎄 Secret Santa {year}",
+                        description=(
+                            f"You joined this event (**{len(participants)}** participants). "
+                            "Your Santa's identity is not shown here — that's still secret."
+                        ),
+                        color=disnake.Color.gold(),
+                        timestamp=dt.datetime.now(),
+                    )
+                    embed.set_footer(text="Mods can view the full exchange with moderator access.")
+                    await self._safe_edit_response(inter, embed=embed)
+                    return
+                else:
+                    await self._safe_edit_response(
+                        inter,
+                        content=f"❌ You weren't a participant in the {year} Secret Santa event.",
+                    )
+                    return
+
             emoji_mapping = self._get_year_emoji_mapping(participants)
-            
-            # Use paginator for years with assignments
-            if assignments and len(assignments) > 10:
-                # Many assignments - use paginated view
-                paginator = YearHistoryPaginator(year, archive, participants, emoji_mapping, timeout=300)
+            filtered_assignments = assignments if show_full else {
+                k: v for k, v in assignments.items() if str(k) == giver_filter
+            }
+            gifts_count = sum(
+                1 for gid in filtered_assignments
+                if ((gifts or {}).get(str(gid)) or {}).get("gift")
+            )
+            has_assignments = bool(filtered_assignments)
+            has_gifts = gifts_count > 0
+
+            if has_gifts:
+                description = f"**{len(participants)}** participants, **{gifts_count}** gifts exchanged"
+            elif has_assignments:
+                description = f"**{len(participants)}** participants, assignments made but no gifts recorded"
+            else:
+                description = f"**{len(participants)}** participants signed up, event incomplete"
+            if not show_full:
+                description = "Your assignment from this event (only you see this row)."
+
+            if show_full and assignments and len(assignments) > 10:
+                paginator = YearHistoryPaginator(
+                    year, archive, participants, emoji_mapping, timeout=300
+                )
                 embed = paginator.get_embed()
                 await inter.edit_original_response(embed=embed, view=paginator)
-            else:
-                # Few assignments - show all on one page (no buttons needed)
-                gifts = event_data.get("gift_submissions", {})
-                has_assignments = bool(assignments)
-                gifts_count = sum(1 for gid in (assignments or {}) if ((gifts or {}).get(str(gid)) or {}).get("gift"))
-                has_gifts = gifts_count > 0
-                if has_gifts:
-                    description = f"**{len(participants)}** participants, **{gifts_count}** gifts exchanged"
-                elif has_assignments:
-                    description = f"**{len(participants)}** participants, assignments made but no gifts recorded"
-                else:
-                    description = f"**{len(participants)}** participants signed up, event incomplete"
+                return
 
-                embed = disnake.Embed(
-                    title=f"🎄 Secret Santa {year}",
-                    description=description,
-                    color=disnake.Color.gold(),
-                    timestamp=dt.datetime.now()
+            exchange_lines = self._build_archived_exchange_lines(
+                filtered_assignments,
+                participants,
+                gifts,
+                emoji_mapping,
+            )
+
+            embed = disnake.Embed(
+                title=f"🎄 Secret Santa {year}",
+                description=description,
+                color=disnake.Color.gold(),
+                timestamp=dt.datetime.now(),
+            )
+
+            if has_assignments:
+                field_name = (
+                    f"🎄 Your assignment & gift"
+                    if not show_full
+                    else f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)"
                 )
+                embed.add_field(
+                    name=field_name,
+                    value="\n".join(exchange_lines) if exchange_lines else "No gift recorded",
+                    inline=False,
+                )
+            else:
+                status_text = (
+                    f"⏸️ Signup completed ({len(participants)} joined)\n"
+                    "❌ No assignments made\n❌ No gifts recorded"
+                )
+                embed.add_field(name="📝 Event Status", value=status_text, inline=False)
 
-                # Show all assignments (10 or fewer)
-                if has_assignments:
-                    exchange_lines = []
-                    for giver_id, receiver_id in assignments.items():
-                        giver_name = participants.get(str(giver_id), f"User {giver_id}")
-                        receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
-                        
-                        giver_mention = f"<@{giver_id}>" if str(giver_id).isdigit() else giver_name
-                        receiver_mention = f"<@{receiver_id}>" if str(receiver_id).isdigit() else receiver_name
-                        
-                        giver_emoji = emoji_mapping.get(str(giver_id), "🎁")
-                        receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
-                        
-                        submission = gifts.get(str(giver_id))
-                        if submission and isinstance(submission, dict):
-                            raw = submission.get("gift")
-                            gift_desc = format_gift_description_for_display(
-                                raw if isinstance(raw, str) else None,
-                                max_length=60,
-                            )
-                            exchange_lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
-                            exchange_lines.append(f"    ⤷ {gift_desc}")
-                        else:
-                            exchange_lines.append(
-                                f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} *{GIFT_NO_SUBMISSION_ROW}*"
-                            )
-                    
-                    embed.add_field(
-                        name=f"🎄 Assignments & Gifts ({gifts_count}/{len(assignments)} gifts submitted)",
-                        value="\n".join(exchange_lines),
-                        inline=False
-                    )
-                else:
-                    gifts_count = 0
-                    status_text = f"⏸️ Signup completed ({len(participants)} joined)\n❌ No assignments made\n❌ No gifts recorded"
-                    embed.add_field(name="📝 Event Status", value=status_text, inline=False)
-
-                # Statistics (count only submissions with non-empty gift)
+            if show_full:
                 completion_rate = (gifts_count / len(participants) * 100) if participants else 0
                 embed.add_field(
                     name="📊 Statistics",
                     value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {gifts_count}",
-                    inline=True
+                    inline=True,
                 )
 
-                embed.set_footer(text=f"Requested by {safe_display_name(inter.author)}")
-                await self._safe_edit_response(inter, embed=embed)
+            embed.set_footer(text=f"Requested by {safe_display_name(inter.author)}")
+            await self._safe_edit_response(inter, embed=embed)
 
         else:
             # Show all years overview with pagination
@@ -2315,11 +2354,6 @@ class SecretSantaCommandsMixin:
             return
         
         user_id = str(payload.user_id)
-        participants = event.get("participants") or {}
-        if not isinstance(participants, dict):
-            return
-        if user_id in participants:
-            return
 
         # Get user name
         name = f"User {payload.user_id}"
@@ -2336,11 +2370,17 @@ class SecretSantaCommandsMixin:
         # Add participant only if event is still current (re-check inside lock)
         async with self._lock:
             current = self.state.get("current_event")
-            if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
+            if not current or not current.get("active") or current.get("join_closed"):
+                return
+            if current.get("announcement_message_id") != payload.message_id:
                 return  # Event was stopped or is different
-            if "participants" not in current:
-                current["participants"] = {}
-            current["participants"][user_id] = name
+            participants = current.get("participants") or {}
+            if not isinstance(participants, dict):
+                participants = {}
+                current["participants"] = participants
+            if user_id in participants:
+                return  # Already joined (avoids duplicate DM under concurrent reactions)
+            participants[user_id] = name
             await self._save_async()
 
         # Participant role on join (if configured on /ss start)

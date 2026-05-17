@@ -7,7 +7,7 @@ import asyncio
 import datetime as dt
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import disnake
@@ -1198,7 +1198,17 @@ class SecretSantaCore(commands.Cog):
             if not cleaned:
                 await self._safe_followup_send(inter, content="❌ Reply was empty after removing @mentions.", ephemeral=True)
                 return
-            anonymized = await self._anonymize_text(cleaned, "reply")
+            anonymized, anonymized_ok = await self._anonymize_text(cleaned, "reply")
+            if not anonymized_ok:
+                await self._safe_followup_send(
+                    inter,
+                    content=(
+                        "❌ Couldn't anonymize your reply right now. "
+                        "Try again in a minute — your message was **not** sent."
+                    ),
+                    ephemeral=True,
+                )
+                return
             reply_msg = self._format_dm_reply(anonymized, year, giftee_id=giftee_id)
             success = await self._send_dm(santa_id, reply_msg)
 
@@ -1245,6 +1255,46 @@ class SecretSantaCore(commands.Cog):
         
         return emoji_mapping
 
+    def _build_archived_exchange_lines(
+        self,
+        assignments: Dict[str, Any],
+        participants: Dict[str, str],
+        gifts: Dict[str, Any],
+        emoji_mapping: Dict[str, str],
+        *,
+        giver_filter: Optional[str] = None,
+    ) -> List[str]:
+        """Build display lines for archived assignments (optionally one giver only)."""
+        if not isinstance(assignments, dict):
+            assignments = {}
+        if not isinstance(gifts, dict):
+            gifts = {}
+        lines: List[str] = []
+        for giver_id, receiver_id in assignments.items():
+            if giver_filter is not None and str(giver_id) != str(giver_filter):
+                continue
+            giver_name = participants.get(str(giver_id), f"User {giver_id}")
+            receiver_name = participants.get(str(receiver_id), f"User {receiver_id}")
+            giver_mention = f"<@{giver_id}>" if str(giver_id).isdigit() else giver_name
+            receiver_mention = f"<@{receiver_id}>" if str(receiver_id).isdigit() else receiver_name
+            giver_emoji = emoji_mapping.get(str(giver_id), "🎁")
+            receiver_emoji = emoji_mapping.get(str(receiver_id), "🎄")
+            submission = gifts.get(str(giver_id))
+            if submission and isinstance(submission, dict):
+                raw = submission.get("gift")
+                gift_desc = format_gift_description_for_display(
+                    raw if isinstance(raw, str) else None,
+                    max_length=60,
+                )
+                lines.append(f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention}")
+                lines.append(f"    ⤷ {gift_desc}")
+            else:
+                lines.append(
+                    f"{giver_emoji} {giver_mention} → {receiver_emoji} {receiver_mention} "
+                    f"*{GIFT_NO_SUBMISSION_ROW}*"
+                )
+        return lines
+
     def _get_openai_headers(self) -> Dict[str, str]:
         """Get common OpenAI API headers"""
         if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
@@ -1265,17 +1315,17 @@ class SecretSantaCore(commands.Cog):
             text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
         return text[:4000]  # Cap length to avoid token limits
 
-    async def _anonymize_text(self, text: str, message_type: str = "question") -> str:
+    async def _anonymize_text(self, text: str, message_type: str = "question") -> Tuple[str, bool]:
         """
         Use OpenAI to rewrite text for anonymity. Retries on 429, 5xx, connection errors.
-        Falls back to original text on any failure - never breaks the user flow.
+        Returns (text, ok). On failure, ok is False — callers must not send identifying content.
         """
         text = self._normalize_anonymize_input(text)
         if not text:
-            return ""
+            return "", True
         headers = self._get_openai_headers()
         if not headers:
-            return text
+            return "", False
 
         payload = {
             "model": "gpt-3.5-turbo",
@@ -1307,9 +1357,11 @@ class SecretSantaCore(commands.Cog):
                         try:
                             rewritten = result["choices"][0]["message"]["content"].strip()
                         except (KeyError, TypeError, IndexError):
-                            return text
+                            return "", False
                         rewritten = rewritten.replace("Rewritten:", "").strip()
-                        return rewritten if rewritten else text
+                        if not rewritten:
+                            return "", False
+                        return rewritten, True
                     if resp.status in (429, 500, 502, 503) and attempt < ANONYMIZE_RETRY_MAX - 1:
                         delay = ANONYMIZE_RETRY_BASE_DELAY * (2 ** attempt)
                         retry_after = resp.headers.get("Retry-After")
@@ -1325,7 +1377,7 @@ class SecretSantaCore(commands.Cog):
                         await asyncio.sleep(delay)
                         continue
                     self.logger.debug(f"Anonymization failed: {resp.status}")
-                    return text
+                    return "", False
             except RuntimeError as e:
                 if "Event loop is closed" in str(e) and attempt < ANONYMIZE_RETRY_MAX - 1:
                     self.logger.debug(
@@ -1353,7 +1405,9 @@ class SecretSantaCore(commands.Cog):
                 last_error = e
                 self.logger.debug(f"Anonymization error: {e}")
                 break
-        return text
+        if last_error:
+            self.logger.debug(f"Anonymization gave up: {last_error}")
+        return "", False
 
     def _archive_event(self, event: Dict[str, Any], year: int) -> str:
         """Archive event using the storage module"""
