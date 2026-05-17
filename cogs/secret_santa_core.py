@@ -53,15 +53,16 @@ ANONYMIZE_RETRY_MAX = 3  # Retries for OpenAI API (429, 5xx, connection)
 ANONYMIZE_RETRY_BASE_DELAY = 1.0  # Exponential backoff base
 ANONYMIZE_TIMEOUT = 20  # Request timeout (seconds)
 
-# Participant spam guards (per user id unless noted)
-SS_ASK_RATE_LIMIT = 5
-SS_ASK_RATE_WINDOW = 600  # 5 questions / 10 min
-SS_REPLY_RATE_LIMIT = 10
+# Participant spam guards — sliding window (NOT a cooldown between each action).
+# Example: SS_ASK 10 / 600s = up to 10 questions in any 10-minute period, back-to-back OK.
+SS_ASK_RATE_LIMIT = 10
+SS_ASK_RATE_WINDOW = 600
+SS_REPLY_RATE_LIMIT = 15
 SS_REPLY_RATE_WINDOW = 600
-SS_WISHLIST_RATE_LIMIT = 20
+SS_WISHLIST_RATE_LIMIT = 30
 SS_WISHLIST_RATE_WINDOW = 60
-SS_JOIN_DM_RATE_LIMIT = 2
-SS_JOIN_DM_RATE_WINDOW = 600  # cap re-join DM spam (react toggle)
+SS_JOIN_DM_RATE_LIMIT = 5  # only blocks react spam re-join DMs, not /ss start batch
+SS_JOIN_DM_RATE_WINDOW = 600
 SS_MAX_COMMS_PER_PAIR = 40  # messages per Santa↔giftee thread per event
 
 _SCRUB_MENTION_RE = re.compile(r"<@!?\d+>")
@@ -628,7 +629,13 @@ class SecretSantaCore(commands.Cog):
         """Return True if allowed; otherwise send ephemeral rate-limit message."""
         if await limiter.check(str(inter.author.id)):
             return True
-        msg = f"⏳ Too many {action_label} requests. Please wait a few minutes and try again."
+        window_min = max(1, limiter.window // 60)
+        msg = (
+            f"⏳ **{action_label.title()} limit reached** — "
+            f"you can send up to **{limiter.limit}** per **{window_min} minutes** "
+            f"(you can use them back-to-back; this is not a wait between each message). "
+            f"Try again in a minute or two once older ones roll off."
+        )
         try:
             if inter.response.is_done():
                 await inter.followup.send(msg, ephemeral=True)
@@ -655,8 +662,8 @@ class SecretSantaCore(commands.Cog):
         if self._comms_thread_length(event, santa_id) < SS_MAX_COMMS_PER_PAIR:
             return True
         msg = (
-            f"⏳ This Secret Santa conversation has reached the limit ({SS_MAX_COMMS_PER_PAIR} messages). "
-            "Use `/ss giftee` or wait for the organizer if you need more."
+            f"⏳ This conversation hit the cap (**{SS_MAX_COMMS_PER_PAIR}** questions+replies total for the event). "
+            "Use `/ss giftee` or ask the organizer if you need more."
         )
         try:
             if inter.response.is_done():
