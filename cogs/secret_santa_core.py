@@ -5,6 +5,7 @@ from __future__ import annotations
 import aiohttp
 import asyncio
 import datetime as dt
+import re
 import time
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -12,7 +13,7 @@ from zoneinfo import ZoneInfo
 import disnake
 from disnake.ext import commands
 
-from .utils import autocomplete_safety_wrapper
+from .utils import RateLimiter, autocomplete_safety_wrapper
 
 # Import from modular components
 from .secret_santa_storage import (
@@ -51,6 +52,22 @@ DM_SEND_TIMEOUT = 15  # Timeout for user.send (seconds)
 ANONYMIZE_RETRY_MAX = 3  # Retries for OpenAI API (429, 5xx, connection)
 ANONYMIZE_RETRY_BASE_DELAY = 1.0  # Exponential backoff base
 ANONYMIZE_TIMEOUT = 20  # Request timeout (seconds)
+
+# Participant spam guards (per user id unless noted)
+SS_ASK_RATE_LIMIT = 5
+SS_ASK_RATE_WINDOW = 600  # 5 questions / 10 min
+SS_REPLY_RATE_LIMIT = 10
+SS_REPLY_RATE_WINDOW = 600
+SS_WISHLIST_RATE_LIMIT = 20
+SS_WISHLIST_RATE_WINDOW = 60
+SS_JOIN_DM_RATE_LIMIT = 2
+SS_JOIN_DM_RATE_WINDOW = 600  # cap re-join DM spam (react toggle)
+SS_MAX_COMMS_PER_PAIR = 40  # messages per Santa↔giftee thread per event
+
+_SCRUB_MENTION_RE = re.compile(r"<@!?\d+>")
+_SCRUB_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
+_SCRUB_DISCORD_USER_URL_RE = re.compile(r"https?://(?:www\.)?discord(?:app)?\.com/users/\d+", re.I)
+_SCRUB_EVERYONE_RE = re.compile(r"@(?:everyone|here)\b", re.I)
 
 # Discord locale (language) -> IANA timezone for parsing /ss start shuffle & end times.
 # Discord doesn't provide timezone, so this is a best-effort guess from their app language.
@@ -103,6 +120,11 @@ class SecretSantaCore(commands.Cog):
         self._scheduled_shuffle_task: Optional[asyncio.Task] = None
         self._unloaded = False  # Track if already unloaded
         self._executor = bot.executor  # Shared executor from main.py (bot is self.bot)
+
+        self._limit_ask = RateLimiter(limit=SS_ASK_RATE_LIMIT, window=SS_ASK_RATE_WINDOW)
+        self._limit_reply = RateLimiter(limit=SS_REPLY_RATE_LIMIT, window=SS_REPLY_RATE_WINDOW)
+        self._limit_wishlist = RateLimiter(limit=SS_WISHLIST_RATE_LIMIT, window=SS_WISHLIST_RATE_WINDOW)
+        self._limit_join_dm = RateLimiter(limit=SS_JOIN_DM_RATE_LIMIT, window=SS_JOIN_DM_RATE_WINDOW)
         
         self.logger.info("Secret Santa cog initialized with persistent reply buttons")
     
@@ -587,6 +609,64 @@ class SecretSantaCore(commands.Cog):
     # Comms flow: ask_giftee / reply_santa / _process_reply → _save_communication → event["communications"].
     # structure: { santa_id: { "giftee_id": giftee_id, "thread": [ { type, message, rewritten, timestamp } ] } }.
     # On stop, full event (including communications) is archived to archive/YYYY.json. view_comms reads active event only.
+    def _scrub_user_text(self, text: str) -> str:
+        """Remove Discord pings/URLs that could deanonymize participants."""
+        if not text or not isinstance(text, str):
+            return ""
+        cleaned = _SCRUB_MENTION_RE.sub("", text)
+        cleaned = _SCRUB_ROLE_MENTION_RE.sub("", cleaned)
+        cleaned = _SCRUB_DISCORD_USER_URL_RE.sub("", cleaned)
+        cleaned = _SCRUB_EVERYONE_RE.sub("", cleaned)
+        return cleaned.strip()
+
+    async def _rate_limit_user(
+        self,
+        inter: disnake.Interaction,
+        limiter: RateLimiter,
+        action_label: str,
+    ) -> bool:
+        """Return True if allowed; otherwise send ephemeral rate-limit message."""
+        if await limiter.check(str(inter.author.id)):
+            return True
+        msg = f"⏳ Too many {action_label} requests. Please wait a few minutes and try again."
+        try:
+            if inter.response.is_done():
+                await inter.followup.send(msg, ephemeral=True)
+            else:
+                await inter.response.send_message(msg, ephemeral=True)
+        except disnake.HTTPException:
+            pass
+        return False
+
+    def _comms_thread_length(self, event: dict, santa_id: str) -> int:
+        comms = event.get("communications") or {}
+        entry = comms.get(str(santa_id)) if isinstance(comms, dict) else None
+        if not isinstance(entry, dict):
+            return 0
+        thread = entry.get("thread")
+        return len(thread) if isinstance(thread, list) else 0
+
+    async def _check_comms_cap(
+        self,
+        inter: disnake.Interaction,
+        event: dict,
+        santa_id: str,
+    ) -> bool:
+        if self._comms_thread_length(event, santa_id) < SS_MAX_COMMS_PER_PAIR:
+            return True
+        msg = (
+            f"⏳ This Secret Santa conversation has reached the limit ({SS_MAX_COMMS_PER_PAIR} messages). "
+            "Use `/ss giftee` or wait for the organizer if you need more."
+        )
+        try:
+            if inter.response.is_done():
+                await inter.followup.send(msg, ephemeral=True)
+            else:
+                await inter.response.send_message(msg, ephemeral=True)
+        except disnake.HTTPException:
+            pass
+        return False
+
     async def _save_communication(self, event: dict, santa_id: str, giftee_id: str, msg_type: str,
                                   message: str, rewritten: str):
         """Save communication thread entry. comms keyed by santa_id; each has giftee_id and thread list."""
@@ -1098,13 +1178,28 @@ class SecretSantaCore(commands.Cog):
         """Process a reply from giftee to santa (called from Reply button modal or could be reused elsewhere)."""
         year = self.state.get("current_year", dt.date.today().year)
         try:
-            reply_msg = self._format_dm_reply(reply, year, giftee_id=giftee_id)
+            if not await self._rate_limit_user(inter, self._limit_reply, "reply"):
+                return
+            event = self._get_current_event()
+            if not event:
+                await self._safe_followup_send(inter, content="❌ No active Secret Santa event", ephemeral=True)
+                return
+            if not await self._check_comms_cap(inter, event, str(santa_id)):
+                return
+
+            cleaned = self._scrub_user_text(reply)
+            if not cleaned:
+                await self._safe_followup_send(inter, content="❌ Reply was empty after removing @mentions.", ephemeral=True)
+                return
+            anonymized = await self._anonymize_text(cleaned, "reply")
+            reply_msg = self._format_dm_reply(anonymized, year, giftee_id=giftee_id)
             success = await self._send_dm(santa_id, reply_msg)
 
             if success:
-                event = self._get_current_event()
                 if event:
-                    await self._save_communication(event, str(santa_id), str(giftee_id), "reply", reply, reply)
+                    await self._save_communication(
+                        event, str(santa_id), str(giftee_id), "reply", cleaned, anonymized
+                    )
                 embed = self._success_embed(
                     title=f"✅ Reply sent — Secret Santa {year}",
                     description="Your Santa got your message in DM.",
@@ -1180,10 +1275,10 @@ class SecretSantaCore(commands.Cog):
             "messages": [{
                 "role": "user",
                 "content": (
-                    "Rewrite this Secret Santa {type} with MINIMAL changes - just enough to obscure writing style. "
-                    "Keep 80-90% of the original words and phrasing. Only change a few words here and there. "
-                    "Preserve the exact same meaning, tone, personality, slang, and emotion. "
-                    "If they're casual, stay casual. If they use emojis, keep them. If they misspell, that's fine.\n\n"
+                    "Rewrite this Secret Santa {type} for anonymity. "
+                    "Remove ALL names, nicknames, @mentions, Discord tags, and anything that identifies the writer. "
+                    "Keep the same meaning and tone but use neutral wording. "
+                    "Do not add new facts. Output only the rewritten message.\n\n"
                     "Original: {text}\n\nRewritten:"
                 ).format(type=message_type, text=text)
             }],

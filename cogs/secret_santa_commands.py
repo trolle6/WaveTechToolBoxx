@@ -866,42 +866,69 @@ class SecretSantaCommandsMixin:
     async def ss_ask(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        question: str = commands.Param(description="Your question (sent as-is for anonymity)", max_length=2000),
+        question: str = commands.Param(
+            description="Your question (scrubbed + anonymized before delivery)",
+            max_length=2000,
+        ),
     ):
         """Ask giftee anonymously; giftee replies via the DM button."""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
+        if not await self._rate_limit_user(inter, self._limit_ask, "question"):
+            return
 
         # COMBINED VALIDATION: Participant + assignment check in one pass
         result = await self._validate_participant_with_assignment(inter)
         if not result:
             return
         event, user_id, receiver_id, _, _ = result
+        if not await self._check_comms_cap(inter, event, user_id):
+            return
 
-        rewritten_question = question
+        cleaned = self._scrub_user_text(question)
+        if not cleaned:
+            embed = self._error_embed(
+                title="❌ Empty question",
+                description="Your message was empty after removing @mentions. Rephrase without tagging anyone.",
+            )
+            await self._safe_edit_response(inter, embed=embed)
+            return
 
-        # Send question with reply button
+        anonymized = await self._anonymize_text(cleaned, "question")
+
+        # Send question with reply button (giftee only sees anonymized text)
         year = self.state.get("current_year", dt.date.today().year)
-        question_msg = self._format_dm_question(rewritten_question, year)
+        question_msg = self._format_dm_question(anonymized, year)
         reply_view = SecretSantaReplyView()
         success = await self._send_dm(int(receiver_id), question_msg, reply_view)
 
         if success:
-            # Save communication
-            await self._save_communication(event, user_id, receiver_id, "question", question, rewritten_question)
+            # Save communication (raw + delivered text for mod oversight)
+            await self._save_communication(
+                event, user_id, receiver_id, "question", cleaned, anonymized
+            )
 
             # Success embed
             embed = self._success_embed(
                 title="✅ Question Sent!",
-                description="Your question has been delivered anonymously!",
-                footer="💡 Tip: Keep asking questions to find the perfect gift!"
+                description=(
+                    "Your match received an **anonymized** version in DM "
+                    "(names and @mentions are stripped; writing style is obscured)."
+                ),
+                footer="💡 Tip: Keep asking questions to find the perfect gift!",
             )
-            embed.add_field(name="📝 Sent", value=f"*{self._truncate_text(question)}*", inline=False)
+            embed.add_field(name="📝 You wrote", value=f"*{self._truncate_text(cleaned)}*", inline=False)
+            if anonymized != cleaned:
+                embed.add_field(
+                    name="📨 They saw (anonymized)",
+                    value=f"*{self._truncate_text(anonymized)}*",
+                    inline=False,
+                )
             await self._safe_edit_response(inter, embed=embed)
         else:
             embed = self._error_embed(
                 title="❌ Delivery Failed",
-                description="Couldn't send your question. Your giftee may have DMs disabled."
+                description="Couldn't send your question. Your match may have DMs disabled."
             )
             await self._safe_edit_response(inter, embed=embed)
 
@@ -1270,12 +1297,19 @@ class SecretSantaCommandsMixin:
         """Add item to wishlist"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
+        if not await self._rate_limit_user(inter, self._limit_wishlist, "wishlist"):
+            return
 
         # Validate participant
         result = await self._validate_participant(inter)
         if not result:
             return
         event, user_id = result
+
+        item = self._scrub_user_text(item) or item.strip()
+        if not item:
+            await self._safe_edit_response(inter, content="❌ Item text was empty after removing @mentions.")
+            return
 
         async with self._lock:
             wishlists = event.get("wishlists")
@@ -1342,6 +1376,8 @@ class SecretSantaCommandsMixin:
         """Remove item from wishlist"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
+        if not await self._rate_limit_user(inter, self._limit_wishlist, "wishlist"):
+            return
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -1434,6 +1470,8 @@ class SecretSantaCommandsMixin:
         """Clear wishlist"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
+        if not await self._rate_limit_user(inter, self._limit_wishlist, "wishlist"):
+            return
 
         # Validate participant
         result = await self._validate_participant(inter)
@@ -2313,9 +2351,12 @@ class SecretSantaCommandsMixin:
                     guild, payload.user_id, add=True, reason="Secret Santa signup (reaction)"
                 )
 
-        # Send confirmation (same message as /ss start)
-        join_msg = self._get_join_message(self.state.get("current_year", dt.date.today().year))
-        await self._send_dm(payload.user_id, join_msg)
+        # Send confirmation (same message as /ss start); rate-limit react spam
+        if await self._limit_join_dm.check(str(payload.user_id)):
+            join_msg = self._get_join_message(self.state.get("current_year", dt.date.today().year))
+            await self._send_dm(payload.user_id, join_msg)
+        else:
+            self.logger.debug("Join DM skipped (rate limit) for user %s", payload.user_id)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: disnake.RawReactionActionEvent):
