@@ -46,69 +46,17 @@ from .secret_santa_checks import manage_guild_check
 
 
 # ============ CONSTANTS ============
-# These constants define API limits and configuration values to make the code self-documenting
+# API limits and operational timings not exposed as quality knobs
 
-# OpenAI TTS API Limits
-OPENAI_TTS_MAX_CHARS_PER_REQUEST = 4096  # Maximum characters per TTS API request
-TTS_CHUNK_SIZE = 4000  # Characters per chunk when splitting (leaves buffer for API limit)
-
-# Timeout Configuration (in seconds)
-TTS_API_TIMEOUT_BASE = 60  # Base timeout for TTS API requests
-TTS_API_TIMEOUT_PER_100_CHARS = 0.15  # Additional seconds per 100 characters
-TTS_API_TIMEOUT_MAX = 180  # Maximum timeout (3 minutes)
-
-# Audio Playback Configuration
-# MP3 from API; FFmpeg decodes to PCM, library encodes to Opus once (avoids Opus re-encode artifacts)
-AUDIO_PLAYBACK_TIMEOUT_BASE = 120  # Base timeout (2 minutes)
-AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER = 2.0  # Multiplier for estimated duration
-AUDIO_PLAYBACK_TIMEOUT_BUFFER = 30  # Additional buffer seconds
-AUDIO_PLAYBACK_TIMEOUT_MAX = 600  # Maximum timeout (10 minutes)
-
-# Text Processing Configuration
-PRONUNCIATION_IMPROVEMENT_MAX_CHARS = 3500  # Skip pronunciation improvement for longer texts (will be split anyway)
-SENTENCE_BOUNDARY_MIN_PERCENT = 0.8  # Minimum 80% of text must be kept when truncating at sentence boundary
-
-# Cache Configuration (in seconds)
-CACHE_TTL_AUDIO = 3600  # 1 hour - audio cache TTL
-CACHE_TTL_PRONUNCIATION = 7200  # 2 hours - pronunciation improvement cache TTL
-
-# Name Announcement Configuration
-NAME_ANNOUNCEMENT_COOLDOWN = 7200  # 2 hours - cooldown before announcing username again
-
-# Queue and State Configuration
-QUEUE_PROCESSOR_TIMEOUT = 300  # 5 minutes - timeout for queue processor wait
-GUILD_IDLE_TIMEOUT = 600  # 10 minutes - guild considered idle after this time
-MESSAGE_EXPIRY_TIME = 60  # 1 minute - TTS items expire after this time
-
-# Circuit Breaker Configuration
-CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5  # Open circuit after this many failures
-CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # Try recovery after this many seconds
-CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2  # Close circuit after this many successes
-
-# API Retry Configuration (professional: exponential backoff, Retry-After support)
-TTS_API_RETRY_MAX_ATTEMPTS = 3  # Total attempts (1 initial + 2 retries)
-TTS_API_RETRY_BASE_DELAY = 1.0  # Base delay in seconds
-TTS_API_RETRY_MAX_DELAY = 30.0  # Cap delay (e.g. from Retry-After)
-MIN_VALID_AUDIO_SIZE = 100  # Reject API responses smaller than this (likely errors)
-
-# Audio Processing - MP3 + FFmpegPCMAudio + PCMVolumeTransformer (avoids Opus re-encode)
-AUDIO_VOLUME_MULTIPLIER = 0.7  # 70% volume for clarity without clipping
-TTS_SPEED = 1.0  # Natural speed (no artificial slowdown)
-AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback
-MP3_BYTES_PER_SECOND = 16000  # MP3 ~128kbps ≈ 16000 bytes/second (OpenAI TTS default)
-
-# Playback wait configuration
-AUDIO_FINISH_WAIT_MAX_ATTEMPTS = 50  # Maximum attempts to wait for current audio to finish (5 seconds total)
-AUDIO_FINISH_WAIT_INTERVAL = 0.1  # Seconds between checks for audio finish
-AUDIO_START_CHECK_MAX_ATTEMPTS = 30  # Maximum attempts to check if playback started (3 seconds total)
-AUDIO_START_CHECK_INITIAL_DELAYS = 3  # Number of initial attempts with longer delay for initialization
-VOICE_DISCONNECT_DELAY = 3.0  # Seconds to wait before checking voice channel again (avoids race conditions)
-VOICE_CLEANUP_DELAY = 0.3  # Seconds to wait after cleanup before reconnecting
-VOICE_CONNECTION_RETRY_DELAY = 0.8  # Seconds between connection retry attempts
-
-# Discord DAVE (E2EE voice): packets sent before the MLS key ratchet is ready are inaudible to clients.
-DAVE_ENCRYPT_READY_TIMEOUT = 20.0  # Max seconds to wait after connecting / before play
-DAVE_ENCRYPT_READY_POLL = 0.05  # Poll interval while waiting for key ratchet
+OPENAI_TTS_MAX_CHARS_PER_REQUEST = 4096
+QUEUE_PROCESSOR_TIMEOUT = 300
+NAME_ANNOUNCEMENT_COOLDOWN = 7200
+AUDIO_FINISH_WAIT_MAX_ATTEMPTS = 50
+AUDIO_FINISH_WAIT_INTERVAL = 0.1
+AUDIO_START_CHECK_MAX_ATTEMPTS = 30
+AUDIO_START_CHECK_INITIAL_DELAYS = 3
+VOICE_CLEANUP_DELAY = 0.3
+VOICE_CONNECTION_RETRY_DELAY = 0.8
 
 
 @dataclass
@@ -155,7 +103,7 @@ class GuildVoiceState:
         """Update last activity timestamp to prevent idle cleanup."""
         self.last_activity = time.time()
 
-    def is_idle(self, timeout: int = GUILD_IDLE_TIMEOUT) -> bool:
+    def is_idle(self, timeout: int) -> bool:
         """
         Check if this guild state has been idle for too long.
         
@@ -180,6 +128,10 @@ class GuildVoiceState:
 
 class VoiceProcessingCog(commands.Cog):
     """TTS voice processing cog"""
+
+    @property
+    def qc(self):
+        return self.bot.qc
 
     def __init__(self, bot):
         self.bot = bot
@@ -220,16 +172,21 @@ class VoiceProcessingCog(commands.Cog):
         # Initialize components
         rate_limit = bot.config.RATE_LIMIT_REQUESTS
         rate_window = bot.config.RATE_LIMIT_WINDOW
-        max_cache = bot.config.MAX_TTS_CACHE
-        
+        max_cache = self.qc.get("MAX_TTS_CACHE")
+
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
         self.circuit_breaker = utils.CircuitBreaker(
-            failure_threshold=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-            recovery_timeout=CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
-            success_threshold=CIRCUIT_BREAKER_SUCCESS_THRESHOLD
+            failure_threshold=self.qc.get("TTS_CIRCUIT_BREAKER_FAILURE_THRESHOLD"),
+            recovery_timeout=self.qc.get("TTS_CIRCUIT_BREAKER_RECOVERY_TIMEOUT"),
+            success_threshold=self.qc.get("TTS_CIRCUIT_BREAKER_SUCCESS_THRESHOLD"),
         )
-        self.cache = utils.LRUCache[bytes](max_size=max_cache, ttl=CACHE_TTL_AUDIO)
-        self.pronunciation_cache = utils.LRUCache[str](max_size=200, ttl=CACHE_TTL_PRONUNCIATION)
+        self.cache = utils.LRUCache[bytes](
+            max_size=max_cache, ttl=self.qc.get("TTS_CACHE_TTL_AUDIO")
+        )
+        self.pronunciation_cache = utils.LRUCache[str](
+            max_size=self.qc.get("TTS_PRONUNCIATION_CACHE_SIZE"),
+            ttl=self.qc.get("TTS_CACHE_TTL_PRONUNCIATION"),
+        )
 
         # Guild states
         self.guild_states: Dict[int, GuildVoiceState] = {}
@@ -246,7 +203,7 @@ class VoiceProcessingCog(commands.Cog):
 
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
-        self.default_voice = "alloy"
+        self.default_voice = self.qc.get("TTS_DEFAULT_VOICE")
         # All available OpenAI TTS voices (13 total)
         self.available_voices = [
             "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", 
@@ -523,16 +480,17 @@ class VoiceProcessingCog(commands.Cog):
         estimated_tokens = int(len(text) / 4 * 1.5)
         max_tokens = min(2000, max(200, estimated_tokens))
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": self.qc.get("TTS_PRONUNCIATION_MODEL"),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
-            "temperature": 0.1
+            "temperature": self.qc.get("TTS_PRONUNCIATION_TEMPERATURE"),
         }
+        pron_timeout = self.qc.get("TTS_PRONUNCIATION_TIMEOUT")
         self.logger.debug(f"Pronunciation improvement API: input_length={len(text)}, max_tokens={max_tokens}")
 
         for attempt in range(2):  # Retry once on "Event loop is closed"
             try:
-                session = await self.bot.http_mgr.get_session(timeout=10)
+                session = await self.bot.http_mgr.get_session(timeout=pron_timeout)
                 async with session.post(
                     "https://api.openai.com/v1/chat/completions",
                     json=payload,
@@ -600,7 +558,7 @@ class VoiceProcessingCog(commands.Cog):
         last_break = max(last_period, last_exclamation, last_question)
         
         # Only use sentence break if it keeps at least 80% of text (avoids tiny fragments)
-        if last_break >= 0 and last_break > max_length * SENTENCE_BOUNDARY_MIN_PERCENT:
+        if last_break >= 0 and last_break > max_length * self.qc.get("TTS_SENTENCE_BOUNDARY_MIN_PERCENT"):
             return truncated[:last_break + 1]
         else:
             return truncated.rstrip() + "..."
@@ -656,7 +614,8 @@ class VoiceProcessingCog(commands.Cog):
         text = re.sub(r'\s+', ' ', text.strip())  # Normalize all whitespace to single spaces
         after_whitespace = len(text)
         
-        text = self._apply_corrections(text)
+        if self.qc.get("TTS_GRAMMAR_CORRECTIONS_ENABLED"):
+            text = self._apply_corrections(text)
         after_corrections = len(text)
         
         self.logger.debug(
@@ -664,10 +623,12 @@ class VoiceProcessingCog(commands.Cog):
             f"{after_discord_cleanup} (discord) → {after_whitespace} (whitespace) → {after_corrections} (corrections)"
         )
 
-        if self._detect_needs_pronunciation_help(text):
-            # Skip pronunciation improvement for very long texts (will be split anyway)
-            # Only improve pronunciation for texts that won't be split (< 3500 chars to leave buffer)
-            if len(text) < 3500:
+        if (
+            self.qc.get("TTS_PRONUNCIATION_ENABLED")
+            and self._detect_needs_pronunciation_help(text)
+        ):
+            max_chars = self.qc.get("TTS_PRONUNCIATION_MAX_CHARS")
+            if len(text) < max_chars:
                 before_pronunciation = len(text)
                 text = await self._improve_pronunciation(text)
                 after_pronunciation = len(text)
@@ -694,7 +655,7 @@ class VoiceProcessingCog(commands.Cog):
             return text
         return self._truncate_at_sentence_boundary(text, max_length)
     
-    def _split_text_into_chunks(self, text: str, max_chunk_size: int = TTS_CHUNK_SIZE) -> list[str]:
+    def _split_text_into_chunks(self, text: str, max_chunk_size: int | None = None) -> list[str]:
         """
         Split long text into chunks at sentence boundaries for sequential TTS processing.
         
@@ -711,6 +672,8 @@ class VoiceProcessingCog(commands.Cog):
         Returns:
             List of text chunks, each <= max_chunk_size, split at sentence boundaries when possible
         """
+        if max_chunk_size is None:
+            max_chunk_size = self.qc.get("TTS_CHUNK_SIZE")
         if not text or not isinstance(text, str):
             return []
         original_length = len(text)
@@ -809,19 +772,30 @@ class VoiceProcessingCog(commands.Cog):
 
         headers = self._get_openai_headers()
         payload = {
-            "model": "tts-1-hd",
+            "model": self.qc.get("TTS_MODEL"),
             "input": text,
             "voice": voice,
             "response_format": "mp3",
-            "speed": TTS_SPEED
+            "speed": self.qc.get("TTS_SPEED"),
         }
-        self.logger.debug(f"Sending to TTS API: length={len(text)}, voice={voice}")
+        self.logger.debug(f"Sending to TTS API: length={len(text)}, voice={voice}, model={payload['model']}")
 
-        text_timeout = (len(text) / 100 * TTS_API_TIMEOUT_PER_100_CHARS) + TTS_API_TIMEOUT_BASE
-        tts_timeout = max(TTS_API_TIMEOUT_BASE, min(TTS_API_TIMEOUT_MAX, text_timeout))
+        text_timeout = (
+            len(text) / 100 * self.qc.get("TTS_API_TIMEOUT_PER_100_CHARS")
+            + self.qc.get("TTS_API_TIMEOUT_BASE")
+        )
+        tts_timeout = max(
+            self.qc.get("TTS_API_TIMEOUT_BASE"),
+            min(self.qc.get("TTS_API_TIMEOUT_MAX"), text_timeout),
+        )
+
+        retry_max = self.qc.get("TTS_API_RETRY_MAX_ATTEMPTS")
+        retry_base = self.qc.get("TTS_API_RETRY_BASE_DELAY")
+        retry_cap = self.qc.get("TTS_API_RETRY_MAX_DELAY")
+        min_audio = self.qc.get("TTS_MIN_VALID_AUDIO_SIZE")
 
         last_error: Optional[Exception] = None
-        for attempt in range(TTS_API_RETRY_MAX_ATTEMPTS):
+        for attempt in range(retry_max):
             try:
                 self.total_requests += 1
                 session = await self.bot.http_mgr.get_session()
@@ -831,7 +805,7 @@ class VoiceProcessingCog(commands.Cog):
                 ) as resp:
                     if resp.status == 200:
                         audio = await resp.read()
-                        if not audio or len(audio) < MIN_VALID_AUDIO_SIZE:
+                        if not audio or len(audio) < min_audio:
                             self.logger.error(
                                 f"TTS API returned empty or too-small response: {len(audio) if audio else 0} bytes"
                             )
@@ -849,16 +823,14 @@ class VoiceProcessingCog(commands.Cog):
                         if resp.status == 429 and "Retry-After" in resp.headers:
                             try:
                                 retry_after = float(resp.headers["Retry-After"])
-                                retry_after = min(retry_after, TTS_API_RETRY_MAX_DELAY)
+                                retry_after = min(retry_after, retry_cap)
                             except (ValueError, TypeError):
                                 pass
-                        delay = retry_after or (
-                            TTS_API_RETRY_BASE_DELAY * (2 ** attempt)
-                        )
-                        if attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
+                        delay = retry_after or (retry_base * (2 ** attempt))
+                        if attempt < retry_max - 1:
                             self.logger.warning(
                                 f"TTS API {resp.status}: {error_body[:200]}. "
-                                f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})"
+                                f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{retry_max})"
                             )
                             await asyncio.sleep(delay)
                             continue
@@ -872,32 +844,32 @@ class VoiceProcessingCog(commands.Cog):
 
             except asyncio.TimeoutError as e:
                 last_error = e
-                self.logger.warning(f"TTS request timeout (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})")
-                if attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
-                    delay = TTS_API_RETRY_BASE_DELAY * (2 ** attempt)
+                self.logger.warning(f"TTS request timeout (attempt {attempt + 1}/{retry_max})")
+                if attempt < retry_max - 1:
+                    delay = retry_base * (2 ** attempt)
                     await asyncio.sleep(delay)
                     continue
                 self.logger.error("TTS request timeout after retries")
             except (aiohttp.ClientError, aiohttp.ClientConnectorError, ConnectionError) as e:
                 last_error = e
                 self.logger.warning(
-                    f"TTS connection error: {e} (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})"
+                    f"TTS connection error: {e} (attempt {attempt + 1}/{retry_max})"
                 )
-                if attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
-                    delay = TTS_API_RETRY_BASE_DELAY * (2 ** attempt)
+                if attempt < retry_max - 1:
+                    delay = retry_base * (2 ** attempt)
                     await asyncio.sleep(delay)
                     continue
                 self.logger.error(f"TTS connection error after retries: {e}", exc_info=True)
             except RuntimeError as e:
-                if "Event loop is closed" in str(e) and attempt < TTS_API_RETRY_MAX_ATTEMPTS - 1:
+                if "Event loop is closed" in str(e) and attempt < retry_max - 1:
                     self.logger.warning(
-                        f"TTS session tied to closed loop, invalidating and retrying (attempt {attempt + 1}/{TTS_API_RETRY_MAX_ATTEMPTS})"
+                        f"TTS session tied to closed loop, invalidating and retrying (attempt {attempt + 1}/{retry_max})"
                     )
                     try:
                         await self.bot.http_mgr.invalidate_session()
                     except Exception:
                         pass
-                    await asyncio.sleep(TTS_API_RETRY_BASE_DELAY)
+                    await asyncio.sleep(retry_base)
                     continue
                 last_error = e
                 self.logger.error(f"TTS request error: {e}", exc_info=True)
@@ -916,7 +888,7 @@ class VoiceProcessingCog(commands.Cog):
             self.total_failed += 1
         return None
 
-    async def _wait_for_voice_media_ready(self, vc: disnake.VoiceClient, timeout: float = DAVE_ENCRYPT_READY_TIMEOUT) -> bool:
+    async def _wait_for_voice_media_ready(self, vc: disnake.VoiceClient, timeout: float | None = None) -> bool:
         """
         Block until Discord DAVE can encrypt outgoing audio.
 
@@ -927,7 +899,10 @@ class VoiceProcessingCog(commands.Cog):
         dave_state = getattr(vc, "dave", None)
         if dave_state is None:
             return True
+        if timeout is None:
+            timeout = self.qc.get("TTS_DAVE_ENCRYPT_READY_TIMEOUT")
         deadline = time.monotonic() + timeout
+        poll = self.qc.get("TTS_DAVE_ENCRYPT_READY_POLL")
         while time.monotonic() < deadline:
             try:
                 if dave_state.can_encrypt():
@@ -936,7 +911,7 @@ class VoiceProcessingCog(commands.Cog):
             except Exception as e:
                 self.logger.warning(f"DAVE readiness check error: {e}")
                 return False
-            await asyncio.sleep(DAVE_ENCRYPT_READY_POLL)
+            await asyncio.sleep(poll)
         self.logger.error(
             "DAVE encryption did not become ready within %.1fs — TTS would be silent for listeners. "
             "Check voice connection, gateway, and dave-py compatibility.",
@@ -985,7 +960,9 @@ class VoiceProcessingCog(commands.Cog):
                     before_options='-nostdin',
                     options='-vn'
                 )
-                audio = disnake.PCMVolumeTransformer(pcm_source, volume=AUDIO_VOLUME_MULTIPLIER)
+                audio = disnake.PCMVolumeTransformer(
+                    pcm_source, volume=self.qc.get("TTS_AUDIO_VOLUME")
+                )
             except Exception as e:
                 self.logger.error(
                     f"Failed to create audio source: {e}\n"
@@ -1032,13 +1009,13 @@ class VoiceProcessingCog(commands.Cog):
             # Wait for playback to start (with small delay to allow initialization)
             # This prevents the "buffering then speedup" issue by giving FFmpeg time to initialize
             playback_started = False
+            start_delay = self.qc.get("TTS_AUDIO_PLAYBACK_START_DELAY")
             for attempt in range(AUDIO_START_CHECK_MAX_ATTEMPTS):
                 if vc.is_playing():
                     playback_started = True
                     break
-                # Small delay on first few attempts to allow audio source to initialize
                 if attempt < AUDIO_START_CHECK_INITIAL_DELAYS:
-                    await asyncio.sleep(AUDIO_PLAYBACK_START_DELAY / AUDIO_START_CHECK_INITIAL_DELAYS)
+                    await asyncio.sleep(start_delay / AUDIO_START_CHECK_INITIAL_DELAYS)
                 else:
                     await asyncio.sleep(AUDIO_FINISH_WAIT_INTERVAL)
             
@@ -1053,13 +1030,15 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 # Calculate dynamic timeout based on audio length
                 # MP3: estimate duration from file size (~16000 bytes/sec at 128kbps)
-                estimated_duration = len(audio_data) / MP3_BYTES_PER_SECOND
+                mp3_bps = self.qc.get("TTS_MP3_BYTES_PER_SECOND")
+                estimated_duration = len(audio_data) / mp3_bps
                 timeout = max(
-                    AUDIO_PLAYBACK_TIMEOUT_BASE,
+                    self.qc.get("TTS_AUDIO_PLAYBACK_TIMEOUT_BASE"),
                     min(
-                        AUDIO_PLAYBACK_TIMEOUT_MAX,
-                        estimated_duration * AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER + AUDIO_PLAYBACK_TIMEOUT_BUFFER
-                    )
+                        self.qc.get("TTS_AUDIO_PLAYBACK_TIMEOUT_MAX"),
+                        estimated_duration * self.qc.get("TTS_AUDIO_PLAYBACK_TIMEOUT_MULTIPLIER")
+                        + self.qc.get("TTS_AUDIO_PLAYBACK_TIMEOUT_BUFFER"),
+                    ),
                 )
                 self.logger.debug(f"Waiting for playback completion, timeout={timeout:.1f}s (audio_size={len(audio_data)} bytes, estimated_duration={estimated_duration:.1f}s)")
                 await asyncio.wait_for(play_done.wait(), timeout=timeout)
@@ -1263,7 +1242,8 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.debug(f"Processing TTS item: text_length={len(item.text)} chars, voice={item.voice}")
 
                     # Check expiration before generation
-                    if item.is_expired():
+                    expiry = self.qc.get("MESSAGE_EXPIRY_TIME")
+                    if item.is_expired(expiry):
                         state.stats["dropped"] += 1
                         self.logger.debug("TTS item expired, dropping")
                         continue
@@ -1288,7 +1268,8 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
 
                     # Estimate playback duration to decide on pipeline generation
-                    estimated_duration = len(item.audio_data) / MP3_BYTES_PER_SECOND
+                    mp3_bps = self.qc.get("TTS_MP3_BYTES_PER_SECOND")
+                    estimated_duration = len(item.audio_data) / mp3_bps
                     will_pipeline = estimated_duration > PIPELINE_THRESHOLD
 
                     # If playback will be long, start generating next item in background (pipeline)
@@ -1297,7 +1278,7 @@ class VoiceProcessingCog(commands.Cog):
                         try:
                             next_item = state.queue.get_nowait()
                             # Only pipeline if next item exists and isn't expired
-                            if next_item.is_expired():
+                            if next_item.is_expired(expiry):
                                 state.stats["dropped"] += 1
                                 self.logger.debug("Pipeline: Next item expired, skipping pipeline")
                             else:
@@ -1463,7 +1444,11 @@ class VoiceProcessingCog(commands.Cog):
         
         if is_first_message:
             display_name = message.author.display_name
-            pronounceable_name = await self._improve_pronunciation(display_name) if self._detect_needs_pronunciation_help(display_name) else display_name
+            needs_pron = (
+                self.qc.get("TTS_PRONUNCIATION_ENABLED")
+                and self._detect_needs_pronunciation_help(display_name)
+            )
+            pronounceable_name = await self._improve_pronunciation(display_name) if needs_pron else display_name
             prefix = f"{pronounceable_name} says: "
             text = prefix + cleaned_text
             self.logger.debug(f"First message: added prefix '{prefix}' (len={len(prefix)}), total length={len(text)}")
@@ -1563,7 +1548,7 @@ class VoiceProcessingCog(commands.Cog):
             # Uses module-level VOICE_DISCONNECT_DELAY constant
             if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
                 if not self._has_humans_in_voice(ch):
-                    await asyncio.sleep(VOICE_DISCONNECT_DELAY)
+                    await asyncio.sleep(self.qc.get("TTS_VOICE_DISCONNECT_DELAY"))
                     if vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
                         if not self._has_humans_in_voice(ch):
                             await vc.disconnect()
@@ -1612,7 +1597,7 @@ class VoiceProcessingCog(commands.Cog):
                 async with self._state_lock:
                     idle_guilds = [
                         gid for gid, state in self.guild_states.items()
-                        if state.is_idle()
+                        if state.is_idle(self.qc.get("GUILD_IDLE_TIMEOUT"))
                     ]
 
                 for guild_id in idle_guilds:

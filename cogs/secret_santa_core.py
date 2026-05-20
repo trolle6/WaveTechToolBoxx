@@ -110,6 +110,10 @@ DISCORD_LOCALE_TO_IANA: Dict[str, str] = {
 class SecretSantaCore(commands.Cog):
     """Secret Santa event management"""
 
+    @property
+    def qc(self):
+        return self.bot.qc
+
     def __init__(self, bot):
         self.bot = bot
         self.logger = bot.logger.getChild("santa")
@@ -1265,32 +1269,41 @@ class SecretSantaCore(commands.Cog):
             text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
         return text[:4000]  # Cap length to avoid token limits
 
+    def _anonymize_fallback(self, text: str) -> str:
+        """Return text or block on failure depending on SS_ANONYMIZE_FAIL_CLOSED."""
+        if self.qc.get("SS_ANONYMIZE_FAIL_CLOSED"):
+            return (
+                "[Message blocked: anonymization failed. "
+                "Please rephrase without identifying details and try again.]"
+            )
+        return text
+
     async def _anonymize_text(self, text: str, message_type: str = "question") -> str:
         """
         Use OpenAI to rewrite text for anonymity. Retries on 429, 5xx, connection errors.
-        Falls back to original text on any failure - never breaks the user flow.
+        Falls back per SS_ANONYMIZE_FAIL_CLOSED on any failure.
         """
         text = self._normalize_anonymize_input(text)
         if not text:
             return ""
         headers = self._get_openai_headers()
         if not headers:
-            return text
+            return self._anonymize_fallback(text)
 
+        aggressiveness = self.qc.anonymize_prompt_suffix()
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": self.qc.get("SS_ANONYMIZE_MODEL"),
             "messages": [{
                 "role": "user",
                 "content": (
-                    "Rewrite this Secret Santa {type} for anonymity. "
-                    "Remove ALL names, nicknames, @mentions, Discord tags, and anything that identifies the writer. "
-                    "Keep the same meaning and tone but use neutral wording. "
+                    f"Rewrite this Secret Santa {message_type} for anonymity. "
+                    f"{aggressiveness} "
                     "Do not add new facts. Output only the rewritten message.\n\n"
-                    "Original: {text}\n\nRewritten:"
-                ).format(type=message_type, text=text)
+                    f"Original: {text}\n\nRewritten:"
+                ),
             }],
-            "max_tokens": 150,
-            "temperature": 0.2
+            "max_tokens": self.qc.get("SS_ANONYMIZE_MAX_TOKENS"),
+            "temperature": self.qc.get("SS_ANONYMIZE_TEMPERATURE"),
         }
         last_error = None
         for attempt in range(ANONYMIZE_RETRY_MAX):
@@ -1307,9 +1320,9 @@ class SecretSantaCore(commands.Cog):
                         try:
                             rewritten = result["choices"][0]["message"]["content"].strip()
                         except (KeyError, TypeError, IndexError):
-                            return text
+                            return self._anonymize_fallback(text)
                         rewritten = rewritten.replace("Rewritten:", "").strip()
-                        return rewritten if rewritten else text
+                        return rewritten if rewritten else self._anonymize_fallback(text)
                     if resp.status in (429, 500, 502, 503) and attempt < ANONYMIZE_RETRY_MAX - 1:
                         delay = ANONYMIZE_RETRY_BASE_DELAY * (2 ** attempt)
                         retry_after = resp.headers.get("Retry-After")
@@ -1325,7 +1338,7 @@ class SecretSantaCore(commands.Cog):
                         await asyncio.sleep(delay)
                         continue
                     self.logger.debug(f"Anonymization failed: {resp.status}")
-                    return text
+                    return self._anonymize_fallback(text)
             except RuntimeError as e:
                 if "Event loop is closed" in str(e) and attempt < ANONYMIZE_RETRY_MAX - 1:
                     self.logger.debug(
@@ -1353,7 +1366,9 @@ class SecretSantaCore(commands.Cog):
                 last_error = e
                 self.logger.debug(f"Anonymization error: {e}")
                 break
-        return text
+        if last_error:
+            self.logger.debug(f"Anonymization gave up: {last_error}")
+        return self._anonymize_fallback(text)
 
     def _archive_event(self, event: Dict[str, Any], year: int) -> str:
         """Archive event using the storage module"""

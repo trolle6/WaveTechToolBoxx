@@ -50,6 +50,7 @@ class GenerationJob:
     prompt: str
     size: str
     quality: str
+    style: str
     interaction: disnake.ApplicationCommandInteraction
     timestamp: float
 
@@ -76,10 +77,14 @@ class DALLECog(commands.Cog):
     DESIGN DECISIONS:
     - FIFO queue: Ensures fair processing order, prevents API rate limiting
     - Sequential processing: One image at a time for reliability and cost control
-    - LRU cache: Avoids duplicate generations for same prompt/size/quality
+    - LRU cache: Avoids duplicate generations for same prompt/size/quality/style
     - Health monitoring: Auto-restarts processor if it crashes or hangs
     - Exponential backoff: Retries failed requests with increasing delays
     """
+
+    @property
+    def qc(self):
+        return self.bot.qc
 
     def __init__(self, bot):
         self.bot = bot
@@ -99,7 +104,7 @@ class DALLECog(commands.Cog):
         max_queue = bot.config.MAX_QUEUE_SIZE
         
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
-        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3600)
+        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=self.qc.get("DALLE_CACHE_TTL"))
 
         # Queue
         self.queue = asyncio.Queue(maxsize=max_queue)
@@ -108,7 +113,6 @@ class DALLECog(commands.Cog):
 
         # API config
         self.api_url = "https://api.openai.com/v1/images/generations"
-        self.max_retries = 3
 
         # Statistics tracking
         self.stats = {
@@ -176,7 +180,7 @@ class DALLECog(commands.Cog):
         embed.set_footer(text="💡 Tip: Use specific details for better results!")
         return embed
 
-    def _create_loading_embed(self, prompt: str, size: str, quality: str) -> disnake.Embed:
+    def _create_loading_embed(self, prompt: str, size: str, quality: str, style: str) -> disnake.Embed:
         """Create loading embed"""
         embed = disnake.Embed(
             title="🎨 Generating Image",
@@ -187,6 +191,7 @@ class DALLECog(commands.Cog):
         embed.add_field(name="Prompt", value=f"```{prompt_preview}```", inline=False)
         embed.add_field(name="Quality", value=quality.upper(), inline=True)
         embed.add_field(name="Size", value=size, inline=True)
+        embed.add_field(name="Style", value=style.title(), inline=True)
         embed.set_footer(text="This may take 15-30 seconds")
         return embed
 
@@ -214,9 +219,9 @@ class DALLECog(commands.Cog):
         return embed
 
     # ============ CACHE ============
-    def _cache_key(self, prompt: str, size: str, quality: str) -> str:
+    def _cache_key(self, prompt: str, size: str, quality: str, style: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
-        key_str = f"{prompt}:{size}:{quality}"
+        key_str = f"{prompt}:{size}:{quality}:{style}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     # ============ API HELPERS ============
@@ -232,42 +237,44 @@ class DALLECog(commands.Cog):
         self,
         prompt: str,
         size: str = "1024x1024",
-        quality: str = "hd"
+        quality: str = "hd",
+        style: str = "vivid",
     ) -> Dict:
         """Call DALL-E API with retry logic"""
         headers = self._get_openai_headers()
 
         payload = {
-            "model": "dall-e-3",
+            "model": self.qc.get("DALLE_MODEL"),
             "prompt": prompt,
             "n": 1,
             "size": size,
             "quality": quality,
             "response_format": "url",
-            "style": "vivid"
+            "style": style,
         }
 
         async with self._stats_lock:
             self.stats["total_requests"] += 1
 
-        # DALL-E API can take 15-30 seconds for generation, so use a generous timeout
-        REQUEST_TIMEOUT = 45  # seconds - enough for DALL-E generation
-        
-        self.logger.debug(f"Generating DALL-E image: prompt_length={len(prompt)}, size={size}, quality={quality}")
-        
-        for attempt in range(self.max_retries):
+        dalle_timeout = self.qc.get("DALLE_REQUEST_TIMEOUT")
+        max_retries = self.qc.get("DALLE_MAX_RETRIES")
+
+        self.logger.debug(
+            f"Generating DALL-E image: prompt_length={len(prompt)}, size={size}, "
+            f"quality={quality}, style={style}"
+        )
+
+        for attempt in range(max_retries):
             try:
                 session = await self.bot.http_mgr.get_session()
-                
-                # Use request-level timeout to ensure proper timeout handling
-                # (session timeout might be different if session was reused)
-                request_timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-                
+
+                client_timeout = aiohttp.ClientTimeout(total=dalle_timeout)
+
                 async with session.post(
                     self.api_url,
                     json=payload,
                     headers=headers,
-                    timeout=request_timeout
+                    timeout=client_timeout
                 ) as resp:
 
                     if resp.status == 200:
@@ -275,7 +282,7 @@ class DALLECog(commands.Cog):
                             result = await resp.json()
                         except Exception as json_err:
                             self.logger.error(f"Failed to parse JSON response: {json_err}")
-                            if attempt < self.max_retries - 1:
+                            if attempt < max_retries - 1:
                                 continue
                             async with self._stats_lock:
                                 self.stats["failed"] += 1
@@ -287,7 +294,7 @@ class DALLECog(commands.Cog):
 
                     elif resp.status == 429:
                         retry_after = int(resp.headers.get('Retry-After', '60'))
-                        if attempt < self.max_retries - 1:
+                        if attempt < max_retries - 1:
                             wait = min(retry_after, 30)
                             self.logger.warning(f"Rate limited, waiting {wait}s")
                             await asyncio.sleep(wait)
@@ -320,7 +327,7 @@ class DALLECog(commands.Cog):
 
                     else:
                         self.logger.warning(f"DALL-E API returned status {resp.status}")
-                        if attempt < self.max_retries - 1:
+                        if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                             continue
                         async with self._stats_lock:
@@ -328,7 +335,7 @@ class DALLECog(commands.Cog):
                         return {"success": False, "error": f"API error {resp.status}"}
 
             except asyncio.TimeoutError:
-                if attempt < self.max_retries - 1:
+                if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 async with self._stats_lock:
@@ -336,7 +343,7 @@ class DALLECog(commands.Cog):
                 return {"success": False, "error": "⏰ Request timeout"}
 
             except RuntimeError as e:
-                if "Event loop is closed" in str(e) and attempt < self.max_retries - 1:
+                if "Event loop is closed" in str(e) and attempt < max_retries - 1:
                     self.logger.warning("DALL-E: session tied to closed loop, invalidating and retrying")
                     try:
                         await self.bot.http_mgr.invalidate_session()
@@ -345,7 +352,7 @@ class DALLECog(commands.Cog):
                     await asyncio.sleep(2 ** attempt)
                     continue
                 self.logger.error(f"Generation error: {e}", exc_info=True)
-                if attempt < self.max_retries - 1:
+                if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 async with self._stats_lock:
@@ -354,7 +361,7 @@ class DALLECog(commands.Cog):
 
             except Exception as e:
                 self.logger.error(f"Generation error: {e}", exc_info=True)
-                if attempt < self.max_retries - 1:
+                if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 async with self._stats_lock:
@@ -377,7 +384,8 @@ class DALLECog(commands.Cog):
                     if self._shutdown.is_set():
                         break
 
-                    if job.is_expired():
+                    job_expiry = self.qc.get("DALLE_JOB_EXPIRY_SECONDS")
+                    if job.is_expired(job_expiry):
                         try:
                             await job.interaction.edit_original_response(content="⏰ Request expired")
                         except Exception:
@@ -388,14 +396,14 @@ class DALLECog(commands.Cog):
 
                     # Update status
                     try:
-                        embed = self._create_loading_embed(job.prompt, job.size, job.quality)
+                        embed = self._create_loading_embed(job.prompt, job.size, job.quality, job.style)
                         await job.interaction.edit_original_response(embed=embed)
                     except Exception:
                         pass
 
                     # Generate
                     start = time.time()
-                    result = await self._generate_image(job.prompt, job.size, job.quality)
+                    result = await self._generate_image(job.prompt, job.size, job.quality, job.style)
                     elapsed = time.time() - start
                     
                     async with self._stats_lock:
@@ -404,7 +412,7 @@ class DALLECog(commands.Cog):
                     # Cache if successful
                     image_url = self._extract_image_url(result) if result.get("success") else None
                     if image_url:
-                        cache_key = self._cache_key(job.prompt, job.size, job.quality)
+                        cache_key = self._cache_key(job.prompt, job.size, job.quality, job.style)
                         await self.cache.set(cache_key, image_url)
 
                     # Send result
@@ -521,14 +529,19 @@ class DALLECog(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         prompt: str = commands.Param(description="Describe the image", max_length=4000),
         size: str = commands.Param(
-            default="1024x1024",
+            default=None,
             choices=["1024x1024", "1792x1024", "1024x1792"],
-            description="Image size"
+            description="Image size (defaults from quality config)",
         ),
         quality: str = commands.Param(
-            default="hd",
+            default=None,
             choices=["standard", "hd"],
-            description="Image quality (HD recommended)"
+            description="Image quality (defaults from quality config)",
+        ),
+        style: str = commands.Param(
+            default=None,
+            choices=["vivid", "natural"],
+            description="Image style: vivid (hyper-real) or natural (softer)",
         ),
         private: bool = commands.Param(
             default=False,
@@ -555,8 +568,12 @@ class DALLECog(commands.Cog):
             await inter.edit_original_response(content="❌ Prompt too short (min 3 characters)")
             return
 
+        size = size or self.qc.get("DALLE_DEFAULT_SIZE")
+        quality = quality or self.qc.get("DALLE_DEFAULT_QUALITY")
+        style = style or self.qc.get("DALLE_DEFAULT_STYLE")
+
         # Check cache
-        cache_key = self._cache_key(prompt, size, quality)
+        cache_key = self._cache_key(prompt, size, quality, style)
         cached = await self.cache.get(cache_key)
 
         if cached:
@@ -573,8 +590,9 @@ class DALLECog(commands.Cog):
             prompt=prompt,
             size=size,
             quality=quality,
+            style=style,
             interaction=inter,
-            timestamp=time.time()
+            timestamp=time.time(),
         )
 
         # Add to queue

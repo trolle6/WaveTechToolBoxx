@@ -30,6 +30,8 @@ import disnake
 from disnake.ext import commands
 from dotenv import load_dotenv
 
+from cogs.quality_control import parse_quality_value, quality_config_defaults
+
 load_dotenv("config.env", override=True)
 
 
@@ -44,9 +46,8 @@ load_dotenv("config.env", override=True)
 #   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
 #   OPENAI_API_KEY        - TTS, DALL-E, Secret Santa anonymize
 #
-# Optional (CONFIG_DEFAULTS below or in config.env):
-#   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
-#   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
+# Optional (CONFIG_DEFAULTS + quality_control.QUALITY_SETTINGS, overridable in config.env):
+#   TTS_ROLE_ID, MAX_QUEUE_SIZE, RATE_LIMIT_*, TTS_* / DALLE_* / SS_ANONYMIZE_* quality knobs
 # Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
 #
 REQUIRED_CONFIG_KEYS = {
@@ -57,16 +58,13 @@ REQUIRED_CONFIG_KEYS = {
 CONFIG_DEFAULTS = {
     "DEBUG_MODE": False,
     "LOG_LEVEL": "INFO",
-    "MAX_TTS_CACHE": 50,
-    "TTS_TIMEOUT": 15,
     "SKIP_API_VALIDATION": False,
     "MAX_QUEUE_SIZE": 50,
     "RATE_LIMIT_REQUESTS": 15,
     "RATE_LIMIT_WINDOW": 60,
-    "VOICE_TIMEOUT": 10,
-    "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
+    **quality_config_defaults(),
 }
 
 
@@ -95,6 +93,8 @@ class Config:
             val = os.getenv(key)
             if val is None:
                 self.data[key] = default
+            elif key in quality_config_defaults():
+                self.data[key] = parse_quality_value(key, val)
             elif isinstance(default, bool):
                 self.data[key] = str(val).lower() == "true"
             elif isinstance(default, int):
@@ -102,6 +102,12 @@ class Config:
                     self.data[key] = int(val)
                 except ValueError:
                     warnings.warn(f"Invalid integer for {key!r}, using default {default!r}", UserWarning)
+                    self.data[key] = default
+            elif isinstance(default, float):
+                try:
+                    self.data[key] = float(val)
+                except ValueError:
+                    warnings.warn(f"Invalid float for {key!r}, using default {default!r}", UserWarning)
                     self.data[key] = default
             else:
                 self.data[key] = val
@@ -476,6 +482,8 @@ logger, discord_handler = setup_logging(config)
 intents = disnake.Intents.all()
 bot = commands.InteractionBot(intents=intents)
 bot.config = config
+from cogs.quality_control import QualityConfig
+bot.qc = QualityConfig(config)
 bot.logger = logger
 bot.http_mgr = HttpManager()
 bot.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bot-io")
@@ -799,10 +807,11 @@ def handle_signal(signum, frame):
 def load_cogs() -> int:
     """Load all cogs and return count"""
     cogs = [
+        "cogs.quality_control",
         "cogs.voice_processing_cog",
         "cogs.DALLE_cog",
         "cogs.SecretSanta_cog",
-        "cogs.DistributeZip_cog"
+        "cogs.DistributeZip_cog",
     ]
     
     loaded = 0
