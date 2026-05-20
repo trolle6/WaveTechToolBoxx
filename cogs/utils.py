@@ -37,7 +37,18 @@ __all__ = [
     'JsonFile',
     'RequestCache',
     'safe_filename_in_dir',
+    'get_openai_headers',
 ]
+
+
+def get_openai_headers(api_key: Optional[str]) -> dict[str, str]:
+    """Build OpenAI API headers; returns empty dict if key is missing."""
+    if not api_key:
+        return {}
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
 
 def safe_filename_in_dir(filename: str, directory: Path) -> Optional[Path]:

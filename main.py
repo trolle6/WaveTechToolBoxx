@@ -58,7 +58,6 @@ CONFIG_DEFAULTS = {
     "DEBUG_MODE": False,
     "LOG_LEVEL": "INFO",
     "MAX_TTS_CACHE": 50,
-    "TTS_TIMEOUT": 15,
     "SKIP_API_VALIDATION": False,
     "MAX_QUEUE_SIZE": 50,
     "RATE_LIMIT_REQUESTS": 15,
@@ -105,6 +104,15 @@ class Config:
                     self.data[key] = default
             else:
                 self.data[key] = val
+
+        if self.data.get("DEBUG_MODE"):
+            self.data["LOG_LEVEL"] = "DEBUG"
+
+        log_level = str(self.data.get("LOG_LEVEL", "INFO")).upper()
+        if not isinstance(getattr(logging, log_level, None), int):
+            warnings.warn(f"Invalid LOG_LEVEL {log_level!r}, using INFO", UserWarning)
+            log_level = "INFO"
+        self.data["LOG_LEVEL"] = log_level
     
     def __getattr__(self, name: str) -> Any:
         """Access config values via attribute (e.g., config.DISCORD_TOKEN)"""
@@ -746,16 +754,28 @@ async def graceful_shutdown():
     _shutdown_in_progress = True
     logger.info("Shutting down...")
     
-    # Unload cogs
+    # Unload cogs — await async cleanup where available
+    unload_tasks = []
     for cog_name in list(bot.cogs.keys()):
         try:
             cog = bot.get_cog(cog_name)
-            if cog and hasattr(cog, 'cog_unload'):
+            if not cog:
+                continue
+            if hasattr(cog, "_async_unload"):
+                if getattr(cog, "_unloaded", False):
+                    continue
+                if hasattr(cog, "_unloaded"):
+                    cog._unloaded = True
+                unload_tasks.append(cog._async_unload())
+            elif hasattr(cog, "cog_unload"):
                 cog.cog_unload()
-        except Exception:
-            pass
-    
-    await asyncio.sleep(0.8)
+        except Exception as e:
+            logger.debug("Cog unload error for %s: %s", cog_name, e)
+
+    if unload_tasks:
+        await asyncio.gather(*unload_tasks, return_exceptions=True)
+    else:
+        await asyncio.sleep(0.8)
     
     # Disconnect voice clients
     for vc in list(bot.voice_clients):
@@ -865,7 +885,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Ensure required directories exist for cogs (Secret Santa archives, etc.)
-    REQUIRED_DIRS = ['cogs/archive', 'cogs/archive/backups']
+    REQUIRED_DIRS = ['cogs/archive', 'cogs/archive/backups', 'cogs/distributed_files']
     for dir_path in REQUIRED_DIRS:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
     

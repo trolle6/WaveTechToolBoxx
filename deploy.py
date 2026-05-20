@@ -11,6 +11,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv("config.env", override=True)
+
 PYTHON_MIN = (3, 10)
 DISNAKE_MIN = (2, 12, 0)
 
@@ -70,8 +74,14 @@ def check_dependencies():
 
 def check_environment():
     """Check environment variables"""
-    required_vars = ['DISCORD_TOKEN']
-    optional_vars = ['OPENAI_API_KEY', 'DISCORD_MODERATOR_ROLE_ID']
+    required_vars = [
+        "DISCORD_TOKEN",
+        "DISCORD_CHANNEL_ID",
+        "DISCORD_LOG_CHANNEL_ID",
+        "DISCORD_MODERATOR_ROLE_ID",
+        "OPENAI_API_KEY",
+    ]
+    optional_vars = ["DEBUG_MODE", "LOG_LEVEL"]
     
     missing_required = []
     for var in required_vars:
@@ -80,6 +90,7 @@ def check_environment():
     
     if missing_required:
         print(f"❌ Missing required environment variables: {missing_required}")
+        print("   Copy config.env.example to config.env and fill in values.")
         return False
     
     print("✅ Required environment variables set")
@@ -88,7 +99,7 @@ def check_environment():
         if os.getenv(var):
             print(f"✅ {var} set")
         else:
-            print(f"⚠️ {var} not set (optional)")
+            print(f"ℹ️ {var} not set (using default)")
     
     return True
 

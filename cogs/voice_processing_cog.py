@@ -77,7 +77,6 @@ NAME_ANNOUNCEMENT_COOLDOWN = 7200  # 2 hours - cooldown before announcing userna
 
 # Queue and State Configuration
 QUEUE_PROCESSOR_TIMEOUT = 300  # 5 minutes - timeout for queue processor wait
-GUILD_IDLE_TIMEOUT = 600  # 10 minutes - guild considered idle after this time
 MESSAGE_EXPIRY_TIME = 60  # 1 minute - TTS items expire after this time
 
 # Circuit Breaker Configuration
@@ -155,7 +154,7 @@ class GuildVoiceState:
         """Update last activity timestamp to prevent idle cleanup."""
         self.last_activity = time.time()
 
-    def is_idle(self, timeout: int = GUILD_IDLE_TIMEOUT) -> bool:
+    def is_idle(self, timeout: int) -> bool:
         """
         Check if this guild state has been idle for too long.
         
@@ -470,16 +469,7 @@ class VoiceProcessingCog(commands.Cog):
 
     # ============ API HELPERS ============
     def _get_openai_headers(self) -> Dict[str, str]:
-        """
-        Get common OpenAI API headers for HTTP requests.
-        
-        Returns:
-            Dictionary with Authorization and Content-Type headers
-        """
-        return {
-            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        return utils.get_openai_headers(getattr(self.bot.config, "OPENAI_API_KEY", None))
 
     # ============ TEXT PROCESSING ============
     def _compile_correction_patterns(self) -> list[tuple[re.Pattern, str]]:
@@ -762,7 +752,7 @@ class VoiceProcessingCog(commands.Cog):
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
         # Include format in key to avoid serving wrong format from cache after format changes
-        key_str = f"opus:{voice}:{text}"
+        key_str = f"mp3:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     def _normalize_text_for_api(self, text: str) -> str:
@@ -1104,13 +1094,17 @@ class VoiceProcessingCog(commands.Cog):
         return bool(channel and any(not m.bot for m in channel.members))
 
     # ============ VOICE CONNECTION ============
-    async def _connect_to_voice(self, channel: disnake.VoiceChannel, timeout: int = 10) -> Optional[disnake.VoiceClient]:
+    async def _connect_to_voice(
+        self, channel: disnake.VoiceChannel, timeout: int | None = None
+    ) -> Optional[disnake.VoiceClient]:
         """
         Connect to voice channel with retries and robust edge-case handling.
-        
+
         Handles: already-connected, stale clients, ClientException, OSError.
         Professional pattern: verify channel still exists and has humans before connecting.
         """
+        if timeout is None:
+            timeout = int(self.bot.config.VOICE_TIMEOUT)
         guild = channel.guild
         if not guild:
             return None
@@ -1252,7 +1246,9 @@ class VoiceProcessingCog(commands.Cog):
                         prepared_item = None
                     else:
                         try:
-                            item = await asyncio.wait_for(state.queue.get(), timeout=300)
+                            item = await asyncio.wait_for(
+                                state.queue.get(), timeout=QUEUE_PROCESSOR_TIMEOUT
+                            )
                         except asyncio.TimeoutError:
                             break
                     
@@ -1263,7 +1259,7 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.debug(f"Processing TTS item: text_length={len(item.text)} chars, voice={item.voice}")
 
                     # Check expiration before generation
-                    if item.is_expired():
+                    if item.is_expired(MESSAGE_EXPIRY_TIME):
                         state.stats["dropped"] += 1
                         self.logger.debug("TTS item expired, dropping")
                         continue
@@ -1297,7 +1293,7 @@ class VoiceProcessingCog(commands.Cog):
                         try:
                             next_item = state.queue.get_nowait()
                             # Only pipeline if next item exists and isn't expired
-                            if next_item.is_expired():
+                            if next_item.is_expired(MESSAGE_EXPIRY_TIME):
                                 state.stats["dropped"] += 1
                                 self.logger.debug("Pipeline: Next item expired, skipping pipeline")
                             else:
@@ -1531,6 +1527,8 @@ class VoiceProcessingCog(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         """Handle voice state changes"""
+        if not self.enabled:
+            return
         if member.bot:
             return
         guild = getattr(member, "guild", None)
@@ -1609,10 +1607,11 @@ class VoiceProcessingCog(commands.Cog):
                             self._voice_assignments.pop(guild_id, None)
 
                 # Cleanup idle states
+                idle_timeout = int(self.bot.config.AUTO_DISCONNECT_TIMEOUT)
                 async with self._state_lock:
                     idle_guilds = [
                         gid for gid, state in self.guild_states.items()
-                        if state.is_idle()
+                        if state.is_idle(idle_timeout)
                     ]
 
                 for guild_id in idle_guilds:
@@ -1783,7 +1782,11 @@ class VoiceProcessingCog(commands.Cog):
             inline=True
         )
 
-        active_guilds = len([s for s in self.guild_states.values() if time.time() - s.last_activity < 600])
+        idle_window = int(self.bot.config.AUTO_DISCONNECT_TIMEOUT)
+        active_guilds = len([
+            s for s in self.guild_states.values()
+            if time.time() - s.last_activity < idle_window
+        ])
         processing_guilds = sum(1 for s in self.guild_states.values() if s.is_processing)
         
         embed.add_field(

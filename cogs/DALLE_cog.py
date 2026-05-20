@@ -97,9 +97,10 @@ class DALLECog(commands.Cog):
         rate_limit = bot.config.RATE_LIMIT_REQUESTS
         rate_window = bot.config.RATE_LIMIT_WINDOW
         max_queue = bot.config.MAX_QUEUE_SIZE
-        
+        cache_size = getattr(bot.config, "MAX_TTS_CACHE", max_queue)
+
         self.rate_limiter = utils.RateLimiter(limit=rate_limit, window=rate_window)
-        self.cache = utils.LRUCache[str](max_size=max_queue, ttl=3600)
+        self.cache = utils.LRUCache[str](max_size=cache_size, ttl=3600)
 
         # Queue
         self.queue = asyncio.Queue(maxsize=max_queue)
@@ -221,11 +222,7 @@ class DALLECog(commands.Cog):
 
     # ============ API HELPERS ============
     def _get_openai_headers(self) -> Dict[str, str]:
-        """Get common OpenAI API headers"""
-        return {
-            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        return utils.get_openai_headers(getattr(self.bot.config, "OPENAI_API_KEY", None))
 
     # ============ API GENERATION ============
     async def _generate_image(
