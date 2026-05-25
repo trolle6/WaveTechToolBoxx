@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import aiohttp
 import asyncio
+import hashlib
 import datetime as dt
 import re
 import time
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 import disnake
 from disnake.ext import commands
 
-from .utils import RateLimiter, autocomplete_safety_wrapper
+from .utils import RateLimiter, autocomplete_safety_wrapper, get_openai_headers
 
 # Import from modular components
 from .secret_santa_storage import (
@@ -1236,23 +1237,14 @@ class SecretSantaCore(commands.Cog):
         emoji_mapping = {}
         for participant_id in participants.keys():
             pid_str = str(participant_id)
-            try:
-                user_hash = hash(int(pid_str) if pid_str.isdigit() else participant_id)
-            except (ValueError, TypeError):
-                user_hash = hash(participant_id)
-            emoji_index = user_hash % len(emoji_pattern)
+            digest = hashlib.sha256(pid_str.encode("utf-8")).hexdigest()
+            emoji_index = int(digest[:8], 16) % len(emoji_pattern)
             emoji_mapping[pid_str] = emoji_pattern[emoji_index]
         
         return emoji_mapping
 
     def _get_openai_headers(self) -> Dict[str, str]:
-        """Get common OpenAI API headers"""
-        if not hasattr(self.bot.config, 'OPENAI_API_KEY') or not self.bot.config.OPENAI_API_KEY:
-            return {}
-        return {
-            "Authorization": f"Bearer {self.bot.config.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        return get_openai_headers(getattr(self.bot.config, "OPENAI_API_KEY", None))
 
     def _normalize_anonymize_input(self, text: str) -> str:
         """Ensure text is safe for API: non-empty, UTF-8, no null bytes."""

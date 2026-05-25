@@ -63,7 +63,7 @@ def mod_check():
 
 
 def admin_check():
-    """Check if user is administrator (guild-only, fails in DMs)."""
+    """Check if user is administrator (guild-only, fails in DMs). Unused — prefer mod_check()."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         member = _get_member_from_inter(inter)
         return member.guild_permissions.administrator if member else False

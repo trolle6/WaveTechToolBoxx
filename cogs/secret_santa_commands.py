@@ -2341,6 +2341,8 @@ class SecretSantaCommandsMixin:
                 return  # Event was stopped or is different
             if "participants" not in current:
                 current["participants"] = {}
+            if user_id in current["participants"]:
+                return
             current["participants"][user_id] = name
             await self._save_async()
 
@@ -2421,6 +2423,8 @@ class SecretSantaCommandsMixin:
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Register persistent reply button view - works even after bot restarts
-        # The view dynamically looks up santa/giftee relationships from event data
-        self.bot.add_view(SecretSantaReplyView())  # Button uses dynamic lookup
+        # Register persistent reply button view once — works after bot restarts
+        if getattr(self, "_reply_view_registered", False):
+            return
+        self.bot.add_view(SecretSantaReplyView())
+        self._reply_view_registered = True
