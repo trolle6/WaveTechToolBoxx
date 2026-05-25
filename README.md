@@ -12,6 +12,20 @@ Discord bot: TTS voice, DALL·E images, Secret Santa events, and file distributi
 4. Check: `python deploy.py`
 5. Run: `python main.py`
 
+## TTS dev lab (browser test, local only)
+
+`ERR_CONNECTION_REFUSED` on http://127.0.0.1:8765/ means **the lab server is not running** (not a gitignore issue).
+
+From repo root, **keep the terminal open**:
+
+```bash
+python start_tts_lab.py --open-browser
+# or: python main.py --tts-lab
+# Windows: scripts\start-tts-lab.bat
+```
+
+Requires `config.env` with `OPENAI_API_KEY`. See `dev/tts-lab/README.md`.
+
 ## Deploy
 
 | Method | Files |

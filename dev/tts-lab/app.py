@@ -8,11 +8,16 @@ Dev only: binds loopback.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
+import os
+import socket
 import sys
+import webbrowser
 from pathlib import Path
+from threading import Timer
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -30,8 +35,10 @@ import tts_client  # noqa: E402
 
 RingBufferHandler = log_buffer.RingBufferHandler
 
-HOST = "127.0.0.1"
-PORT = 8765
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+HOST = DEFAULT_HOST
+PORT = DEFAULT_PORT
 
 log_handler = RingBufferHandler(capacity=500)
 logging.basicConfig(
@@ -141,8 +148,75 @@ def create_app() -> web.Application:
     return app
 
 
-def main() -> None:
-    logger.info("Starting TTS lab at http://%s:%s/ (dev only)", HOST, PORT)
+def _port_is_free(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Local TTS dev lab — keep this process running while using the browser.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("TTS_LAB_HOST", DEFAULT_HOST),
+        help=f"Bind address (default: {DEFAULT_HOST})",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("TTS_LAB_PORT", str(DEFAULT_PORT))),
+        help=f"Port (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open http://host:port/ once the server is up",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    global HOST, PORT
+    args = _parse_args(argv)
+    HOST = args.host
+    PORT = args.port
+    url = f"http://{HOST}:{PORT}/"
+
+    if not _port_is_free(HOST, PORT):
+        print(
+            f"\nERROR: Port {PORT} on {HOST} is already in use.\n"
+            f"  • Another TTS lab may already be running — try {url}\n"
+            f"  • Or pick another port: python start_tts_lab.py --port 8766\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        print(
+            "WARNING: OPENAI_API_KEY not set in config.env — UI loads but TTS will fail.\n",
+            file=sys.stderr,
+        )
+
+    banner = (
+        f"\n{'=' * 60}\n"
+        f"  TTS Dev Lab running\n"
+        f"  URL: {url}\n"
+        f"  Leave this terminal OPEN. Ctrl+C to stop.\n"
+        f"  ERR_CONNECTION_REFUSED in the browser means this process is not running.\n"
+        f"{'=' * 60}\n"
+    )
+    print(banner, flush=True)
+    logger.info("Starting TTS lab at %s (dev only)", url)
+
+    if args.open_browser:
+        Timer(1.2, lambda: webbrowser.open(url)).start()
+
     web.run_app(create_app(), host=HOST, port=PORT, print=None)
 
 

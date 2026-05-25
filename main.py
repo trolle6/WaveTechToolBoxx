@@ -873,6 +873,24 @@ def _log_deploy_identity() -> None:
 
 # ============ MAIN ============
 if __name__ == "__main__":
+    if "--tts-lab" in sys.argv:
+        lab_args = [a for a in sys.argv[1:] if a != "--tts-lab"]
+        if "--open-browser" not in lab_args:
+            lab_args.append("--open-browser")
+        lab_script = Path(__file__).resolve().parent / "start_tts_lab.py"
+        if not lab_script.is_file():
+            logger.critical(
+                "TTS dev lab not found (%s). Merge PR #15 or checkout cursor/tts-dev-lab-6c6a.",
+                lab_script,
+            )
+            sys.exit(1)
+        import runpy
+
+        print("Starting TTS dev lab (--tts-lab); Discord bot will not start.")
+        sys.argv = [str(lab_script)] + lab_args
+        runpy.run_path(str(lab_script), run_name="__main__")
+        sys.exit(0)
+
     logger.info("Starting bot...")
     _log_deploy_identity()
     

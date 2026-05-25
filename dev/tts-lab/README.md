@@ -9,13 +9,17 @@ Local web UI to test OpenAI TTS without Discord. Binds **127.0.0.1:8765** only.
 
 ## Start
 
-From the repository root:
+From the repository root (pick one — **leave the terminal open**):
 
 ```bash
-python dev/tts-lab/app.py
+python start_tts_lab.py --open-browser
+python main.py --tts-lab
+python dev/tts-lab/app.py --open-browser
 ```
 
-Then open: **http://127.0.0.1:8765/**
+Windows: double-click or run `scripts\start-tts-lab.bat`
+
+Then open: **http://127.0.0.1:8765/** (or let `--open-browser` open it)
 
 ## If the browser shows ERR_CONNECTION_REFUSED
 
