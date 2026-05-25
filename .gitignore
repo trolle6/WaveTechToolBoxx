@@ -9,9 +9,19 @@ __pycache__/
 *$py.class
 *.so
 
+# Local virtualenvs (dev/tts-lab, bot, etc.)
+.venv/
+venv/
+env/
+
 # Logs
+logs/
 *.log
 bot.log*
+
+# TTS dev lab — keep source; ignore local exports
+dev/tts-lab/out/
+dev/tts-lab/*.mp3
 
 # IDE files
 .vscode/
