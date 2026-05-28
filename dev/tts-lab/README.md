@@ -32,6 +32,15 @@ curl -v --connect-timeout 2 http://127.0.0.1:8765/
 
 Start `app.py` on the **same machine** as the browser. Remote VMs need SSH port forwarding.
 
+## TrueNAS / Docker
+
+The bot entrypoint does not bind 8765. To run the lab in the same container:
+
+1. Deploy a tree that includes this folder and `start_tts_lab.py`.
+2. Set `TTS_LAB_ENABLED=true`, publish port `8765`, use `http://<NAS-IP>:8765/`.
+
+See `DEPLOYMENT.md` and `docker-compose.truenas.example.yml`.
+
 ## API
 
 | Endpoint | Method | Description |

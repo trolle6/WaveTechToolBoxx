@@ -17,12 +17,19 @@ services:
       - /mnt/HDDs/discord-bot:/app
     env_file:
       - /mnt/HDDs/discord-bot/config.env
+    ports:
+      # Optional: TTS dev lab (set TTS_LAB_ENABLED=true). Use http://<NAS-IP>:8765/ from your PC.
+      - "8765:8765"
     environment:
       # Deploy branch (NOT origin default — that was resetting you to master @ 69fb076)
       GIT_BRANCH: master
       # Production: DEBUG_MODE=false, LOG_LEVEL=INFO
       DEBUG_MODE: "false"
       LOG_LEVEL: "INFO"
+      # TTS browser lab (dev/tts-lab) — NOT started by default; does not replace Discord TTS
+      TTS_LAB_ENABLED: "false"
+      TTS_LAB_HOST: "0.0.0.0"
+      TTS_LAB_PORT: "8765"
     command:
       - sh
       - -c
