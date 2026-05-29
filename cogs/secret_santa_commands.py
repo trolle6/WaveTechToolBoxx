@@ -27,8 +27,12 @@ from .secret_santa_storage import (
     ARCHIVE_DIR,
     BACKUPS_DIR,
     archive_event,
+    count_event_participants,
+    is_valid_archive_year,
     load_all_archives,
     load_json,
+    normalize_archive,
+    save_json,
 )
 from .secret_santa_views import (
     BackupListPaginator,
@@ -969,26 +973,18 @@ class SecretSantaCommandsMixin:
                 return
             
             # Load archive and check if user participated
-            archive_data = load_json(archive_path)
-            if not archive_data:
+            archive_data = normalize_archive(load_json(archive_path), current_year, logger=self.logger)
+            if not archive_data or "event" not in archive_data:
                 await self._safe_edit_response(inter, content=f"❌ Failed to load archive for {current_year}")
                 return
-            
-            if "event" in archive_data:
-                event_data = archive_data["event"]
-                participants = event_data.get("participants") or {}
-                assignments = event_data.get("assignments") or {}
-                if not isinstance(participants, dict):
-                    participants = {}
-                if not isinstance(assignments, dict):
-                    assignments = {}
-            else:
-                # Legacy format
-                await self._safe_edit_response(
-                    inter,
-                    content=f"❌ Archive for {current_year} is in legacy format. Use `/ss edit_gift {current_year}` instead."
-                )
-                return
+
+            event_data = archive_data["event"]
+            participants = event_data.get("participants") or {}
+            assignments = event_data.get("assignments") or {}
+            if not isinstance(participants, dict):
+                participants = {}
+            if not isinstance(assignments, dict):
+                assignments = {}
             
             # Check if user participated
             if user_id not in participants:
@@ -1018,46 +1014,42 @@ class SecretSantaCommandsMixin:
         is_update = existing_submission is not None
 
         if is_archived:
-            # Update archive file
             archive_path = ARCHIVE_DIR / f"{current_year}.json"
-            archive_data = load_json(archive_path)
-            
-            if "event" in archive_data:
-                event_data = archive_data["event"]
-                if "gift_submissions" not in event_data:
-                    event_data["gift_submissions"] = {}
-                
-                event_data["gift_submissions"][user_id] = {
-                    "gift": gift_description,
-                    "receiver_id": receiver_id,
-                    "receiver_name": receiver_name,
-                    "submitted_at": time.time(),
-                    "timestamp": dt.datetime.now().isoformat()
-                }
-                
-                assignments_map = event_data.get("assignments") or {}
-                if not isinstance(assignments_map, dict):
-                    assignments_map = {}
-                total_participants = len(assignments_map)
-                gs = event_data.get("gift_submissions") or {}
-                gifts_exchanged = sum(1 for g in (gs.values() if isinstance(gs, dict) else []) if isinstance(g, dict) and (g.get("gift") or ""))
-                completion_percentage = int((gifts_exchanged / total_participants) * 100) if total_participants > 0 else 0
-                
-                if "statistics" not in archive_data:
-                    archive_data["statistics"] = {}
-                archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
-                archive_data["statistics"]["completion_percentage"] = completion_percentage
-                
-                # Save archive
-                async with self._lock:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(
-                        self._executor,
-                        save_json,
-                        archive_path,
-                        archive_data,
-                        self.logger
-                    )
+            archive_data = normalize_archive(load_json(archive_path), current_year, logger=self.logger)
+            event_data = archive_data.get("event") or {}
+            if "gift_submissions" not in event_data:
+                event_data["gift_submissions"] = {}
+
+            event_data["gift_submissions"][user_id] = {
+                "gift": gift_description,
+                "receiver_id": receiver_id,
+                "receiver_name": receiver_name,
+                "submitted_at": time.time(),
+                "timestamp": dt.datetime.now().isoformat()
+            }
+
+            assignments_map = event_data.get("assignments") or {}
+            if not isinstance(assignments_map, dict):
+                assignments_map = {}
+            total_participants = count_event_participants(event_data)
+            gs = event_data.get("gift_submissions") or {}
+            gifts_exchanged = sum(
+                1 for g in (gs.values() if isinstance(gs, dict) else [])
+                if isinstance(g, dict) and (g.get("gift") or "")
+            )
+            completion_percentage = int((gifts_exchanged / total_participants) * 100) if total_participants > 0 else 0
+
+            if "statistics" not in archive_data:
+                archive_data["statistics"] = {}
+            archive_data["statistics"]["gifts_exchanged"] = gifts_exchanged
+            archive_data["statistics"]["completion_percentage"] = completion_percentage
+
+            async with self._lock:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    self._executor,
+                    lambda: save_json(archive_path, archive_data, self.logger)
+                )
         else:
             # Save to active event (normal flow)
             async with self._lock:
@@ -1127,8 +1119,8 @@ class SecretSantaCommandsMixin:
             return  # Interaction expired, can't proceed
         # Validate year range (same as delete_year) to avoid bad paths
         today_year = dt.date.today().year
-        if year < 2020 or year > today_year + 1:
-            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1})")
+        if not is_valid_archive_year(year):
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1}, or an archived year)")
             return
         user_id = str(inter.author.id)
         archive_path = ARCHIVE_DIR / f"{year}.json"
@@ -1683,12 +1675,11 @@ class SecretSantaCommandsMixin:
         """Show event history"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
-        # Validate year range if provided (consistent with edit_gift / delete_year)
-        today_year = dt.date.today().year
-        if year is not None and (year < 2020 or year > today_year + 1):
-            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1})")
-            return
         archives = load_all_archives(logger=self.logger)
+        if year is not None and not is_valid_archive_year(year, archived_years=archives.keys()):
+            today_year = dt.date.today().year
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1}, or an archived year)")
+            return
         if not archives:
             await self._safe_edit_response(inter, content="❌ No archived events found")
             return
@@ -1725,12 +1716,13 @@ class SecretSantaCommandsMixin:
                 has_assignments = bool(assignments)
                 gifts_count = sum(1 for gid in (assignments or {}) if ((gifts or {}).get(str(gid)) or {}).get("gift"))
                 has_gifts = gifts_count > 0
+                n_participants = count_event_participants(event_data)
                 if has_gifts:
-                    description = f"**{len(participants)}** participants, **{gifts_count}** gifts exchanged"
+                    description = f"**{n_participants}** participants, **{gifts_count}** gifts exchanged"
                 elif has_assignments:
-                    description = f"**{len(participants)}** participants, assignments made but no gifts recorded"
+                    description = f"**{n_participants}** participants, assignments made but no gifts recorded"
                 else:
-                    description = f"**{len(participants)}** participants signed up, event incomplete"
+                    description = f"**{n_participants}** participants signed up, event incomplete"
 
                 embed = disnake.Embed(
                     title=f"🎄 Secret Santa {year}",
@@ -1773,11 +1765,11 @@ class SecretSantaCommandsMixin:
                     )
                 else:
                     gifts_count = 0
-                    status_text = f"⏸️ Signup completed ({len(participants)} joined)\n❌ No assignments made\n❌ No gifts recorded"
+                    status_text = f"⏸️ Signup completed ({n_participants} joined)\n❌ No assignments made\n❌ No gifts recorded"
                     embed.add_field(name="📝 Event Status", value=status_text, inline=False)
 
                 # Statistics (count only submissions with non-empty gift)
-                completion_rate = (gifts_count / len(participants) * 100) if participants else 0
+                completion_rate = (gifts_count / n_participants * 100) if n_participants else 0
                 embed.add_field(
                     name="📊 Statistics",
                     value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {gifts_count}",
@@ -1808,11 +1800,11 @@ class SecretSantaCommandsMixin:
                 for year_val in sorted_years:
                     archive = archives[year_val]
                     event_data = archive.get("event", {})
-                    participants = event_data.get("participants", {})
                     gifts = event_data.get("gift_submissions", {})
                     assignments_y = event_data.get("assignments", {})
+                    n_participants = count_event_participants(event_data)
                     gifts_count_y = sum(1 for gid in assignments_y if (gifts.get(str(gid)) or {}).get("gift"))
-                    completion_rate = (gifts_count_y / len(participants) * 100) if participants else 0
+                    completion_rate = (gifts_count_y / n_participants * 100) if n_participants else 0
 
                     # Status indicator
                     if completion_rate >= 90:
@@ -1824,9 +1816,10 @@ class SecretSantaCommandsMixin:
                     else:
                         status = "⏳"
 
-                    timeline_text.append(
-                        f"**{year_val}** {status} — {len(participants)} participants, {gifts_count_y} gifts ({completion_rate:.0f}%)"
-                    )
+                    label = f"**{year_val}** {status} — {n_participants} participants, {gifts_count_y} gifts ({completion_rate:.0f}%)"
+                    if year_val == 3000:
+                        label = f"**{year_val}** 🧪 — {n_participants} participants (test archive)"
+                    timeline_text.append(label)
 
                 embed.add_field(
                     name="📅 Event Timeline",
@@ -1838,10 +1831,9 @@ class SecretSantaCommandsMixin:
                 total_participants = total_gifts = 0
                 for y in sorted_years:
                     event_data = archives[y].get("event", {})
-                    participants_y = event_data.get("participants", {})
                     gifts_y = event_data.get("gift_submissions", {})
                     assignments_y = event_data.get("assignments", {})
-                    total_participants += len(participants_y)
+                    total_participants += count_event_participants(event_data)
                     total_gifts += sum(1 for gid in assignments_y if (gifts_y.get(str(gid)) or {}).get("gift"))
                 avg_participants = total_participants / len(sorted_years) if sorted_years else 0
                 avg_completion = (total_gifts / total_participants * 100) if total_participants else 0
@@ -2051,8 +2043,9 @@ class SecretSantaCommandsMixin:
         
         # Safety check - don't allow deleting very old years accidentally
         current_year = dt.date.today().year
-        if year < 2020 or year > current_year + 1:
-            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020-{current_year + 1})")
+        archived_years = self._get_available_years()
+        if not is_valid_archive_year(year, archived_years=archived_years):
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020-{current_year + 1}, or an archived year)")
             return
         
         # CRITICAL SAFETY CHECK: Prevent deleting current active year
@@ -2165,8 +2158,9 @@ class SecretSantaCommandsMixin:
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
         today_year = dt.date.today().year
-        if year < 2020 or year > today_year + 1:
-            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1})")
+        archived_years = self._get_available_years()
+        if not is_valid_archive_year(year, archived_years=archived_years):
+            await self._safe_edit_response(inter, content=f"❌ Invalid year {year} (must be 2020–{today_year + 1}, or an archived year)")
             return
         backup_path = BACKUPS_DIR / f"{year}.json"
         archive_path = ARCHIVE_DIR / f"{year}.json"

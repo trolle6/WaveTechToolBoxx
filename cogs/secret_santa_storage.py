@@ -42,9 +42,142 @@ BACKUPS_DIR: Path = ARCHIVE_DIR / "backups"  # Indestructible backups (never aut
 ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Synthetic test archive (all historical participants); excluded from assignment history by default
+TEST_ARCHIVE_YEAR = 3000
 
 # Max file size to prevent DoS from huge/corrupt files (10MB is plenty for state/archives)
 LOAD_JSON_MAX_BYTES = 10 * 1024 * 1024
+
+
+def is_valid_archive_year(year: int, archived_years: Optional[Any] = None) -> bool:
+    """
+    Return True if ``year`` is valid for history/edit commands.
+
+    Allows any year that already has an archive file (including test year 3000),
+    plus the normal operational range (2020 … current calendar year + 1).
+    """
+    if not isinstance(year, int):
+        return False
+    if archived_years is not None:
+        try:
+            if year in archived_years:
+                return True
+        except TypeError:
+            pass
+    today_year = dt.date.today().year
+    return 2020 <= year <= today_year + 1
+
+
+def count_event_participants(event_data: dict) -> int:
+    """
+    Participant count for history embeds — prefer assignment pairs over raw dict size.
+
+    Uses unique giver/receiver IDs from ``assignments`` when present; falls back to
+    ``participants`` dict length.
+    """
+    if not isinstance(event_data, dict):
+        return 0
+    assignments = event_data.get("assignments")
+    if isinstance(assignments, dict) and assignments:
+        ids = {str(k) for k in assignments.keys()} | {str(v) for v in assignments.values()}
+        return len(ids)
+    participants = event_data.get("participants")
+    if isinstance(participants, dict):
+        return len(participants)
+    return 0
+
+
+def normalize_archive(data: dict, year: int, logger=None) -> dict:
+    """
+    Normalize legacy or unified archive JSON to the canonical on-disk structure.
+
+    Handles:
+    - Unified format (``event`` key) — returned with missing keys filled in
+    - Legacy ``assignments`` list — converted to ``event`` with participants map
+    - Special multi-giver entries (``giver_ids``) — stored under ``event.special_gifts``
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    if "event" in data and isinstance(data.get("event"), dict):
+        event = dict(data["event"])
+        if "participants" not in event or not isinstance(event.get("participants"), dict):
+            event["participants"] = event.get("participants") if isinstance(event.get("participants"), dict) else {}
+        if "assignments" not in event or not isinstance(event.get("assignments"), dict):
+            event["assignments"] = event.get("assignments") if isinstance(event.get("assignments"), dict) else {}
+        if "gift_submissions" not in event or not isinstance(event.get("gift_submissions"), dict):
+            event["gift_submissions"] = event.get("gift_submissions") if isinstance(event.get("gift_submissions"), dict) else {}
+        if "special_gifts" not in event:
+            event["special_gifts"] = event.get("special_gifts") if isinstance(event.get("special_gifts"), list) else []
+        result = dict(data)
+        result["year"] = year
+        result["event"] = event
+        return result
+
+    participants: Dict[str, str] = {}
+    gifts: Dict[str, dict] = {}
+    assignments_map: Dict[str, str] = {}
+    special_gifts: list = []
+
+    for assignment in data.get("assignments") or []:
+        if not isinstance(assignment, dict):
+            continue
+
+        if assignment.get("giver_ids"):
+            special_gifts.append({
+                "giver_ids": assignment.get("giver_ids") or [],
+                "giver_names": assignment.get("giver_names") or [],
+                "receiver_name": assignment.get("receiver_name"),
+                "gift": assignment.get("gift"),
+                "special_note": assignment.get("special_note"),
+            })
+            for gid, gname in zip(
+                assignment.get("giver_ids") or [],
+                assignment.get("giver_names") or [],
+            ):
+                if gid:
+                    participants[str(gid)] = gname or "Unknown"
+            continue
+
+        giver_id = str(assignment.get("giver_id") or "")
+        giver_name = assignment.get("giver_name", "Unknown")
+        receiver_id = str(assignment.get("receiver_id") or "")
+        receiver_name = assignment.get("receiver_name", "Unknown")
+        gift = assignment.get("gift")
+
+        if giver_id:
+            participants[giver_id] = giver_name
+        if receiver_id:
+            participants[receiver_id] = receiver_name
+        if giver_id and receiver_id:
+            assignments_map[giver_id] = receiver_id
+        if giver_id and isinstance(gift, str) and gift.strip():
+            gifts[giver_id] = {
+                "gift": gift,
+                "receiver_name": receiver_name,
+                "receiver_id": receiver_id,
+            }
+
+    event = {
+        "active": False,
+        "participants": participants,
+        "assignments": assignments_map,
+        "gift_submissions": gifts,
+    }
+    if special_gifts:
+        event["special_gifts"] = special_gifts
+
+    result = {
+        "year": year,
+        "event": event,
+    }
+    if data.get("archived_at") is not None:
+        result["archived_at"] = data["archived_at"]
+    if data.get("timestamp"):
+        result["timestamp"] = data["timestamp"]
+    if data.get("statistics"):
+        result["statistics"] = data["statistics"]
+    return result
 
 
 def load_json(path: Path, default: Any = None) -> Any:
@@ -299,49 +432,9 @@ def load_all_archives(logger=None) -> Dict[int, dict]:
         try:
             year_int = int(year_str)
             data = load_json(archive_file)
-            
-            # Check for unified format (event key)
-            if data and "event" in data:
-                archives[year_int] = data
-            
-            # Handle legacy format (assignments list)
-            elif data and "assignments" in data and isinstance(data["assignments"], list):
-                # Convert to unified format
-                participants = {}
-                gifts = {}
-                assignments_map = {}
-                
-                for assignment in data["assignments"]:
-                    if not isinstance(assignment, dict):
-                        continue
-                    giver_id = assignment.get("giver_id", "")
-                    giver_name = assignment.get("giver_name", "Unknown")
-                    receiver_id = assignment.get("receiver_id", "")
-                    receiver_name = assignment.get("receiver_name", "Unknown")
-                    gift = assignment.get("gift")
-                    # Only include in gift_submissions when gift is a non-empty string (handles null/empty/legacy)
-                    if isinstance(gift, str) and gift.strip():
-                        gifts[giver_id] = {
-                            "gift": gift,
-                            "receiver_name": receiver_name,
-                            "receiver_id": receiver_id
-                        }
-                    
-                    participants[giver_id] = giver_name
-                    if receiver_id:
-                        participants[receiver_id] = receiver_name
-                    if giver_id and receiver_id:
-                        assignments_map[giver_id] = receiver_id
-                
-                # Convert to unified structure
-                archives[year_int] = {
-                    "year": year_int,
-                    "event": {
-                        "participants": participants,
-                        "gift_submissions": gifts,
-                        "assignments": assignments_map
-                    }
-                }
+            if not data:
+                continue
+            archives[year_int] = normalize_archive(data, year_int, logger=logger)
         
         except Exception as e:
             if logger:
@@ -406,6 +499,8 @@ def archive_event(event: Dict[str, Any], year: int, logger=None) -> str:
 # Export paths for cog usage
 __all__ = [
     'ROOT', 'STATE_FILE', 'ARCHIVE_DIR', 'BACKUPS_DIR',
+    'TEST_ARCHIVE_YEAR',
     'load_json', 'save_json', 'get_default_state', 'validate_state_structure',
-    'load_state_with_fallback', 'save_state', 'load_all_archives', 'archive_event'
+    'load_state_with_fallback', 'save_state', 'load_all_archives', 'archive_event',
+    'normalize_archive', 'count_event_participants', 'is_valid_archive_year',
 ]

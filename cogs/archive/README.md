@@ -114,8 +114,13 @@ If you need to fix data:
 ## 📊 Commands That Use Archives
 
 - `/ss history` - View all years overview
-- `/ss history [year]` - View specific year details
+- `/ss history [year]` - View specific year details (including test year **3000**)
 - `/ss user_history @user` - View one user across all years
+
+### Test archive (year 3000)
+
+`3000.json` is a **synthetic** archive containing every historical participant in one big cycle.
+It appears in `/ss history` but is **excluded from the shuffle algorithm** so it cannot block real assignments.
 
 ## 🗂️ Archive Retention
 
