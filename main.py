@@ -816,17 +816,18 @@ def handle_signal(signum, frame):
 
 
 # ============ COG LOADING ============
+COG_EXTENSIONS = [
+    "cogs.voice_processing_cog",
+    "cogs.DALLE_cog",
+    "cogs.SecretSanta_cog",
+    "cogs.DistributeZip_cog",
+]
+
+
 def load_cogs() -> int:
     """Load all cogs and return count"""
-    cogs = [
-        "cogs.voice_processing_cog",
-        "cogs.DALLE_cog",
-        "cogs.SecretSanta_cog",
-        "cogs.DistributeZip_cog"
-    ]
-    
     loaded = 0
-    for cog in cogs:
+    for cog in COG_EXTENSIONS:
         try:
             bot.load_extension(cog)
             logger.info(f"Loaded {cog}")
@@ -835,6 +836,57 @@ def load_cogs() -> int:
             logger.error(f"Failed to load {cog}: {e}")
     
     return loaded
+
+
+def reload_cogs() -> int:
+    """Reload extensions after a crash so cog_load hooks and tasks restart."""
+    loaded = 0
+    for cog in COG_EXTENSIONS:
+        try:
+            if cog in bot.extensions:
+                bot.reload_extension(cog)
+                logger.info(f"Reloaded {cog}")
+            else:
+                bot.load_extension(cog)
+                logger.info(f"Loaded {cog}")
+            loaded += 1
+        except Exception as e:
+            logger.error(f"Failed to reload {cog}: {e}")
+    return loaded
+
+
+def prepare_bot_for_retry() -> None:
+    """
+    Reset asyncio/disnake runtime after bot.run() closes the event loop.
+
+    bot.run() always closes self.loop on exit. Retrying bot.run() on the same
+    bot instance without a fresh loop causes immediate 'Event loop is closed'.
+    """
+    global _shutdown_in_progress
+
+    _shutdown_in_progress = False
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bot.loop = loop
+
+    from disnake.http import HTTPClient
+
+    bot.http = HTTPClient(loop=loop)
+
+    bot.http_mgr._session = None
+    bot.http_mgr._session_lock = asyncio.Lock()
+
+    bot.ready_once = False
+
+    if discord_handler:
+        discord_handler.bot = None
+        discord_handler.sender_task = None
+        discord_handler.message_queue = asyncio.Queue(maxsize=50)
+
+    if bot.extensions:
+        reload_cogs()
+    logger.info("Prepared fresh event loop for bot restart")
 
 
 def _resolve_git_short_commit() -> str:
@@ -918,6 +970,9 @@ if __name__ == "__main__":
         sys.exit(1)
     
     logger.info(f"Successfully loaded {num_loaded} cogs")
+
+    if bot.loop.is_closed():
+        prepare_bot_for_retry()
     
     # Retry configuration for infinite retry with exponential backoff
     MAX_RETRY_WAIT = 60  # Maximum wait time between retries (seconds)
@@ -959,6 +1014,8 @@ if __name__ == "__main__":
                 # Reset counter periodically to prevent integer overflow on long-running systems
                 if retry_count > RETRY_RESET_THRESHOLD:
                     retry_count = 0
+
+                prepare_bot_for_retry()
     finally:
         if shutdown_flag[0]:
             logger.info("Performing graceful shutdown...")
