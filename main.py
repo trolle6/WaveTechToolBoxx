@@ -886,7 +886,68 @@ def prepare_bot_for_retry() -> None:
 
     if bot.extensions:
         reload_cogs()
-    logger.info("Prepared fresh event loop for bot restart")
+    logger.info(
+        "Prepared fresh event loop for bot restart (loop_id=%s)",
+        id(bot.loop),
+    )
+
+
+def _cleanup_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Best-effort task cleanup before closing an event loop."""
+    if loop.is_closed():
+        return
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        pass
+    finally:
+        if not loop.is_closed():
+            loop.close()
+
+
+def run_bot_session() -> None:
+    """
+    Run one bot session until disconnect, crash, or signal.
+
+    Unlike bot.run(), this is safe to call again after prepare_bot_for_retry().
+    """
+    loop = bot.loop
+    if loop.is_closed():
+        raise RuntimeError("Event loop is closed")
+
+    try:
+        loop.add_signal_handler(signal.SIGINT, lambda: loop.stop())
+        loop.add_signal_handler(signal.SIGTERM, lambda: loop.stop())
+    except NotImplementedError:
+        pass
+
+    async def runner() -> None:
+        try:
+            await bot.start(config.DISCORD_TOKEN, reconnect=True)
+        finally:
+            if not bot.is_closed():
+                await bot.close()
+
+    def stop_loop_on_completion(_future: asyncio.Future) -> None:
+        loop.stop()
+
+    future = asyncio.ensure_future(runner(), loop=loop)
+    future.add_done_callback(stop_loop_on_completion)
+    try:
+        loop.run_forever()
+    finally:
+        future.remove_done_callback(stop_loop_on_completion)
+        try:
+            if not future.cancelled():
+                future.result()
+        except Exception:
+            pass
+        _cleanup_event_loop(loop)
 
 
 def _resolve_git_short_commit() -> str:
@@ -970,9 +1031,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     logger.info(f"Successfully loaded {num_loaded} cogs")
-
-    if bot.loop.is_closed():
-        prepare_bot_for_retry()
+    logger.info("Bot runtime: crash-retry-v2 (explicit loop reset between sessions)")
     
     # Retry configuration for infinite retry with exponential backoff
     MAX_RETRY_WAIT = 60  # Maximum wait time between retries (seconds)
@@ -995,8 +1054,10 @@ if __name__ == "__main__":
     # Main bot loop with infinite retry on crashes (ensures 24/7/365 uptime)
     try:
         while not shutdown_flag[0]:
+            if retry_count > 0 or bot.loop.is_closed():
+                prepare_bot_for_retry()
             try:
-                bot.run(config.DISCORD_TOKEN, reconnect=True)
+                run_bot_session()
                 break  # Normal shutdown (signal received)
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt - shutting down")
@@ -1014,8 +1075,6 @@ if __name__ == "__main__":
                 # Reset counter periodically to prevent integer overflow on long-running systems
                 if retry_count > RETRY_RESET_THRESHOLD:
                     retry_count = 0
-
-                prepare_bot_for_retry()
     finally:
         if shutdown_flag[0]:
             logger.info("Performing graceful shutdown...")
