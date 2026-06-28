@@ -892,64 +892,6 @@ def prepare_bot_for_retry() -> None:
     )
 
 
-def _cleanup_event_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Best-effort task cleanup before closing an event loop."""
-    if loop.is_closed():
-        return
-    try:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.run_until_complete(loop.shutdown_asyncgens())
-    except Exception:
-        pass
-    finally:
-        if not loop.is_closed():
-            loop.close()
-
-
-def run_bot_session() -> None:
-    """
-    Run one bot session until disconnect, crash, or signal.
-
-    Unlike bot.run(), this is safe to call again after prepare_bot_for_retry().
-    """
-    loop = bot.loop
-    if loop.is_closed():
-        raise RuntimeError("Event loop is closed")
-
-    try:
-        loop.add_signal_handler(signal.SIGINT, lambda: loop.stop())
-        loop.add_signal_handler(signal.SIGTERM, lambda: loop.stop())
-    except NotImplementedError:
-        pass
-
-    async def runner() -> None:
-        try:
-            await bot.start(config.DISCORD_TOKEN, reconnect=True)
-        finally:
-            if not bot.is_closed():
-                await bot.close()
-
-    def stop_loop_on_completion(_future: asyncio.Future) -> None:
-        loop.stop()
-
-    future = asyncio.ensure_future(runner(), loop=loop)
-    future.add_done_callback(stop_loop_on_completion)
-    try:
-        loop.run_forever()
-    finally:
-        future.remove_done_callback(stop_loop_on_completion)
-        try:
-            if not future.cancelled():
-                future.result()
-        except Exception:
-            pass
-        _cleanup_event_loop(loop)
-
-
 def _resolve_git_short_commit() -> str:
     """Best-effort commit id (entrypoint env, then .git/HEAD)."""
     short = os.getenv("GIT_COMMIT_SHORT")
@@ -1031,7 +973,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     logger.info(f"Successfully loaded {num_loaded} cogs")
-    logger.info("Bot runtime: crash-retry-v2 (explicit loop reset between sessions)")
+    logger.info("Bot runtime: crash-retry-v3 (bot.run + loop reset, no process exit on crash)")
     
     # Retry configuration for infinite retry with exponential backoff
     MAX_RETRY_WAIT = 60  # Maximum wait time between retries (seconds)
@@ -1057,8 +999,7 @@ if __name__ == "__main__":
             if retry_count > 0 or bot.loop.is_closed():
                 prepare_bot_for_retry()
             try:
-                run_bot_session()
-                break  # Normal shutdown (signal received)
+                bot.run(config.DISCORD_TOKEN, reconnect=True)
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt - shutting down")
                 shutdown_flag[0] = True
@@ -1066,30 +1007,32 @@ if __name__ == "__main__":
             except Exception as e:
                 retry_count += 1
                 logger.critical(f"Bot crashed (attempt #{retry_count}): {e}", exc_info=True)
-                
-                # Exponential backoff: 5s, 10s, 15s... up to 60s max
-                wait_time = min(MAX_RETRY_WAIT, RETRY_BACKOFF_MULTIPLIER * min(retry_count, RETRY_BACKOFF_CAP))
-                logger.warning(f"Retrying in {wait_time}s... (will retry forever)")
-                time.sleep(wait_time)
-                
-                # Reset counter periodically to prevent integer overflow on long-running systems
-                if retry_count > RETRY_RESET_THRESHOLD:
-                    retry_count = 0
+            else:
+                if shutdown_flag[0]:
+                    break
+                retry_count += 1
+                logger.critical(
+                    "Bot session ended without shutdown signal (attempt #%s)",
+                    retry_count,
+                )
+
+            if shutdown_flag[0]:
+                break
+
+            wait_time = min(MAX_RETRY_WAIT, RETRY_BACKOFF_MULTIPLIER * min(retry_count, RETRY_BACKOFF_CAP))
+            logger.warning(f"Retrying in {wait_time}s... (will retry forever)")
+            time.sleep(wait_time)
+
+            if retry_count > RETRY_RESET_THRESHOLD:
+                retry_count = 0
     finally:
         if shutdown_flag[0]:
             logger.info("Performing graceful shutdown...")
             try:
-                # Try to get running loop - if bot.run() is still active, it will handle shutdown
-                try:
-                    loop = asyncio.get_running_loop()
-                    if loop.is_running():
-                        loop.create_task(graceful_shutdown())
-                except RuntimeError:
-                    # No running loop - bot.run() already stopped, cleanup already done
-                    pass
+                asyncio.run(asyncio.wait_for(graceful_shutdown(), timeout=20.0))
+            except asyncio.TimeoutError:
+                logger.error("Graceful shutdown timed out after 20s")
             except Exception as e:
                 logger.error(f"Cleanup failed: {e}")
             finally:
                 os._exit(0)
-        else:
-            logger.warning("Bot crashed - will retry automatically")
