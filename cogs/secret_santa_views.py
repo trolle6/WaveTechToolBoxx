@@ -20,6 +20,7 @@ from typing import Dict, List, Tuple
 import disnake
 
 from .secret_santa_checks import format_gift_description_for_display, GIFT_NO_SUBMISSION_ROW
+from .secret_santa_storage import count_event_participants
 
 
 class SecretSantaReplyView(disnake.ui.View):
@@ -194,11 +195,14 @@ class YearHistoryPaginator(disnake.ui.View):
         has_gifts = gifts_count > 0
         
         if has_gifts:
-            description = f"**{len(self.participants)}** participants, **{gifts_count}** gifts exchanged"
+            n_participants = count_event_participants(event_data)
+            description = f"**{n_participants}** participants, **{gifts_count}** gifts exchanged"
         elif has_assignments:
-            description = f"**{len(self.participants)}** participants, assignments made but no gifts recorded"
+            n_participants = count_event_participants(event_data)
+            description = f"**{n_participants}** participants, assignments made but no gifts recorded"
         else:
-            description = f"**{len(self.participants)}** participants signed up, event incomplete"
+            n_participants = count_event_participants(event_data)
+            description = f"**{n_participants}** participants signed up, event incomplete"
         
         embed = disnake.Embed(
             title=f"🎄 Secret Santa {self.year}",
@@ -249,11 +253,12 @@ class YearHistoryPaginator(disnake.ui.View):
                 inline=False
             )
         else:
-            status_text = f"⏸️ Signup completed ({len(self.participants)} joined)\n❌ No assignments made\n❌ No gifts recorded"
+            status_text = f"⏸️ Signup completed ({count_event_participants(event_data)} joined)\n❌ No assignments made\n❌ No gifts recorded"
             embed.add_field(name="📝 Event Status", value=status_text, inline=False)
         
         # Statistics
-        completion_rate = (gifts_count / len(self.participants) * 100) if self.participants else 0
+        n_participants = count_event_participants(event_data)
+        completion_rate = (gifts_count / n_participants * 100) if n_participants else 0
         embed.add_field(
             name="📊 Statistics",
             value=f"**Completion:** {completion_rate:.0f}%\n**Total Gifts:** {gifts_count}",
@@ -491,8 +496,9 @@ class YearTimelinePaginator(disnake.ui.View):
             participants = event_data.get("participants", {})
             gifts = event_data.get("gift_submissions", {})
             assignments_y = event_data.get("assignments", {})
+            n_participants = count_event_participants(event_data)
             gifts_count_y = sum(1 for gid in assignments_y if (gifts.get(str(gid)) or {}).get("gift"))
-            completion_rate = (gifts_count_y / len(participants) * 100) if participants else 0
+            completion_rate = (gifts_count_y / n_participants * 100) if n_participants else 0
             
             # Status indicator
             if completion_rate >= 90:
@@ -505,7 +511,7 @@ class YearTimelinePaginator(disnake.ui.View):
                 status = "⏳"
             
             timeline_text.append(
-                f"**{year_val}** {status} — {len(participants)} participants, {gifts_count_y} gifts ({completion_rate:.0f}%)"
+                f"**{year_val}** {status} — {n_participants} participants, {gifts_count_y} gifts ({completion_rate:.0f}%)"
             )
         
         embed.add_field(
@@ -518,10 +524,9 @@ class YearTimelinePaginator(disnake.ui.View):
         total_participants = total_gifts = 0
         for y in self.sorted_years:
             event_data = self.archives[y].get("event", {})
-            participants_y = event_data.get("participants", {})
             gifts_y = event_data.get("gift_submissions", {})
             assignments_y = event_data.get("assignments", {})
-            total_participants += len(participants_y)
+            total_participants += count_event_participants(event_data)
             total_gifts += sum(1 for gid in assignments_y if (gifts_y.get(str(gid)) or {}).get("gift"))
         avg_participants = total_participants / len(self.sorted_years) if self.sorted_years else 0
         avg_completion = (total_gifts / total_participants * 100) if total_participants else 0

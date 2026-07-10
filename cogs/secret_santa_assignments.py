@@ -18,7 +18,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .secret_santa_storage import load_json, ARCHIVE_DIR
+from .secret_santa_storage import load_json, ARCHIVE_DIR, TEST_ARCHIVE_YEAR
 
 
 def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = None, logger=None) -> tuple[Dict[str, List[int]], List[int]]:
@@ -65,15 +65,21 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
 
             year = int(year_str)
             available_years.append(year)
+
+            archive_data = load_json(archive_file)
+            if not isinstance(archive_data, dict):
+                continue
+
+            # Synthetic test archives must not affect real assignment history
+            if year == TEST_ARCHIVE_YEAR or archive_data.get("test_archive"):
+                if logger:
+                    logger.debug(f"Skipping test archive {year} for assignment history")
+                continue
             
             # Skip excluded years
             if year in exclude_years:
                 if logger:
                     logger.info(f"Excluding year {year} from history (fallback mode)")
-                continue
-
-            archive_data = load_json(archive_file)
-            if not isinstance(archive_data, dict):
                 continue
 
             # Check for unified format (event key)

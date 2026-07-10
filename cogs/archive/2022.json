@@ -1,159 +1,168 @@
 {
   "year": 2022,
-  "assignments": [
-    {
-      "giver_id": "722756905344434218",
-      "giver_name": "oriol",
-      "receiver_id": "251835504654286852",
-      "receiver_name": "trolle",
-      "gift": "Volvo mapart and musical bolt"
+  "event": {
+    "active": false,
+    "participants": {
+      "722756905344434218": "oriol",
+      "251835504654286852": "trolle",
+      "188187888289054720": "m³",
+      "690607710390976633": "ruthro",
+      "185834053558075392": "jkm",
+      "288183610064764928": "carbsna",
+      "323515840236486659": "kikue",
+      "888963636800942090": "jhill",
+      "294639971955113986": "random789",
+      "282364743996538881": "xoid",
+      "215220873932570624": "MMM",
+      "352356592169254922": "green_jab",
+      "665985164702384159": "joosepy",
+      "239547426224996353": "sweetbaboo",
+      "306569126141493249": "huntoon",
+      "713417870029226004": "henrik",
+      "548206593779564557": "spectrumtemper",
+      "451127158761455616": "tictac",
+      "297997568200409088": "zenx",
+      "877634158028025886": "antimonotrone",
+      "460277745264492544": "ncolyer",
+      "368779048819752961": "pando"
     },
-    {
-      "giver_id": "251835504654286852",
-      "giver_name": "trolle",
-      "receiver_id": "188187888289054720",
-      "receiver_name": "m³",
-      "gift": "Mega netherite beacon"
+    "assignments": {
+      "722756905344434218": "251835504654286852",
+      "251835504654286852": "188187888289054720",
+      "188187888289054720": "690607710390976633",
+      "690607710390976633": "185834053558075392",
+      "185834053558075392": "288183610064764928",
+      "288183610064764928": "323515840236486659",
+      "323515840236486659": "888963636800942090",
+      "888963636800942090": "294639971955113986",
+      "294639971955113986": "282364743996538881",
+      "282364743996538881": "215220873932570624",
+      "215220873932570624": "352356592169254922",
+      "352356592169254922": "665985164702384159",
+      "665985164702384159": "239547426224996353",
+      "239547426224996353": "306569126141493249",
+      "306569126141493249": "713417870029226004",
+      "713417870029226004": "548206593779564557",
+      "548206593779564557": "451127158761455616",
+      "451127158761455616": "297997568200409088",
+      "297997568200409088": "877634158028025886",
+      "877634158028025886": "460277745264492544",
+      "460277745264492544": "368779048819752961",
+      "368779048819752961": "722756905344434218"
     },
-    {
-      "giver_id": "188187888289054720",
-      "giver_name": "m³",
-      "receiver_id": "690607710390976633",
-      "receiver_name": "ruthro",
-      "gift": "JKM voodoo machine"
-    },
-    {
-      "giver_id": "690607710390976633",
-      "giver_name": "ruthro",
-      "receiver_id": "185834053558075392",
-      "receiver_name": "jkm",
-      "gift": "Literally nothing"
-    },
-    {
-      "giver_id": "185834053558075392",
-      "giver_name": "jkm",
-      "receiver_id": "288183610064764928",
-      "receiver_name": "carbsna",
-      "gift": "Scavenger hunt"
-    },
-    {
-      "giver_id": "288183610064764928",
-      "giver_name": "carbsna",
-      "receiver_id": "323515840236486659",
-      "receiver_name": "kikue",
-      "gift": "Llama cannon"
-    },
-    {
-      "giver_id": "323515840236486659",
-      "giver_name": "kikue",
-      "receiver_id": "888963636800942090",
-      "receiver_name": "jhill",
-      "gift": "Christmas rollercoaster"
-    },
-    {
-      "giver_id": "888963636800942090",
-      "giver_name": "jhill",
-      "receiver_id": "294639971955113986",
-      "receiver_name": "random789",
-      "gift": "Soyjacks over iron farm peri"
-    },
-    {
-      "giver_id": "294639971955113986",
-      "giver_name": "random789",
-      "receiver_id": "282364743996538881",
-      "receiver_name": "xoid",
-      "gift": "Popup crafting table at ms"
-    },
-    {
-      "giver_id": "282364743996538881",
-      "giver_name": "xoid",
-      "receiver_id": "215220873932570624",
-      "receiver_name": "MMM",
-      "gift": "Promise of an encoded jukebox"
-    },
-    {
-      "giver_id": "215220873932570624",
-      "giver_name": "MMM",
-      "receiver_id": "352356592169254922",
-      "receiver_name": "green_jab",
-      "gift": "Mob head farm + mini chess board"
-    },
-    {
-      "giver_id": "352356592169254922",
-      "giver_name": "green_jab",
-      "receiver_id": "665985164702384159",
-      "receiver_name": "joosepy",
-      "gift": "2 notebook songs"
-    },
-    {
-      "giver_id": "665985164702384159",
-      "giver_name": "joosepy",
-      "receiver_id": "239547426224996353",
-      "receiver_name": "sweetbaboo",
-      "gift": "Netherite + mapart"
-    },
-    {
-      "giver_id": "239547426224996353",
-      "giver_name": "sweetbaboo",
-      "receiver_id": "306569126141493249",
-      "receiver_name": "huntoon",
-      "gift": "Water bucket farm"
-    },
-    {
-      "giver_id": "306569126141493249",
-      "giver_name": "huntoon",
-      "receiver_id": "713417870029226004",
-      "receiver_name": "henrik",
-      "gift": "Avengers music bolt to Mexico"
-    },
-    {
-      "giver_id": "713417870029226004",
-      "giver_name": "henrik",
-      "receiver_id": "548206593779564557",
-      "receiver_name": "spectrumtemper",
-      "gift": "Minigame"
-    },
-    {
-      "giver_id": "548206593779564557",
-      "giver_name": "spectrumtemper",
-      "receiver_id": "451127158761455616",
-      "receiver_name": "tictac",
-      "gift": "That 1 fucking copper ore"
-    },
-    {
-      "giver_id": "451127158761455616",
-      "giver_name": "tictac",
-      "receiver_id": "297997568200409088",
-      "receiver_name": "zenx",
-      "gift": "Elytra launcher + mapart coupon"
-    },
-    {
-      "giver_id": "297997568200409088",
-      "giver_name": "zenx",
-      "receiver_id": "877634158028025886",
-      "receiver_name": "antimonotrone",
-      "gift": "Statue of her skin"
-    },
-    {
-      "giver_id": "877634158028025886",
-      "giver_name": "antimonotrone",
-      "receiver_id": "460277745264492544",
-      "receiver_name": "ncolyer",
-      "gift": "Ncolyer train build"
-    },
-    {
-      "giver_id": "460277745264492544",
-      "giver_name": "ncolyer",
-      "receiver_id": "368779048819752961",
-      "receiver_name": "pando",
-      "gift": "Dragon egg gambling machine"
-    },
-    {
-      "giver_id": "368779048819752961",
-      "giver_name": "pando",
-      "receiver_id": "722756905344434218",
-      "receiver_name": "oriol",
-      "gift": "Feliz navidad lamp display"
+    "gift_submissions": {
+      "722756905344434218": {
+        "gift": "Volvo mapart and musical bolt",
+        "receiver_name": "trolle",
+        "receiver_id": "251835504654286852"
+      },
+      "251835504654286852": {
+        "gift": "Mega netherite beacon",
+        "receiver_name": "m³",
+        "receiver_id": "188187888289054720"
+      },
+      "188187888289054720": {
+        "gift": "JKM voodoo machine",
+        "receiver_name": "ruthro",
+        "receiver_id": "690607710390976633"
+      },
+      "690607710390976633": {
+        "gift": "Literally nothing",
+        "receiver_name": "jkm",
+        "receiver_id": "185834053558075392"
+      },
+      "185834053558075392": {
+        "gift": "Scavenger hunt",
+        "receiver_name": "carbsna",
+        "receiver_id": "288183610064764928"
+      },
+      "288183610064764928": {
+        "gift": "Llama cannon",
+        "receiver_name": "kikue",
+        "receiver_id": "323515840236486659"
+      },
+      "323515840236486659": {
+        "gift": "Christmas rollercoaster",
+        "receiver_name": "jhill",
+        "receiver_id": "888963636800942090"
+      },
+      "888963636800942090": {
+        "gift": "Soyjacks over iron farm peri",
+        "receiver_name": "random789",
+        "receiver_id": "294639971955113986"
+      },
+      "294639971955113986": {
+        "gift": "Popup crafting table at ms",
+        "receiver_name": "xoid",
+        "receiver_id": "282364743996538881"
+      },
+      "282364743996538881": {
+        "gift": "Promise of an encoded jukebox",
+        "receiver_name": "MMM",
+        "receiver_id": "215220873932570624"
+      },
+      "215220873932570624": {
+        "gift": "Mob head farm + mini chess board",
+        "receiver_name": "green_jab",
+        "receiver_id": "352356592169254922"
+      },
+      "352356592169254922": {
+        "gift": "2 notebook songs",
+        "receiver_name": "joosepy",
+        "receiver_id": "665985164702384159"
+      },
+      "665985164702384159": {
+        "gift": "Netherite + mapart",
+        "receiver_name": "sweetbaboo",
+        "receiver_id": "239547426224996353"
+      },
+      "239547426224996353": {
+        "gift": "Water bucket farm",
+        "receiver_name": "huntoon",
+        "receiver_id": "306569126141493249"
+      },
+      "306569126141493249": {
+        "gift": "Avengers music bolt to Mexico",
+        "receiver_name": "henrik",
+        "receiver_id": "713417870029226004"
+      },
+      "713417870029226004": {
+        "gift": "Minigame",
+        "receiver_name": "spectrumtemper",
+        "receiver_id": "548206593779564557"
+      },
+      "548206593779564557": {
+        "gift": "That 1 fucking copper ore",
+        "receiver_name": "tictac",
+        "receiver_id": "451127158761455616"
+      },
+      "451127158761455616": {
+        "gift": "Elytra launcher + mapart coupon",
+        "receiver_name": "zenx",
+        "receiver_id": "297997568200409088"
+      },
+      "297997568200409088": {
+        "gift": "Statue of her skin",
+        "receiver_name": "antimonotrone",
+        "receiver_id": "877634158028025886"
+      },
+      "877634158028025886": {
+        "gift": "Ncolyer train build",
+        "receiver_name": "ncolyer",
+        "receiver_id": "460277745264492544"
+      },
+      "460277745264492544": {
+        "gift": "Dragon egg gambling machine",
+        "receiver_name": "pando",
+        "receiver_id": "368779048819752961"
+      },
+      "368779048819752961": {
+        "gift": "Feliz navidad lamp display",
+        "receiver_name": "oriol",
+        "receiver_id": "722756905344434218"
+      }
     }
-  ]
+  },
+  "archived_at": 1780094802.826818,
+  "timestamp": "2026-05-29T22:46:42.826818"
 }
