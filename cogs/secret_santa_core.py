@@ -730,8 +730,10 @@ class SecretSantaCore(commands.Cog):
             self.logger.info("Secret Santa cog unloaded (no loop)")
     
     async def _async_unload(self):
-        """Async cleanup operations"""
+        """Async cleanup operations — persist state before cancelling background tasks."""
         try:
+            await self._save_async()
+
             if self._backup_task:
                 self._backup_task.cancel()
                 try:

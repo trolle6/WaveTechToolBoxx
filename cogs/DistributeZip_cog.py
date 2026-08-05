@@ -95,6 +95,7 @@ class DistributeZipCog(commands.Cog):
         self._sending_lock = asyncio.Lock()
         self._metadata_lock = asyncio.Lock()
         self._executor = bot.executor  # Shared executor from main.py (bot is self.bot)
+        self._unloaded = False
         
         # Ensure metadata structure (normalize in case file had null or wrong types)
         if not isinstance(self.metadata.get("files"), dict):
@@ -659,7 +660,8 @@ class DistributeZipCog(commands.Cog):
         # Update download count (inside metadata lock to prevent races)
         async with self._metadata_lock:
             if file_id in self.metadata["files"]:
-                self.metadata["files"][file_id]["download_count"] = successful
+                prev = self.metadata["files"][file_id].get("download_count", 0)
+                self.metadata["files"][file_id]["download_count"] = prev + successful
                 try:
                     await self._save_metadata_async()
                 except Exception as e:
@@ -1102,6 +1104,9 @@ class DistributeZipCog(commands.Cog):
 
     def cog_unload(self):
         """Cleanup cog"""
+        if self._unloaded:
+            return
+        self._unloaded = True
         self.logger.info("Unloading DistributeZip cog...")
         if self.bot.is_closed():
             try:
@@ -1112,7 +1117,7 @@ class DistributeZipCog(commands.Cog):
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.create_task(self._async_unload())
+                loop.create_task(self._async_unload())
             else:
                 loop.run_until_complete(self._async_unload())
         except Exception as e:
