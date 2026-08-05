@@ -4,7 +4,7 @@
 #
 # Env:
 #   GIT_UPDATE=true|false     — fetch + hard reset (default: true if .git exists)
-#   GIT_BRANCH                — branch to deploy (default: cursor/ss-command-simplify-c0c2)
+#   GIT_BRANCH                — branch to deploy (default: master)
 #   GIT_REMOTE=origin
 #   PIP_INSTALL_ON_START=true — pip install -r requirements.txt before bot start
 

@@ -522,8 +522,8 @@ async def send_discord_message(channel_id: int, message: str, level: str = "INFO
             formatted = formatted[:1997] + "..."
         
         await channel.send(formatted)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to send Discord message to channel %s: %s", channel_id, e)
 
 async def send_to_discord_log(message: str, level: str = "INFO"):
     """Send message to Discord log channel"""

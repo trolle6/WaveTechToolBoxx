@@ -29,7 +29,6 @@ DESIGN DECISIONS:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from pathlib import Path
@@ -41,7 +40,13 @@ from disnake.ext import commands
 from .secret_santa_checks import mod_check
 from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
 from .secret_santa_views import FileListPaginator
-from .utils import autocomplete_safety_wrapper, safe_filename_in_dir
+from .secret_santa_storage import load_json, save_json
+from .utils import (
+    autocomplete_safety_wrapper,
+    safe_edit_response,
+    safe_followup_send,
+    safe_filename_in_dir,
+)
 
 # Paths
 ROOT = Path(__file__).parent
@@ -63,46 +68,17 @@ MAX_RETRIES = 2  # Maximum retries for transient network errors
 
 def load_metadata() -> Dict:
     """Load file metadata (synchronous - call from executor). Always returns a dict."""
-    if not METADATA_FILE.exists():
-        return {}
-    try:
-        data = json.loads(METADATA_FILE.read_text(encoding='utf-8'))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {}
+    data = load_json(METADATA_FILE, default={})
+    return data if isinstance(data, dict) else {}
 
 
 def save_metadata(data: Dict, logger=None):
-    """
-    Save file metadata atomically (synchronous - call from executor).
-    
-    Uses write-temp-replace pattern to ensure atomic writes:
-    writes to temporary file first, then replaces original.
-    This prevents corruption if process crashes during write.
-    """
+    """Save file metadata atomically (synchronous - call from executor)."""
     if data is None or not isinstance(data, dict):
         if logger:
             logger.warning("save_metadata: data is None or not a dict, skipping save")
         return
-    temp = METADATA_FILE.with_suffix('.tmp')
-    try:
-        temp.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding='utf-8'
-        )
-        # Atomic replace - on Unix/Linux this is guaranteed atomic
-        # On Windows, this is the best we can do without fsync
-        temp.replace(METADATA_FILE)
-    except Exception as e:
-        # Clean up temp file on error
-        if temp.exists():
-            try:
-                temp.unlink()
-            except Exception:
-                pass
-        if logger:
-            logger.error(f"Failed to save file metadata to {METADATA_FILE}: {e}")
-        raise
+    save_json(METADATA_FILE, data, logger=logger)
 
 
 class DistributeZipCog(commands.Cog):
@@ -174,59 +150,13 @@ class DistributeZipCog(commands.Cog):
         file: Optional[disnake.File] = None,
         max_retries: int = 3
     ) -> bool:
-        """Safely edit interaction response with retry logic for Discord connection issues"""
-        for attempt in range(max_retries):
-            try:
-                # Build kwargs - only include file if it's not None (disnake doesn't handle None files well)
-                kwargs = {}
-                if content is not None:
-                    kwargs['content'] = content
-                if embed is not None:
-                    kwargs['embed'] = embed
-                if view is not None:
-                    kwargs['view'] = view
-                if file is not None:
-                    kwargs['file'] = file
-                
-                await asyncio.wait_for(
-                    inter.edit_original_response(**kwargs),
-                    timeout=10.0
-                )
-                return True
-            except disnake.errors.NotFound:
-                self.logger.warning(f"Interaction expired before edit: {inter.id}")
-                return False
-            except disnake.errors.InteractionResponded:
-                return True
-            except disnake.HTTPException as e:
-                status = getattr(e, 'status', None)
-                if status == 429:
-                    retry_after = getattr(e, 'retry_after', 1.0)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_after)
-                        continue
-                elif status and status >= 500:
-                    if attempt < max_retries - 1:
-                        wait_time = min(2 ** attempt, 5.0)
-                        await asyncio.sleep(wait_time)
-                        continue
-                else:
-                    self.logger.error(f"HTTP error {status} on edit_response: {e}")
-                    return False
-            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
-                if attempt < max_retries - 1:
-                    wait_time = min(2 ** attempt, 5.0)
-                    self.logger.warning(f"Connection error on edit_response, retrying in {wait_time}s: {e}")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    self.logger.error(f"Connection error on edit_response after {max_retries} attempts: {e}")
-                    return False
-            except Exception as e:
-                self.logger.error(f"Unexpected error on edit_response: {e}", exc_info=True)
-                return False
-        return False
-    
+        """Safely edit interaction response with shared retry logic."""
+        return await safe_edit_response(
+            self.logger, inter,
+            content=content, embed=embed, view=view, file=file,
+            max_retries=max_retries,
+        )
+
     async def _safe_followup_send(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -237,57 +167,13 @@ class DistributeZipCog(commands.Cog):
         ephemeral: bool = False,
         max_retries: int = 3
     ) -> Optional[disnake.WebhookMessage]:
-        """Safely send followup message with retry logic for Discord connection issues"""
-        for attempt in range(max_retries):
-            try:
-                # Build kwargs - only include file if it's not None (disnake doesn't handle None files well)
-                kwargs = {'ephemeral': ephemeral}
-                if content is not None:
-                    kwargs['content'] = content
-                if embed is not None:
-                    kwargs['embed'] = embed
-                if view is not None:
-                    kwargs['view'] = view
-                if file is not None:
-                    kwargs['file'] = file
-                
-                msg = await asyncio.wait_for(
-                    inter.followup.send(**kwargs),
-                    timeout=10.0
-                )
-                return msg
-            except disnake.errors.NotFound:
-                self.logger.warning(f"Interaction expired before followup: {inter.id}")
-                return None
-            except disnake.HTTPException as e:
-                status = getattr(e, 'status', None)
-                if status == 429:
-                    retry_after = getattr(e, 'retry_after', 1.0)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_after)
-                        continue
-                elif status and status >= 500:
-                    if attempt < max_retries - 1:
-                        wait_time = min(2 ** attempt, 5.0)
-                        await asyncio.sleep(wait_time)
-                        continue
-                else:
-                    self.logger.error(f"HTTP error {status} on followup_send: {e}")
-                    return None
-            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
-                if attempt < max_retries - 1:
-                    wait_time = min(2 ** attempt, 5.0)
-                    self.logger.warning(f"Connection error on followup_send, retrying in {wait_time}s: {e}")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    self.logger.error(f"Connection error on followup_send after {max_retries} attempts: {e}")
-                    return None
-            except Exception as e:
-                self.logger.error(f"Unexpected error on followup_send: {e}", exc_info=True)
-                return None
-        return None
-    
+        """Safely send followup message with shared retry logic."""
+        return await safe_followup_send(
+            self.logger, inter,
+            content=content, embed=embed, view=view, file=file,
+            ephemeral=ephemeral, max_retries=max_retries,
+        )
+
     # ============ ASYNC FILE I/O ============
     async def _save_metadata_async(self):
         """Save metadata asynchronously (non-blocking)"""
@@ -939,7 +825,7 @@ class DistributeZipCog(commands.Cog):
                 # Save the file
                 file_path.write_bytes(file_data)
                 
-                # Update metadata (inside lock to prevent races with concurrent uploads/removes)
+                # Update metadata and persist immediately (crash-safe per file)
                 file_id = str(int(time.time() * 1000) + idx)  # Ensure unique IDs for multiple files
                 async with self._metadata_lock:
                     self.metadata["files"][file_id] = {
@@ -959,6 +845,7 @@ class DistributeZipCog(commands.Cog):
                         "required_by": requester_user.id,
                         "uploaded_at": time.time()
                     })
+                    await self._save_metadata_async()
                 
                 successful_uploads.append({
                     "file_id": file_id,
@@ -976,10 +863,7 @@ class DistributeZipCog(commands.Cog):
                     "error": f"Upload failed: {str(e)}"
                 })
         
-        # Save metadata once for all files (inside lock for consistency)
-        if successful_uploads:
-            async with self._metadata_lock:
-                await self._save_metadata_async()
+        # Metadata is saved per file during upload; no batch flush needed here.
         
         # Send summary
         if successful_uploads and not failed_uploads:
@@ -1208,17 +1092,31 @@ class DistributeZipCog(commands.Cog):
         if hasattr(self.bot, 'send_to_discord_log'):
             await self.bot.send_to_discord_log("📦 DistributeZip cog loaded successfully", "SUCCESS")
 
+    async def _async_unload(self):
+        """Persist metadata during cog unload."""
+        try:
+            async with self._metadata_lock:
+                await self._save_metadata_async()
+        except Exception as e:
+            self.logger.error(f"Failed to save metadata during unload: {e}")
+
     def cog_unload(self):
         """Cleanup cog"""
         self.logger.info("Unloading DistributeZip cog...")
-        
-        # Save metadata synchronously during unload (acceptable for shutdown)
+        if self.bot.is_closed():
+            try:
+                save_metadata(self.metadata, logger=self.logger)
+            except Exception as e:
+                self.logger.error(f"Failed to save metadata during unload: {e}")
+            return
         try:
-            save_metadata(self.metadata, logger=self.logger)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self._async_unload())
+            else:
+                loop.run_until_complete(self._async_unload())
         except Exception as e:
-            self.logger.error(f"Failed to save metadata during unload: {e}")
-        
-        # Executor is shared (bot.executor) - shutdown in main.py graceful_shutdown
+            self.logger.error(f"Failed to schedule metadata save during unload: {e}")
 
 
 def setup(bot):

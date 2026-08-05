@@ -14,7 +14,13 @@ from zoneinfo import ZoneInfo
 import disnake
 from disnake.ext import commands
 
-from .utils import RateLimiter, autocomplete_safety_wrapper, get_openai_headers
+from .utils import (
+    RateLimiter,
+    autocomplete_safety_wrapper,
+    get_openai_headers,
+    safe_edit_response,
+    safe_followup_send,
+)
 
 # Import from modular components
 from .secret_santa_storage import (
@@ -33,16 +39,14 @@ from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
     mod_check,
-    participant_check,
     safe_display_name,
 )
 
 # Constants
 BACKUP_INTERVAL_SECONDS = 3600  # 1 hour - how often to backup state
 # How often to re-check for scheduled shuffle/stop: when idle we sleep this long; when we have a
-# When idle (no schedule), re-check this often. When a schedule exists, we sleep until that time but at most this long.
-# No per-tick logging — only log when actually running a scheduled shuffle/stop.
-SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 300  # 5 minutes - re-check often to hit scheduled shuffle/stop
+# schedule we sleep until that time but at most this long. No per-tick logging.
+SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS = 300  # 5 minutes
 # DM rate limiting: Discord throttles DMs. Space them out to avoid 429.
 DM_DELAY_SECONDS = 1.2  # Delay between each DM to stay under rate limits
 DM_MAX_RETRIES = 4  # Retry on 429, 5xx, connection errors (1 initial + 3 retries)
@@ -166,91 +170,12 @@ class SecretSantaCore(commands.Cog):
         file: Optional[disnake.File] = None,
         max_retries: int = 3
     ) -> bool:
-        """
-        Safely edit interaction response with retry logic for Discord connection issues.
-        
-        Handles:
-        - Connection errors (retries with exponential backoff)
-        - Rate limits (429 - respects retry_after)
-        - Server errors (5xx - retries)
-        - Expired interactions (404 - returns False)
-        - Already responded (returns True)
-        
-        Args:
-            inter: The interaction to edit
-            content: Optional message content
-            embed: Optional embed
-            view: Optional view
-            file: Optional file
-            max_retries: Maximum retry attempts (default: 3)
-        
-        Returns:
-            True if successful, False if failed permanently
-        """
-        for attempt in range(max_retries):
-            try:
-                # Build kwargs - only include parameters that are not None
-                # (disnake doesn't handle None files/content well in some cases)
-                kwargs = {}
-                if content is not None:
-                    kwargs['content'] = content
-                if embed is not None:
-                    kwargs['embed'] = embed
-                if view is not None:
-                    kwargs['view'] = view
-                if file is not None:
-                    kwargs['file'] = file
-                if not kwargs:
-                    return True  # Nothing to edit, consider success
-                
-                await asyncio.wait_for(
-                    inter.edit_original_response(**kwargs),
-                    timeout=10.0  # 10 second timeout per attempt
-                )
-                return True
-            except disnake.errors.NotFound:
-                # Interaction expired - can't recover
-                self.logger.warning(f"Interaction expired before edit: {inter.id}")
-                return False
-            except disnake.errors.InteractionResponded:
-                # Already responded - this is fine
-                return True
-            except disnake.HTTPException as e:
-                status = getattr(e, 'status', None)
-                # Rate limit - respect retry_after
-                if status == 429:
-                    retry_after = getattr(e, 'retry_after', 1.0)
-                    if attempt < max_retries - 1:
-                        self.logger.warning(f"Rate limited on edit_response, waiting {retry_after}s (attempt {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(retry_after)
-                        continue
-                # Server errors (5xx) - retry
-                elif status and status >= 500:
-                    if attempt < max_retries - 1:
-                        wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
-                        self.logger.warning(f"Discord server error {status} on edit_response, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(wait_time)
-                        continue
-                # Client errors (4xx except 429) - don't retry
-                else:
-                    self.logger.error(f"HTTP error {status} on edit_response: {e}")
-                    return False
-            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
-                # Network/connection issues - retry
-                if attempt < max_retries - 1:
-                    wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
-                    self.logger.warning(f"Connection error on edit_response, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries}): {e}")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    self.logger.error(f"Connection error on edit_response after {max_retries} attempts: {e}")
-                    return False
-            except Exception as e:
-                # Unexpected errors - log and don't retry
-                self.logger.error(f"Unexpected error on edit_response: {e}", exc_info=True)
-                return False
-        
-        return False
+        """Safely edit interaction response with shared retry logic."""
+        return await safe_edit_response(
+            self.logger, inter,
+            content=content, embed=embed, view=view, file=file,
+            max_retries=max_retries,
+        )
     
     async def _safe_followup_send(
         self,
@@ -262,86 +187,12 @@ class SecretSantaCore(commands.Cog):
         ephemeral: bool = False,
         max_retries: int = 3
     ) -> Optional[disnake.WebhookMessage]:
-        """
-        Safely send followup message with retry logic for Discord connection issues.
-        
-        Handles:
-        - Connection errors (retries with exponential backoff)
-        - Rate limits (429 - respects retry_after)
-        - Server errors (5xx - retries)
-        - Expired interactions (404 - returns None)
-        
-        Args:
-            inter: The interaction to send followup for
-            content: Optional message content
-            embed: Optional embed
-            view: Optional view
-            file: Optional file
-            ephemeral: Whether message should be ephemeral
-            max_retries: Maximum retry attempts (default: 3)
-        
-        Returns:
-            WebhookMessage if successful, None if failed
-        """
-        for attempt in range(max_retries):
-            try:
-                # Build kwargs - only include parameters that are not None
-                # (disnake doesn't handle None files/content well in some cases)
-                kwargs = {'ephemeral': ephemeral}
-                if content is not None:
-                    kwargs['content'] = content
-                if embed is not None:
-                    kwargs['embed'] = embed
-                if view is not None:
-                    kwargs['view'] = view
-                if file is not None:
-                    kwargs['file'] = file
-                
-                msg = await asyncio.wait_for(
-                    inter.followup.send(**kwargs),
-                    timeout=10.0  # 10 second timeout per attempt
-                )
-                return msg
-            except disnake.errors.NotFound:
-                # Interaction expired - can't recover
-                self.logger.warning(f"Interaction expired before followup: {inter.id}")
-                return None
-            except disnake.HTTPException as e:
-                status = getattr(e, 'status', None)
-                # Rate limit - respect retry_after
-                if status == 429:
-                    retry_after = getattr(e, 'retry_after', 1.0)
-                    if attempt < max_retries - 1:
-                        self.logger.warning(f"Rate limited on followup_send, waiting {retry_after}s (attempt {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(retry_after)
-                        continue
-                # Server errors (5xx) - retry
-                elif status and status >= 500:
-                    if attempt < max_retries - 1:
-                        wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
-                        self.logger.warning(f"Discord server error {status} on followup_send, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(wait_time)
-                        continue
-                # Client errors (4xx except 429) - don't retry
-                else:
-                    self.logger.error(f"HTTP error {status} on followup_send: {e}")
-                    return None
-            except (ConnectionError, OSError, asyncio.TimeoutError) as e:
-                # Network/connection issues - retry
-                if attempt < max_retries - 1:
-                    wait_time = min(2 ** attempt, 5.0)  # Exponential backoff, max 5s
-                    self.logger.warning(f"Connection error on followup_send, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries}): {e}")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    self.logger.error(f"Connection error on followup_send after {max_retries} attempts: {e}")
-                    return None
-            except Exception as e:
-                # Unexpected errors - log and don't retry
-                self.logger.error(f"Unexpected error on followup_send: {e}", exc_info=True)
-                return None
-        
-        return None
+        """Safely send followup message with shared retry logic."""
+        return await safe_followup_send(
+            self.logger, inter,
+            content=content, embed=embed, view=view, file=file,
+            ephemeral=ephemeral, max_retries=max_retries,
+        )
     
     def _create_embed(self, title: str, description: str, color: disnake.Color, **fields) -> disnake.Embed:
         """

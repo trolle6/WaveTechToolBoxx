@@ -1133,7 +1133,7 @@ class SecretSantaCommandsMixin:
         user_id = str(inter.author.id)
         archive_path = ARCHIVE_DIR / f"{year}.json"
         if not archive_path.exists():
-            await inter.edit_original_response(
+            await self._safe_edit_response(inter,
                 content=f"❌ No archive found for year {year}. Make sure the year is correct!"
             )
             return
@@ -1187,7 +1187,7 @@ class SecretSantaCommandsMixin:
                     break
             
             if not user_assignment:
-                await inter.edit_original_response(
+                await self._safe_edit_response(inter,
                     content=f"❌ You didn't participate in Secret Santa {year}, or your user ID isn't in the archive."
                 )
                 return
@@ -1275,7 +1275,7 @@ class SecretSantaCommandsMixin:
             
         except Exception as e:
             self.logger.error(f"Error editing gift for {year}: {e}", exc_info=True)
-            await inter.edit_original_response(
+            await self._safe_edit_response(inter,
                 content=f"❌ An error occurred while updating your gift: {e}"
             )
     
@@ -1608,7 +1608,7 @@ class SecretSantaCommandsMixin:
                 if len(submissions) > 10:
                     embed.set_footer(text=f"Showing 10 of {len(submissions)} submissions")
                 if show_comms:
-                    await inter.edit_original_response(embed=embed)
+                    await self._safe_edit_response(inter, embed=embed)
                 else:
                     await self._safe_edit_response(inter, embed=embed)
 
@@ -1635,7 +1635,7 @@ class SecretSantaCommandsMixin:
                 if show_gifts and submissions:
                     await self._safe_followup_send(inter, embed=embed, view=paginator, ephemeral=True)
                 else:
-                    await inter.edit_original_response(embed=embed, view=paginator)
+                    await self._safe_edit_response(inter,embed=embed, view=paginator)
             else:
                 embed = disnake.Embed(
                     title=f"💬 Communications ({len(comms)})",
@@ -1696,7 +1696,7 @@ class SecretSantaCommandsMixin:
         if year:
             if year not in archives:
                 available = ", ".join(str(y) for y in sorted_years)
-                await inter.edit_original_response(
+                await self._safe_edit_response(inter,
                     content=f"❌ No event found for {year}\n**Available years:** {available}"
                 )
                 return
@@ -1718,7 +1718,7 @@ class SecretSantaCommandsMixin:
                 # Many assignments - use paginated view
                 paginator = YearHistoryPaginator(year, archive, participants, emoji_mapping, timeout=300)
                 embed = paginator.get_embed()
-                await inter.edit_original_response(embed=embed, view=paginator)
+                await self._safe_edit_response(inter,embed=embed, view=paginator)
             else:
                 # Few assignments - show all on one page (no buttons needed)
                 gifts = event_data.get("gift_submissions", {})
@@ -1793,7 +1793,7 @@ class SecretSantaCommandsMixin:
             if len(sorted_years) > 10:
                 paginator = YearTimelinePaginator(archives, sorted_years, timeout=300)
                 embed = paginator.get_embed()
-                await inter.edit_original_response(embed=embed, view=paginator)
+                await self._safe_edit_response(inter,embed=embed, view=paginator)
             else:
                 # Show all years on one page (no pagination needed)
                 embed = disnake.Embed(
@@ -2178,11 +2178,11 @@ class SecretSantaCommandsMixin:
             
             if available_backups:
                 backups_str = ", ".join(str(y) for y in available_backups)
-                await inter.edit_original_response(
+                await self._safe_edit_response(inter,
                     content=f"❌ No backup found for {year}\n\n**Available backups:** {backups_str}"
                 )
             else:
-                await inter.edit_original_response(
+                await self._safe_edit_response(inter,
                     content=f"❌ No backup found for {year} (backups folder is empty)"
                 )
             return
@@ -2278,7 +2278,7 @@ class SecretSantaCommandsMixin:
         if len(backup_list) > 15:
             paginator = BackupListPaginator(backup_list, timeout=300)
             embed = paginator.get_embed()
-            await inter.edit_original_response(embed=embed, view=paginator)
+            await self._safe_edit_response(inter,embed=embed, view=paginator)
         else:
             # Show all backups on one page (no pagination needed)
             embed = disnake.Embed(

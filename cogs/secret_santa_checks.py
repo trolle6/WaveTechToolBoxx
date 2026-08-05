@@ -62,41 +62,11 @@ def mod_check():
     return commands.check(predicate)
 
 
-def admin_check():
-    """Check if user is administrator (guild-only, fails in DMs). Unused — prefer mod_check()."""
-    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        member = _get_member_from_inter(inter)
-        return member.guild_permissions.administrator if member else False
-
-    return commands.check(predicate)
-
-
 def manage_guild_check():
     """Check if user has manage_guild permission (guild-only, fails in DMs)."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         member = _get_member_from_inter(inter)
         return member.guild_permissions.manage_guild if member else False
-
-    return commands.check(predicate)
-
-
-def participant_check():
-    """Check if user is a participant"""
-    async def predicate(inter: "disnake.ApplicationCommandInteraction"):
-        try:
-            cog = inter.bot.get_cog("SecretSantaCog")
-            if not cog:
-                return False
-
-            event = cog.state.get("current_event")
-            if not event or not isinstance(event, dict) or not event.get("active"):
-                return False
-            participants = event.get("participants") or {}
-            if not isinstance(participants, dict):
-                return False
-            return str(inter.author.id) in participants
-        except Exception:
-            return False
 
     return commands.check(predicate)
 

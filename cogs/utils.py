@@ -2,16 +2,16 @@
 Bot Utilities - Shared Components for All Cogs
 
 This module provides reusable utility classes for rate limiting, caching,
-circuit breaking, and safe file operations. All components are designed
-for async/await patterns and thread-safe operations.
+circuit breaking, Discord interaction helpers, and atomic JSON persistence.
+All components are designed for async/await patterns and thread-safe operations.
 
 COMPONENTS:
 - autocomplete_safety_wrapper: Ensures autocomplete callbacks always return a list
 - RateLimiter: Token bucket rate limiter (O(1) operations with deque)
 - CircuitBreaker: Prevents cascading failures with circuit breaker pattern
 - LRUCache: Generic LRU cache with TTL support (expires old entries automatically)
-- JsonFile: Thread-safe JSON file operations (direct write, not atomic)
-- RequestCache: Simple deduplication cache for expensive operations
+- safe_edit_response / safe_followup_send: Retry-aware Discord interaction helpers
+- load_json_file / atomic_save_json: Crash-safe JSON persistence with size limits
 
 All classes use asyncio.Lock() for thread-safety in async contexts.
 """
@@ -25,19 +25,27 @@ from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Generic, Optional, TypeVar
 
+import disnake
+
 logger = logging.getLogger("bot")
 
 T = TypeVar('T')  # Generic type for LRUCache
+
+# Max JSON file size to prevent DoS from huge/corrupt files (10MB)
+LOAD_JSON_MAX_BYTES = 10 * 1024 * 1024
 
 __all__ = [
     'autocomplete_safety_wrapper',
     'RateLimiter',
     'CircuitBreaker',
     'LRUCache',
-    'JsonFile',
-    'RequestCache',
     'safe_filename_in_dir',
     'get_openai_headers',
+    'safe_edit_response',
+    'safe_followup_send',
+    'load_json_file',
+    'atomic_save_json',
+    'LOAD_JSON_MAX_BYTES',
 ]
 
 
@@ -377,127 +385,195 @@ class LRUCache(Generic[T]):
                 del self._cache[key]
 
 
-class JsonFile:
+def load_json_file(path: Path, default: Any = None, *, max_bytes: int = LOAD_JSON_MAX_BYTES) -> Any:
     """
-    Thread-safe JSON file operations.
-    
-    Uses asyncio.Lock to prevent concurrent access when multiple tasks
-    read/write the same file. save() uses direct write (not atomic
-    write-temp-replace); use secret_santa_storage for critical data.
+    Load JSON from disk with graceful error handling and a size cap.
+
+    Returns parsed content on success. On failure, returns ``default`` if
+    provided, otherwise ``{}``.
     """
+    fallback = default if default is not None else {}
+    if path is None or not hasattr(path, "exists"):
+        return fallback
+    if not path.exists():
+        return fallback
+    try:
+        size = path.stat().st_size
+        if size > max_bytes:
+            logger.warning("JSON file too large (%s bytes): %s", size, path)
+            return fallback
+        text = path.read_text(encoding='utf-8', errors='replace').strip()
+        if not text:
+            return fallback
+        return json.loads(text)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        logger.warning("Failed to load JSON from %s: %s", path, e)
+    return fallback
 
-    def __init__(self, path: str):
-        self.path = Path(path)
-        self.lock = asyncio.Lock()
 
-    async def load(self, default: Any = None) -> Any:
-        """
-        Load JSON file with error handling.
-        
-        Args:
-            default: Default value to return if file doesn't exist or is invalid
-        
-        Returns:
-            Parsed JSON data, or default if file is missing/invalid
-        """
-        async with self.lock:
-            if self.path.exists():
-                try:
-                    return json.loads(self.path.read_text(encoding='utf-8'))
-                except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-                    logger.error(f"JSON load error for {self.path}: {e}")
-            return default if default is not None else {}
+def atomic_save_json(path: Path, data: Any, logger: Optional[logging.Logger] = None) -> None:
+    """
+    Save JSON atomically with crash-safe write-temp-replace.
 
-    async def save(self, data: Any):
-        """
-        Save JSON file with error handling.
-        
-        Args:
-            data: Data to serialize to JSON (must be JSON-serializable)
-        
-        Raises:
-            OSError: If file cannot be written (logged but not caught)
-        """
-        async with self.lock:
+    Writes to ``path.tmp`` first, then atomically replaces the target file.
+    """
+    log = logger or globals()["logger"]
+    temp = path.with_suffix('.tmp')
+    try:
+        temp.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding='utf-8'
+        )
+        temp.replace(path)
+    except Exception as e:
+        if temp.exists():
             try:
-                self.path.write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False),
-                    encoding='utf-8'
+                temp.unlink()
+            except OSError:
+                pass
+        log.error("Failed to save JSON to %s: %s", path, e)
+        raise
+
+
+async def safe_edit_response(
+    log: logging.Logger,
+    inter: disnake.ApplicationCommandInteraction,
+    content: Optional[str] = None,
+    embed: Optional[disnake.Embed] = None,
+    view: Optional[disnake.ui.View] = None,
+    file: Optional[disnake.File] = None,
+    max_retries: int = 3,
+) -> bool:
+    """Edit an interaction response with retry logic for transient Discord errors."""
+    for attempt in range(max_retries):
+        try:
+            kwargs = {}
+            if content is not None:
+                kwargs['content'] = content
+            if embed is not None:
+                kwargs['embed'] = embed
+            if view is not None:
+                kwargs['view'] = view
+            if file is not None:
+                kwargs['file'] = file
+            if not kwargs:
+                return True
+
+            await asyncio.wait_for(
+                inter.edit_original_response(**kwargs),
+                timeout=10.0,
+            )
+            return True
+        except disnake.errors.NotFound:
+            log.warning("Interaction expired before edit: %s", inter.id)
+            return False
+        except disnake.errors.InteractionResponded:
+            return True
+        except disnake.HTTPException as e:
+            status = getattr(e, 'status', None)
+            if status == 429:
+                retry_after = getattr(e, 'retry_after', 1.0)
+                if attempt < max_retries - 1:
+                    log.warning(
+                        "Rate limited on edit_response, waiting %ss (attempt %s/%s)",
+                        retry_after, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+            elif status and status >= 500:
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 5.0)
+                    log.warning(
+                        "Discord server error %s on edit_response, retrying in %ss (attempt %s/%s)",
+                        status, wait_time, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+            else:
+                log.error("HTTP error %s on edit_response: %s", status, e)
+                return False
+        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+            if attempt < max_retries - 1:
+                wait_time = min(2 ** attempt, 5.0)
+                log.warning(
+                    "Connection error on edit_response, retrying in %ss (attempt %s/%s): %s",
+                    wait_time, attempt + 1, max_retries, e,
                 )
-            except OSError as e:
-                logger.error(f"JSON save error for {self.path}: {e}")
-                raise  # Re-raise so caller knows save failed
+                await asyncio.sleep(wait_time)
+                continue
+            log.error("Connection error on edit_response after %s attempts: %s", max_retries, e)
+            return False
+        except Exception as e:
+            log.error("Unexpected error on edit_response: %s", e, exc_info=True)
+            return False
+    return False
 
 
-class RequestCache:
-    """
-    Simple deduplication cache for expensive operations.
-    
-    Stores key-value pairs with expiration times. Automatically removes
-    expired entries on access. When max_size is set, evicts the soonest-
-    to-expire entry when at capacity to prevent unbounded growth.
-    
-    Use case: Prevent duplicate expensive operations (API calls, calculations)
-    within a time window.
-    """
+async def safe_followup_send(
+    log: logging.Logger,
+    inter: disnake.ApplicationCommandInteraction,
+    content: Optional[str] = None,
+    embed: Optional[disnake.Embed] = None,
+    view: Optional[disnake.ui.View] = None,
+    file: Optional[disnake.File] = None,
+    ephemeral: bool = False,
+    max_retries: int = 3,
+) -> Optional[disnake.WebhookMessage]:
+    """Send an interaction followup with retry logic for transient Discord errors."""
+    for attempt in range(max_retries):
+        try:
+            kwargs = {'ephemeral': ephemeral}
+            if content is not None:
+                kwargs['content'] = content
+            if embed is not None:
+                kwargs['embed'] = embed
+            if view is not None:
+                kwargs['view'] = view
+            if file is not None:
+                kwargs['file'] = file
 
-    def __init__(self, ttl: int = 3600, max_size: Optional[int] = 1000):
-        self.cache: dict[str, tuple[Any, float]] = {}  # key -> (value, expiration_timestamp)
-        self.ttl = ttl
-        self.max_size = max_size  # None = unlimited; prevents unbounded growth when set
-        self._lock = asyncio.Lock()
-
-    async def get(self, key: str) -> Optional[Any]:
-        """
-        Get value from cache if not expired.
-        
-        Args:
-            key: Cache key to look up
-        
-        Returns:
-            Cached value if found and not expired, None otherwise
-        """
-        async with self._lock:
-            if key in self.cache:
-                val, expires = self.cache[key]
-                now = time.time()
-                if now < expires:
-                    return val
-                # Entry expired - remove it
-                del self.cache[key]
+            return await asyncio.wait_for(
+                inter.followup.send(**kwargs),
+                timeout=10.0,
+            )
+        except disnake.errors.NotFound:
+            log.warning("Interaction expired before followup: %s", inter.id)
             return None
-
-    async def set(self, key: str, value: Any):
-        """
-        Set value in cache with TTL expiration.
-        
-        When max_size is set and cache is full, evicts the soonest-to-expire
-        entry to make room.
-        
-        Args:
-            key: Cache key
-            value: Value to cache (will expire after TTL)
-        """
-        async with self._lock:
-            if self.max_size is not None and key not in self.cache and len(self.cache) >= self.max_size:
-                # Evict soonest-to-expire entry (single pass, no per-key lambda)
-                soonest_key = None
-                soonest_exp = float("inf")
-                for k, (_, exp) in self.cache.items():
-                    if exp < soonest_exp:
-                        soonest_exp = exp
-                        soonest_key = k
-                if soonest_key is not None:
-                    del self.cache[soonest_key]
-            self.cache[key] = (value, time.time() + self.ttl)
-
-    async def cleanup(self):
-        """
-        Remove all expired entries from cache.
-        
-        Useful for periodic maintenance to prevent memory growth.
-        Note: Expired entries are also removed on get(), so this is optional.
-        """
-        async with self._lock:
-            now = time.time()
-            self.cache = {k: v for k, v in self.cache.items() if v[1] > now}
+        except disnake.HTTPException as e:
+            status = getattr(e, 'status', None)
+            if status == 429:
+                retry_after = getattr(e, 'retry_after', 1.0)
+                if attempt < max_retries - 1:
+                    log.warning(
+                        "Rate limited on followup_send, waiting %ss (attempt %s/%s)",
+                        retry_after, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+            elif status and status >= 500:
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 5.0)
+                    log.warning(
+                        "Discord server error %s on followup_send, retrying in %ss (attempt %s/%s)",
+                        status, wait_time, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+            else:
+                log.error("HTTP error %s on followup_send: %s", status, e)
+                return None
+        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+            if attempt < max_retries - 1:
+                wait_time = min(2 ** attempt, 5.0)
+                log.warning(
+                    "Connection error on followup_send, retrying in %ss (attempt %s/%s): %s",
+                    wait_time, attempt + 1, max_retries, e,
+                )
+                await asyncio.sleep(wait_time)
+                continue
+            log.error("Connection error on followup_send after %s attempts: %s", max_retries, e)
+            return None
+        except Exception as e:
+            log.error("Unexpected error on followup_send: %s", e, exc_info=True)
+            return None
+    return None
