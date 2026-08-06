@@ -526,12 +526,8 @@ class SecretSantaCommandsMixin:
             if not event:
                 return False, "❌ No active event"
             
-            # Use current year (not stale state) - update state if needed
-            current_year = dt.date.today().year
-            if self.state.get("current_year") != current_year:
-                self.state["current_year"] = current_year
-            
-            year = current_year
+            # Archive under the year the event was started (not calendar "today")
+            year = self.state.get("current_year") or dt.date.today().year
             
             # Archive event (with automatic backup protection)
             saved_filename = self._archive_event(event, year)
@@ -1433,7 +1429,7 @@ class SecretSantaCommandsMixin:
                 value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
                 inline=False
             )
-            await self._safe_edit_response(inter, embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
     
     @wishlist_remove.autocomplete("item_number")
     async def autocomplete_wishlist_item_number_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2347,7 +2343,11 @@ class SecretSantaCommandsMixin:
         # Add participant only if event is still current (re-check inside lock)
         async with self._lock:
             current = self.state.get("current_event")
-            if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
+            if not current or not current.get("active") or current.get("join_closed"):
+                return
+            if current.get("guild_id") and payload.guild_id and current.get("guild_id") != payload.guild_id:
+                return
+            if current.get("announcement_message_id") != payload.message_id:
                 return  # Event was stopped or is different
             if "participants" not in current:
                 current["participants"] = {}
