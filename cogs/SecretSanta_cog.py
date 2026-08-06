@@ -1,8 +1,9 @@
 """
-Secret Santa — combines core helpers and slash-command mixin.
+Secret Santa — combines core helpers and slash-command mixins.
 
 - secret_santa_core.py — state, DMs, shuffle, role helpers, lifecycle
-- secret_santa_commands.py — /ss slash commands and event listeners
+- secret_santa_cmd_*.py — /ss commands split by domain (lifecycle, participant, admin)
+- secret_santa_commands.py — mixin combiner (single cog interface)
 """
 
 from disnake.ext import commands

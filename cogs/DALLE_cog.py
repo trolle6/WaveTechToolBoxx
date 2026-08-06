@@ -539,20 +539,13 @@ class DALLECog(commands.Cog):
 
         await inter.response.defer(ephemeral=private)
 
-        # Check rate limit
-        if not await self.rate_limiter.check(str(inter.author.id)):
-            await inter.edit_original_response(
-                content="⏳ Rate limited. Please wait before generating another image."
-            )
-            return
-
-        # Validate prompt
+        # Validate prompt before rate limit / queue
         prompt = prompt.strip()
         if len(prompt) < 3:
             await inter.edit_original_response(content="❌ Prompt too short (min 3 characters)")
             return
 
-        # Check cache
+        # Check cache (no rate limit consumed on hits)
         cache_key = self._cache_key(prompt, size, quality)
         cached = await self.cache.get(cache_key)
 
@@ -562,6 +555,12 @@ class DALLECog(commands.Cog):
 
             embed = self._create_cache_embed(cached)
             await inter.edit_original_response(embed=embed)
+            return
+
+        if not await self.rate_limiter.check(str(inter.author.id)):
+            await inter.edit_original_response(
+                content="⏳ Rate limited. Please wait before generating another image."
+            )
             return
 
         # Create job
