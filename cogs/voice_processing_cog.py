@@ -269,6 +269,7 @@ class VoiceProcessingCog(commands.Cog):
 
         # Statistics
         self.total_requests = 0
+        self.total_successes = 0
         self.total_cached = 0
         self.total_failed = 0
 
@@ -830,6 +831,7 @@ class VoiceProcessingCog(commands.Cog):
                             return None
                         await self.cache.set(cache_key, audio)
                         await self.circuit_breaker.record_success()
+                        self.total_successes += 1
                         return audio
 
                     # Retryable status codes
@@ -1748,8 +1750,8 @@ class VoiceProcessingCog(commands.Cog):
         cache_stats = await self.cache.get_stats()
         breaker_stats = await self.circuit_breaker.get_metrics()
 
-        total_attempts = self.total_requests + self.total_failed
-        success_rate = (self.total_requests / max(1, total_attempts)) * 100
+        total_generations = self.total_successes + self.total_failed
+        success_rate = (self.total_successes / max(1, total_generations)) * 100
 
         embed = disnake.Embed(
             title="🎤 TTS Performance Dashboard",
@@ -1759,7 +1761,7 @@ class VoiceProcessingCog(commands.Cog):
 
         embed.add_field(
             name="🚀 API Performance",
-            value=f"📊 **Requests:** `{self.total_requests:,}`\n"
+            value=f"📊 **API Attempts:** `{self.total_requests:,}`\n"
                   f"✅ **Success Rate:** `{success_rate:.1f}%`\n"
                   f"❌ **Failed:** `{self.total_failed:,}`",
             inline=True

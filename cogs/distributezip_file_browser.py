@@ -80,7 +80,6 @@ class FileSelectMenu(disnake.ui.Select):
             min_values=1,
             max_values=1
         )
-        self.view: Optional['FileBrowserSelectView'] = None
     
     async def callback(self, inter: disnake.MessageInteraction):
         """Handle file selection"""
@@ -157,7 +156,6 @@ class FileBrowserSelectView(disnake.ui.View):
         if options:
             placeholder = f"📦 Select a file to {action_type}..."
             select_menu = FileSelectMenu(options, placeholder)
-            select_menu.view = self
             self.add_item(select_menu)
     
     async def on_timeout(self):

@@ -42,82 +42,17 @@ BACKUPS_DIR: Path = ARCHIVE_DIR / "backups"  # Indestructible backups (never aut
 ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 
-
-# Max file size to prevent DoS from huge/corrupt files (10MB is plenty for state/archives)
-LOAD_JSON_MAX_BYTES = 10 * 1024 * 1024
+from .utils import LOAD_JSON_MAX_BYTES, atomic_save_json, load_json_file
 
 
 def load_json(path: Path, default: Any = None) -> Any:
-    """
-    Load JSON from disk with graceful error handling.
-
-    Returns the parsed content on success. On failure (missing file, invalid JSON,
-    encoding error, file too large), returns the default. Uses ``default if default is not None else {}``
-    so that falsy defaults like ``[]`` or ``0`` are preserved.
-
-    Args:
-        path: Path to the JSON file.
-        default: Value to return when file is missing or invalid. If None, returns ``{}``.
-
-    Returns:
-        Parsed JSON (dict/list/etc.) or default.
-
-    Note:
-        Used by :func:`load_state_with_fallback`, :func:`load_all_archives`, and
-        ``secret_santa_assignments.load_history_from_archives``.
-    """
-    fallback = default if default is not None else {}
-    if path is None or not hasattr(path, "exists"):
-        return fallback
-    if not path.exists():
-        return fallback
-    try:
-        size = path.stat().st_size
-        if size > LOAD_JSON_MAX_BYTES:
-            return fallback
-        text = path.read_text(encoding='utf-8', errors='replace').strip()
-        if not text:
-            return fallback
-        return json.loads(text)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        pass
-    return fallback
+    """Load JSON via shared :func:`cogs.utils.load_json_file` helper."""
+    return load_json_file(path, default)
 
 
 def save_json(path: Path, data: Any, logger=None) -> None:
-    """
-    Save JSON atomically with crash-safe write-temp-replace.
-
-    Writes to ``path.tmp`` first, then atomically replaces the target file.
-    If the process crashes mid-write, the original file stays intact.
-
-    Args:
-        path: Destination file path.
-        data: JSON-serializable data (dict, list, etc.).
-        logger: Optional logger for error messages.
-
-    Raises:
-        OSError, json.JSONEncodeError: Re-raised after cleanup; caller handles.
-    """
-    temp = path.with_suffix('.tmp')
-    try:
-        temp.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding='utf-8'
-        )
-        # Atomic replace - on Unix/Linux this is guaranteed atomic
-        # On Windows, this is the best we can do without fsync
-        temp.replace(path)
-    except Exception as e:
-        # Clean up temp file on error
-        if temp.exists():
-            try:
-                temp.unlink()
-            except Exception:
-                pass
-        if logger:
-            logger.error(f"Failed to save JSON to {path}: {e}")
-        raise
+    """Save JSON via shared :func:`cogs.utils.atomic_save_json` helper."""
+    atomic_save_json(path, data, logger=logger)
 
 
 def get_default_state() -> dict:

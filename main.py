@@ -522,8 +522,8 @@ async def send_discord_message(channel_id: int, message: str, level: str = "INFO
             formatted = formatted[:1997] + "..."
         
         await channel.send(formatted)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to send Discord message to channel %s: %s", channel_id, e)
 
 async def send_to_discord_log(message: str, level: str = "INFO"):
     """Send message to Discord log channel"""
@@ -764,9 +764,9 @@ async def graceful_shutdown():
             if hasattr(cog, "_async_unload"):
                 if getattr(cog, "_unloaded", False):
                     continue
+                unload_tasks.append(cog._async_unload())
                 if hasattr(cog, "_unloaded"):
                     cog._unloaded = True
-                unload_tasks.append(cog._async_unload())
             elif hasattr(cog, "cog_unload"):
                 cog.cog_unload()
         except Exception as e:
@@ -965,6 +965,12 @@ if __name__ == "__main__":
         asyncio.run(bot.http_mgr.invalidate_session())
     else:
         logger.warning("API validation skipped")
+
+    if config.SS_DEBUG_START:
+        logger.warning(
+            "SS_DEBUG_START is enabled — /ss start will skip archive-year warnings. "
+            "Disable in production config.env."
+        )
     
     # Load cogs
     num_loaded = load_cogs()

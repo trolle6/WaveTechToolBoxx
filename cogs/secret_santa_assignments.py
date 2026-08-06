@@ -289,25 +289,22 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]], log
         return result
     
     # NORMAL CASE: 3+ participants
-    # ADAPTIVE RETRY LOGIC: Scale attempts with participant count
-    # Small events (< 10 people): 10 attempts (safety floor)
-    # Large events (≥ 10 people): Attempts = participant count (scales with complexity)
-    # Example: 5 people → 10 attempts, 20 people → 20 attempts
+    # Small events: 10 attempts (safety floor). Large events: attempts scale with participant count.
     max_attempts = max(10, len(participants))
     
     # DEBUG: Log available options for each participant (before any assignments)
     if logger:
-        logger.info("=== ASSIGNMENT DEBUG: Available options for each participant ===")
+        logger.debug("=== ASSIGNMENT DEBUG: Available options for each participant ===")
         for giver in participants:
             unacceptable = set(history.get(str(giver), []))
             available = [p for p in participants if p not in unacceptable and p != giver]
             unacceptable_list = list(unacceptable)
-            logger.info(f"  Participant {giver}: {len(available)} available options")
-            logger.info(f"    Available: {available}")
-            logger.info(f"    Excluded from history: {unacceptable_list}")
+            logger.debug(f"  Participant {giver}: {len(available)} available options")
+            logger.debug(f"    Available: {available}")
+            logger.debug(f"    Excluded from history: {unacceptable_list}")
             if len(available) == 1:
-                logger.warning(f"    ⚠️ WARNING: Only 1 option available - will always get {available[0]}")
-        logger.info("=== END ASSIGNMENT DEBUG ===")
+                logger.warning(f"    Only 1 option available for {giver} — will always get {available[0]}")
+        logger.debug("=== END ASSIGNMENT DEBUG ===")
     
     for attempt in range(max_attempts):
         try:
