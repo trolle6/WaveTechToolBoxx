@@ -37,12 +37,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
-from .secret_santa_checks import mod_check
-from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
-from .secret_santa_views import FileListPaginator
-from .secret_santa_storage import load_json, save_json
+from .bot_checks import mod_check
+from .distributezip_file_browser import (
+    FileListPaginator,
+    create_file_browser_view,
+)
 from .utils import (
+    atomic_save_json,
     autocomplete_safety_wrapper,
+    load_json_file,
     safe_edit_response,
     safe_followup_send,
     safe_filename_in_dir,
@@ -68,7 +71,7 @@ MAX_RETRIES = 2  # Maximum retries for transient network errors
 
 def load_metadata() -> Dict:
     """Load file metadata (synchronous - call from executor). Always returns a dict."""
-    data = load_json(METADATA_FILE, default={})
+    data = load_json_file(METADATA_FILE, default={})
     return data if isinstance(data, dict) else {}
 
 
@@ -78,7 +81,7 @@ def save_metadata(data: Dict, logger=None):
         if logger:
             logger.warning("save_metadata: data is None or not a dict, skipping save")
         return
-    save_json(METADATA_FILE, data, logger=logger)
+    atomic_save_json(METADATA_FILE, data)
 
 
 class DistributeZipCog(commands.Cog):

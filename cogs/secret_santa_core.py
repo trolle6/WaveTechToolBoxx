@@ -118,7 +118,7 @@ DISCORD_LOCALE_TO_IANA: Dict[str, str] = {
 }
 
 
-class SecretSantaCore(commands.Cog):
+class SecretSantaCore:
     """Secret Santa event management"""
 
     def __init__(self, bot):
