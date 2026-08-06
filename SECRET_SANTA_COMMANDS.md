@@ -12,7 +12,7 @@ File sharing uses **`/distribute`** (not under `/ss`).
 
 | Command | Description |
 |---------|-------------|
-| `/ss start` | Start event. **Required:** `message` (signup post). **Optional:** `role` (added on react), `shuffle`, `end` (auto times; uses your Discord language timezone, else UTC). |
+| `/ss start` | Start event. **Required:** `message` (signup post). **Optional:** `role` (added on react), `shuffle`, `end` (auto-stop; **defaults to Dec 25 23:59** in your Discord language timezone if omitted). |
 | `/ss status` | Dashboard: participant count, names, schedules, assignments, signup link. |
 | `/ss shuffle` | Pair participants and DM assignments. Cancels pending auto-shuffle. |
 | `/ss stop` | End event and archive to `cogs/archive/YYYY.json`. |
@@ -98,7 +98,7 @@ Use this so you don’t have to remember the flow from scratch.
   - **`message`** — the signup post (pick the message).
   - **`role`** *(optional but recommended)* — role added when someone reacts; removed if they un-react.
   - **`shuffle`** *(optional)* — e.g. `2025-12-24 18:00` (your Discord language timezone, else UTC). Bot pairs everyone automatically at that time.
-  - **`end`** *(optional)* — e.g. `2025-12-26 20:00` — auto **`/ss stop`** and archive (must be **after** shuffle if both are set).
+  - **`end`** *(optional)* — custom auto-stop time. **If omitted, defaults to 25 Dec 23:59** (your Discord language timezone, else UTC) as a safety net if you forget `/ss stop` after showcase.
 - [ ] Bot DMs everyone already on the message and logs the start.
 
 **Signup stays open until shuffle** — there is no separate “close signup after a week” command. A week (or any length) is just “don’t run shuffle yet.” People can react/un-react until you shuffle.

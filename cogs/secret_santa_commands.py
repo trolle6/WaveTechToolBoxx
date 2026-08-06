@@ -68,7 +68,7 @@ class SecretSantaCommandsMixin:
         end: Optional[str] = commands.Param(
             default=None,
             name="end",
-            description="Optional: auto-stop and archive at this date/time (must be after shuffle if both set)",
+            description="Optional auto-stop (e.g. 2025-12-26 02:00). Default: Dec 25 23:59 if omitted",
         ),
         role: Optional[disnake.Role] = commands.Param(
             default=None,
@@ -219,6 +219,13 @@ class SecretSantaCommandsMixin:
                 )
                 return
 
+        used_default_stop = False
+        if scheduled_stop_timestamp is None:
+            scheduled_stop_timestamp = self._default_scheduled_stop_timestamp(
+                current_year, tz_info, scheduled_timestamp
+            )
+            used_default_stop = scheduled_stop_timestamp is not None
+
         # Create event (current_year already set above during safety check)
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         new_event = {
@@ -294,7 +301,9 @@ class SecretSantaCommandsMixin:
         
         if scheduled_stop_timestamp:
             response_msg += f"\n\n🛑 **Auto-stop & archive:** <t:{int(scheduled_stop_timestamp)}:F>"
-            response_msg += "\n💡 Or run `/ss stop` manually."
+            if used_default_stop:
+                response_msg += "\n_(Default: Christmas Day safety net — set `end` on start to override)_"
+            response_msg += "\n💡 Or run `/ss stop` manually anytime before then."
         
         await self._safe_edit_response(inter, content=response_msg)
         

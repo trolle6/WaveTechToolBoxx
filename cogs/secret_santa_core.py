@@ -70,6 +70,12 @@ SS_JOIN_DM_RATE_LIMIT = 5  # only blocks react spam re-join DMs, not /ss start b
 SS_JOIN_DM_RATE_WINDOW = 600
 SS_MAX_COMMS_PER_PAIR = 40  # messages per Santa↔giftee thread per event
 
+# Default auto-stop when /ss start omits `end`: Christmas Day 23:59 (author TZ or UTC)
+DEFAULT_AUTO_STOP_MONTH = 12
+DEFAULT_AUTO_STOP_DAY = 25
+DEFAULT_AUTO_STOP_HOUR = 23
+DEFAULT_AUTO_STOP_MINUTE = 59
+
 _SCRUB_MENTION_RE = re.compile(r"<@!?\d+>")
 _SCRUB_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 _SCRUB_DISCORD_USER_URL_RE = re.compile(r"https?://(?:www\.)?discord(?:app)?\.com/users/\d+", re.I)
@@ -224,6 +230,37 @@ class SecretSantaCore(commands.Cog):
         """Get active event with validation. Returns event dict if active, None otherwise"""
         event = self.state.get("current_event")
         return event if isinstance(event, dict) and event.get("active") else None
+
+    def _default_scheduled_stop_timestamp(
+        self,
+        year: int,
+        tz_info: Optional[ZoneInfo],
+        shuffle_timestamp: Optional[float] = None,
+    ) -> Optional[float]:
+        """
+        Safety-net auto-stop: 25 December 23:59 when /ss start has no `end`.
+
+        Returns None if that moment is already past or would be before shuffle.
+        """
+        tz = tz_info or dt.timezone.utc
+        try:
+            stop_dt = dt.datetime(
+                year,
+                DEFAULT_AUTO_STOP_MONTH,
+                DEFAULT_AUTO_STOP_DAY,
+                DEFAULT_AUTO_STOP_HOUR,
+                DEFAULT_AUTO_STOP_MINUTE,
+                tzinfo=tz,
+            )
+        except (ValueError, TypeError):
+            return None
+        stop_ts = stop_dt.timestamp()
+        now = time.time()
+        if stop_ts <= now:
+            return None
+        if shuffle_timestamp is not None and stop_ts <= shuffle_timestamp:
+            return None
+        return stop_ts
     
     def _get_available_years(self) -> List[int]:
         """Get list of available years from archive directory - excludes backup files (synchronous)"""
@@ -845,8 +882,13 @@ class SecretSantaCore(commands.Cog):
                                 if not success:
                                     self.logger.debug(f"Could not send stop notification to stopper {stopper_id} (DMs may be disabled)")
                         else:
-                            self.logger.error(f"Scheduled stop returned error: {saved_filename}")
-                            if stopper_id:
+                            if saved_filename and "No active event" in saved_filename:
+                                self.logger.info(
+                                    "Scheduled stop skipped — event already ended (manual /ss stop)"
+                                )
+                            else:
+                                self.logger.error(f"Scheduled stop returned error: {saved_filename}")
+                            if stopper_id and saved_filename and "No active event" not in saved_filename:
                                 error_msg = (
                                     f"❌ **Couldn't auto-stop the event.**\n\n"
                                     f"Ran into an issue while trying to wrap things up:\n"
