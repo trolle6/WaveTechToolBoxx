@@ -108,6 +108,20 @@ class Config:
         if self.data.get("DEBUG_MODE"):
             self.data["LOG_LEVEL"] = "DEBUG"
 
+        for key in (
+            "DISCORD_CHANNEL_ID",
+            "DISCORD_LOG_CHANNEL_ID",
+            "DISCORD_MODERATOR_ROLE_ID",
+            "TTS_ROLE_ID",
+        ):
+            val = self.data.get(key)
+            if val is None or val == "":
+                continue
+            try:
+                self.data[key] = int(val)
+            except (ValueError, TypeError):
+                warnings.warn(f"Invalid snowflake for {key!r}: {val!r}", UserWarning)
+
         log_level = str(self.data.get("LOG_LEVEL", "INFO")).upper()
         if not isinstance(getattr(logging, log_level, None), int):
             warnings.warn(f"Invalid LOG_LEVEL {log_level!r}, using INFO", UserWarning)
