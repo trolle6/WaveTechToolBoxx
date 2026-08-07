@@ -270,11 +270,13 @@ class VoiceProcessingCog(commands.Cog):
 
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
-        # Model used for speech synthesis. tts-1-hd only supports 9 of the 13
-        # built-in voices; switch to "gpt-4o-mini-tts" to unlock all 13
-        # (including the recommended marin/cedar). The assignable voice pool
+        # Model used for speech synthesis. gpt-4o-mini-tts is the current-gen
+        # model: ~half the cost of tts-1-hd (~$0.015 vs ~$0.030 per minute),
+        # supports all 13 built-in voices (incl. the recommended marin/cedar),
+        # and allows steerable voice `instructions`. The assignable voice pool
         # below is derived from this so we never request an unsupported voice.
-        self.tts_model = "tts-1-hd"
+        # (Use "tts-1-hd"/"tts-1" to fall back to the legacy 9-voice models.)
+        self.tts_model = "gpt-4o-mini-tts"
         self.default_voice = "alloy"
         # Voices we are allowed to assign for the active model (see voices_for_model).
         self.available_voices = voices_for_model(self.tts_model)
@@ -829,8 +831,9 @@ class VoiceProcessingCog(commands.Cog):
     # ============ TTS GENERATION ============
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
-        # Include format in key to avoid serving wrong format from cache after format changes
-        key_str = f"mp3:{voice}:{text}"
+        # Include model + format in key so we never serve audio rendered by a
+        # different model/voice/format (e.g. after switching TTS models).
+        key_str = f"{self.tts_model}:mp3:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     def _normalize_text_for_api(self, text: str) -> str:
