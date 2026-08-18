@@ -543,12 +543,7 @@ async def send_to_discord_log(message: str, level: str = "INFO"):
     """Send message to Discord log channel"""
     await send_discord_message(config.DISCORD_LOG_CHANNEL_ID, message, level, include_level=True)
 
-async def send_to_discord_channel(message: str, level: str = "INFO"):
-    """Send message to default Discord channel"""
-    await send_discord_message(config.DISCORD_CHANNEL_ID, message, level, include_level=False)
-
 bot.send_to_discord_log = send_to_discord_log
-bot.send_to_discord_channel = send_to_discord_channel
 
 
 # ============ DAILY MAINTENANCE ============

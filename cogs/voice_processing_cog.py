@@ -114,7 +114,6 @@ DAVE_ENCRYPT_READY_POLL = 0.05  # Poll interval while waiting for key ratchet
 class TTSQueueItem:
     """TTS queue item"""
     user_id: int
-    channel_id: int
     text: str
     voice: str
     audio_data: Optional[bytes] = None
@@ -1485,8 +1484,7 @@ class VoiceProcessingCog(commands.Cog):
         # Queue all chunks sequentially
         state = await self._get_or_create_state(guild_id)
         chunks_queued = 0
-        channel_id = message.author.voice.channel.id
-        
+
         for i, chunk in enumerate(text_chunks, 1):
             if not chunk or len(chunk) < 2:
                 continue
@@ -1494,7 +1492,6 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 state.queue.put_nowait(TTSQueueItem(
                     user_id=message.author.id,
-                    channel_id=channel_id,
                     text=chunk,
                     voice=user_voice,
                     timestamp=time.time()

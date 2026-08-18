@@ -16,7 +16,6 @@ from disnake.ext import commands
 
 from .utils import (
     RateLimiter,
-    autocomplete_safety_wrapper,
     get_openai_headers,
     safe_edit_response,
     safe_followup_send,
@@ -24,22 +23,9 @@ from .utils import (
 
 # Import from modular components
 from .secret_santa_storage import (
-    ARCHIVE_DIR, BACKUPS_DIR, STATE_FILE,
-    load_state_with_fallback, save_state, load_all_archives, archive_event,
-    load_json, save_json, get_default_state
-)
-from .secret_santa_assignments import (
-    load_history_from_archives, validate_assignment_possibility, make_assignments
-)
-from .secret_santa_views import (
-    SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
-    CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
-)
-from .secret_santa_checks import (
-    GIFT_NO_SUBMISSION_ROW,
-    format_gift_description_for_display,
-    mod_check,
-    safe_display_name,
+    ARCHIVE_DIR,
+    load_state_with_fallback, save_state, archive_event,
+    get_default_state,
 )
 
 # Constants
