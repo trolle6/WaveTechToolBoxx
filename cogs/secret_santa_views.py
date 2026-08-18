@@ -120,7 +120,45 @@ class SecretSantaReplyModal(disnake.ui.Modal):
         await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
 
 
-class YearHistoryPaginator(disnake.ui.View):
+class PaginatedView(disnake.ui.View):
+    """Base view with shared Previous/Next paging for all list paginators.
+
+    Subclasses set ``self.current_page``, ``self.items_per_page`` and
+    ``self.total_pages`` in ``__init__`` (then call ``self._update_buttons()``),
+    and implement ``get_embed()``.
+    """
+
+    def _update_buttons(self):
+        """Enable/disable nav buttons based on the current page."""
+        self.previous_button.disabled = (self.current_page == 0)
+        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
+
+    def get_embed(self) -> disnake.Embed:
+        raise NotImplementedError
+
+    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
+    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        """Go to previous page"""
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._update_buttons()
+            await inter.response.edit_message(embed=self.get_embed(), view=self)
+
+    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
+    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        """Go to next page"""
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self._update_buttons()
+            await inter.response.edit_message(embed=self.get_embed(), view=self)
+
+    async def on_timeout(self):
+        """Disable buttons when view times out"""
+        for item in self.children:
+            item.disabled = True
+
+
+class YearHistoryPaginator(PaginatedView):
     """
     Paginated view for year history with assignments.
     Allows users to flip through pages if there are many assignments.
@@ -177,12 +215,7 @@ class YearHistoryPaginator(disnake.ui.View):
         
         # Update button states
         self._update_buttons()
-    
-    def _update_buttons(self):
-        """Update button enabled/disabled state"""
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
+
     def get_embed(self) -> disnake.Embed:
         """Generate embed for current page"""
         event_data = self.archive.get("event", {})
@@ -264,30 +297,9 @@ class YearHistoryPaginator(disnake.ui.View):
             embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages} • Use buttons to navigate")
         
         return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
 
 
-class FileListPaginator(disnake.ui.View):
+class FileListPaginator(PaginatedView):
     """Paginated view for file listings"""
     def __init__(self, files: List[Tuple[str, dict]], timeout: float = 300):
         super().__init__(timeout=timeout)
@@ -296,12 +308,7 @@ class FileListPaginator(disnake.ui.View):
         self.items_per_page = 10
         self.total_pages = (len(files) + self.items_per_page - 1) // self.items_per_page
         self._update_buttons()
-    
-    def _update_buttons(self):
-        """Update button enabled/disabled state"""
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
+
     def get_embed(self) -> disnake.Embed:
         """Generate embed for current page"""
         start_idx = self.current_page * self.items_per_page
@@ -340,30 +347,9 @@ class FileListPaginator(disnake.ui.View):
             embed.set_footer(text=f"Total: {len(self.files)} file(s)")
         
         return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
 
 
-class CommunicationsPaginator(disnake.ui.View):
+class CommunicationsPaginator(PaginatedView):
     """Paginated view for communication threads"""
     def __init__(self, comms: Dict[str, dict], participants: dict, emoji_mapping: dict, timeout: float = 300):
         super().__init__(timeout=timeout)
@@ -374,10 +360,6 @@ class CommunicationsPaginator(disnake.ui.View):
         self.items_per_page = 5
         self.total_pages = max(1, (len(self.comms) + self.items_per_page - 1) // self.items_per_page)
         self._update_buttons()
-
-    def _update_buttons(self):
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
 
     def _thread_preview_lines(self, data: dict, santa_emoji: str, giftee_emoji: str) -> list:
         """Safe preview lines from thread list (max 3)."""
@@ -431,30 +413,9 @@ class CommunicationsPaginator(disnake.ui.View):
             embed.set_footer(text=f"Total: {len(self.comms)} thread(s)")
         
         return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
 
 
-class YearTimelinePaginator(disnake.ui.View):
+class YearTimelinePaginator(PaginatedView):
     """Paginated view for year timeline overview"""
     def __init__(self, archives: Dict[int, dict], sorted_years: List[int], timeout: float = 300):
         super().__init__(timeout=timeout)
@@ -464,12 +425,7 @@ class YearTimelinePaginator(disnake.ui.View):
         self.items_per_page = 10
         self.total_pages = (len(sorted_years) + self.items_per_page - 1) // self.items_per_page
         self._update_buttons()
-    
-    def _update_buttons(self):
-        """Update button enabled/disabled state"""
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
+
     def get_embed(self) -> disnake.Embed:
         """Generate embed for current page"""
         start_idx = self.current_page * self.items_per_page
@@ -552,30 +508,9 @@ class YearTimelinePaginator(disnake.ui.View):
             embed.set_footer(text=f"Use /ss history [year] for detailed view")
         
         return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
 
 
-class BackupListPaginator(disnake.ui.View):
+class BackupListPaginator(PaginatedView):
     """Paginated view for backup listings"""
     def __init__(self, backup_list: List[str], timeout: float = 300):
         super().__init__(timeout=timeout)
@@ -584,12 +519,7 @@ class BackupListPaginator(disnake.ui.View):
         self.items_per_page = 15
         self.total_pages = (len(backup_list) + self.items_per_page - 1) // self.items_per_page
         self._update_buttons()
-    
-    def _update_buttons(self):
-        """Update button enabled/disabled state"""
-        self.previous_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
-    
+
     def get_embed(self) -> disnake.Embed:
         """Generate embed for current page"""
         start_idx = self.current_page * self.items_per_page
@@ -624,25 +554,4 @@ class BackupListPaginator(disnake.ui.View):
             embed.set_footer(text=f"Location: archive/backups/")
         
         return embed
-    
-    @disnake.ui.button(label="◀ Previous", style=disnake.ButtonStyle.secondary)
-    async def previous_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to previous page"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @disnake.ui.button(label="Next ▶", style=disnake.ButtonStyle.secondary)
-    async def next_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        """Go to next page"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await inter.response.edit_message(embed=self.get_embed(), view=self)
-    
-    async def on_timeout(self):
-        """Disable buttons when view times out"""
-        for item in self.children:
-            item.disabled = True
 
