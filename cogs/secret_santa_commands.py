@@ -574,69 +574,6 @@ class SecretSantaCommandsMixin:
         
         return True, saved_filename
 
-    def _parse_datetime(self, date_str: str, time_str: str, tz_info: Optional[ZoneInfo] = None) -> Optional[float]:
-        """
-        Parse date and time strings into a Unix timestamp.
-        
-        Supports intuitive formats:
-        - Date: "YYYY-MM-DD", "MM/DD/YYYY", "December 25, 2025"
-        - Time: "HH:MM" (24-hour), "HH:MM AM/PM" (12-hour)
-        
-        If tz_info is set, the time is interpreted in that timezone (e.g. user local).
-        Otherwise the time is interpreted in server local time (often UTC).
-        
-        Returns:
-            Unix timestamp (float) or None if parsing fails
-        """
-        try:
-            # Try common date formats
-            date_obj = None
-            date_formats = [
-                "%Y-%m-%d",      # 2025-12-25
-                "%m/%d/%Y",      # 12/25/2025
-                "%B %d, %Y",     # December 25, 2025
-                "%b %d, %Y",     # Dec 25, 2025
-                "%d %B %Y",      # 25 December 2025
-                "%d %b %Y",      # 25 Dec 2025
-            ]
-            
-            for fmt in date_formats:
-                try:
-                    date_obj = dt.datetime.strptime(date_str, fmt).date()
-                    break
-                except ValueError:
-                    continue
-            
-            if not date_obj:
-                return None
-            
-            # Try common time formats
-            time_obj = None
-            time_formats = [
-                "%H:%M",         # 14:30 (24-hour)
-                "%I:%M %p",      # 02:30 PM (12-hour)
-                "%I:%M%p",       # 02:30PM (12-hour, no space)
-                "%H:%M:%S",      # 14:30:00 (24-hour with seconds)
-            ]
-            
-            for fmt in time_formats:
-                try:
-                    time_obj = dt.datetime.strptime(time_str, fmt).time()
-                    break
-                except ValueError:
-                    continue
-            
-            if not time_obj:
-                return None
-            
-            # Combine date and time; if timezone given, interpret in that zone
-            datetime_obj = dt.datetime.combine(date_obj, time_obj, tzinfo=tz_info)
-            return datetime_obj.timestamp()
-            
-        except Exception as e:
-            self.logger.debug(f"Date/time parsing error: {e}")
-            return None
-
     def _parse_datetime_combined(self, date_time_str: str, tz_info: Optional[ZoneInfo] = None) -> Optional[float]:
         """
         Parse a single string containing both date and time into a Unix timestamp.

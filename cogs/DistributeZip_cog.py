@@ -178,7 +178,7 @@ class DistributeZipCog(commands.Cog):
     # ============ ASYNC FILE I/O ============
     async def _save_metadata_async(self):
         """Save metadata asynchronously (non-blocking)"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, save_metadata, self.metadata, self.logger)
     
     @autocomplete_safety_wrapper
@@ -1165,11 +1165,15 @@ class DistributeZipCog(commands.Cog):
                 self.logger.error(f"Failed to save metadata during unload: {e}")
             return
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
                 loop.create_task(self._async_unload())
             else:
-                loop.run_until_complete(self._async_unload())
+                # No running loop — run the async cleanup to completion ourselves
+                asyncio.run(self._async_unload())
         except Exception as e:
             self.logger.error(f"Failed to schedule metadata save during unload: {e}")
 
