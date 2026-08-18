@@ -283,7 +283,7 @@ class SecretSantaCore(commands.Cog):
     
     async def _get_available_years_async(self) -> List[int]:
         """Get list of available years asynchronously (non-blocking)"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self._get_available_years)
     
     def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
@@ -723,7 +723,7 @@ class SecretSantaCore(commands.Cog):
     async def cog_load(self):
         """Initialize cog - load state from disk (non-blocking), then start tasks"""
         # Load state in executor to avoid blocking event loop during startup (file I/O)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loaded_state = await loop.run_in_executor(
             self._executor,
             lambda: load_state_with_fallback(logger=self.logger)
@@ -755,16 +755,15 @@ class SecretSantaCore(commands.Cog):
         
         # Schedule async cleanup for backup task
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running() and self._backup_task:
-                # Create task for async cleanup
-                loop.create_task(self._async_unload())
-            else:
-                # No loop or no task, we're done
-                self.logger.info("Secret Santa cog unloaded (sync)")
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No event loop available
-            self.logger.info("Secret Santa cog unloaded (no loop)")
+            loop = None
+        if loop is not None and self._backup_task:
+            # Create task for async cleanup
+            loop.create_task(self._async_unload())
+        else:
+            # No running loop or no task, we're done
+            self.logger.info("Secret Santa cog unloaded (sync)")
     
     async def _async_unload(self):
         """Async cleanup operations — persist state before cancelling background tasks."""
@@ -797,7 +796,7 @@ class SecretSantaCore(commands.Cog):
     
     async def _save_async(self):
         """Save state to disk asynchronously (non-blocking)"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, self._save)
 
     async def _backup_loop(self):

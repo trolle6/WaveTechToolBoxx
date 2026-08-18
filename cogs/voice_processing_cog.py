@@ -1680,12 +1680,12 @@ class VoiceProcessingCog(commands.Cog):
         self.logger.info("Unloading voice cog...")
         
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._async_unload())
-            else:
-                self._shutdown.set()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(self._async_unload())
+        else:
             self._shutdown.set()
     
     async def _async_unload(self):
