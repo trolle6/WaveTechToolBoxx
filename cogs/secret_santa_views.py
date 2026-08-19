@@ -120,6 +120,51 @@ class SecretSantaReplyModal(disnake.ui.Modal):
         await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
 
 
+class StartSecretSantaModal(disnake.ui.Modal):
+    """Modal for moderators to start Secret Santa from the right-click Apps menu.
+
+    The signup message is captured from the right-clicked message; both fields are
+    optional and mirror the /ss start `shuffle` and `end` options.
+    """
+
+    def __init__(self, signup_message: disnake.Message):
+        self.signup_message = signup_message
+        components = [
+            disnake.ui.TextInput(
+                label="Auto-shuffle time (optional)",
+                custom_id="shuffle",
+                placeholder="e.g. 2025-12-24 18:00  (blank = none)",
+                style=disnake.TextInputStyle.short,
+                required=False,
+                max_length=100,
+            ),
+            disnake.ui.TextInput(
+                label="Auto-stop time (optional)",
+                custom_id="end",
+                placeholder="e.g. 2025-12-26 02:00  (blank = Dec 25 default)",
+                style=disnake.TextInputStyle.short,
+                required=False,
+                max_length=100,
+            ),
+        ]
+        super().__init__(title="🎄 Start Secret Santa", components=components)
+
+    async def callback(self, inter: disnake.ModalInteraction):
+        """Reuse the shared /ss start logic with the captured signup message."""
+        cog = inter.bot.get_cog("SecretSantaCog")
+        if not cog:
+            await inter.response.send_message(
+                content="❌ Secret Santa system not available", ephemeral=True
+            )
+            return
+        if not await cog._safe_defer(inter, ephemeral=True):
+            return
+        text_values = getattr(inter, "text_values", None) or {}
+        shuffle = (text_values.get("shuffle") or "").strip() or None
+        end = (text_values.get("end") or "").strip() or None
+        await cog._start_event_core(inter, self.signup_message, shuffle, end, None)
+
+
 class YearHistoryPaginator(disnake.ui.View):
     """
     Paginated view for year history with assignments.
