@@ -1186,12 +1186,32 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.warning(f"Voice ClientException: {e}")
                     if attempt == max_attempts - 1:
                         return None
-            except (OSError, asyncio.TimeoutError) as e:
-                self.logger.warning(f"Voice connection error: {e}")
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    f"Voice connect to '{channel.name}' timed out after {timeout + 5}s "
+                    f"(attempt {attempt + 1}/{max_attempts})"
+                )
                 if attempt == max_attempts - 1:
+                    self.logger.error(
+                        f"Failed to connect to voice channel '{channel.name}' "
+                        f"after {max_attempts} attempts (timed out)"
+                    )
+                    return None
+            except OSError as e:
+                self.logger.warning(
+                    f"Voice connect to '{channel.name}' network error: {e!r} "
+                    f"(attempt {attempt + 1}/{max_attempts})"
+                )
+                if attempt == max_attempts - 1:
+                    self.logger.error(
+                        f"Failed to connect to voice channel '{channel.name}' "
+                        f"after {max_attempts} attempts: {e!r}"
+                    )
                     return None
             except Exception as e:
-                self.logger.error(f"Voice connection failed: {e}", exc_info=True)
+                self.logger.error(
+                    f"Voice connection to '{channel.name}' failed: {e!r}", exc_info=True
+                )
                 if attempt == max_attempts - 1:
                     return None
             await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
