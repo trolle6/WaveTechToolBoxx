@@ -2069,7 +2069,8 @@ class VoiceProcessingCog(commands.Cog):
                 
                 # Get version
                 try:
-                    result = subprocess.run(
+                    result = await asyncio.to_thread(
+                        subprocess.run,
                         ['ffmpeg', '-version'],
                         capture_output=True,
                         text=True,
@@ -2105,7 +2106,8 @@ class VoiceProcessingCog(commands.Cog):
         # Check codecs
         try:
             import subprocess
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ['ffmpeg', '-codecs'],
                 capture_output=True,
                 text=True,
