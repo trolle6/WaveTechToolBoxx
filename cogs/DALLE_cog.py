@@ -36,7 +36,6 @@ class GenerationJob:
     Represents a single image generation request in the processing queue.
     
     Attributes:
-        user_id: Discord user ID who requested the generation
         prompt: Text description of the image to generate
         size: Image size (1024x1024, 1792x1024, or 1024x1792)
         quality: Image quality (standard or hd)
@@ -46,7 +45,6 @@ class GenerationJob:
     Design: Separates job creation from processing to enable queue management and prevent
     API rate limiting by processing requests sequentially.
     """
-    user_id: int
     prompt: str
     size: str
     quality: str
@@ -565,7 +563,6 @@ class DALLECog(commands.Cog):
 
         # Create job
         job = GenerationJob(
-            user_id=inter.author.id,
             prompt=prompt,
             size=size,
             quality=quality,
@@ -613,12 +610,12 @@ class DALLECog(commands.Cog):
         self.logger.info("Unloading DALL-E cog...")
         
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._async_unload())
-            else:
-                self._shutdown.set()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(self._async_unload())
+        else:
             self._shutdown.set()
     
     async def _async_unload(self):
