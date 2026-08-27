@@ -41,12 +41,6 @@ def _has_mod_access(member: disnake.Member, bot: disnake.Client) -> bool:
     return any(r.id == mod_role_id for r in member.roles)
 
 
-def is_moderator(inter: "disnake.ApplicationCommandInteraction") -> bool:
-    """Return True if the user can run mod-gated commands (admin or mod role)."""
-    member = _get_member_from_inter(inter)
-    return _has_mod_access(member, inter.bot) if member else False
-
-
 def mod_check():
     """Check if user is server admin or has the configured moderator role."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):

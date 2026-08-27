@@ -38,9 +38,9 @@ def create_file_browser_view(
         )
         return embed, None
     
-    # Sort files by upload time (newest first)
+    # Sort files by upload time (newest first); skip corrupt metadata entries
     sorted_files = sorted(
-        files.items(),
+        ((fid, data) for fid, data in files.items() if isinstance(data, dict)),
         key=lambda x: x[1].get("uploaded_at", 0),
         reverse=True
     )
@@ -109,7 +109,17 @@ class FileSelectMenu(disnake.ui.Select):
         
         # Call the selection handler if set
         if view.selection_handler:
-            await view.selection_handler(inter, file_id, file_data, file_path)
+            try:
+                await view.selection_handler(inter, file_id, file_data, file_path)
+            except Exception as e:
+                if not inter.response.is_done():
+                    await inter.response.send_message(
+                        f"❌ Error handling selection: {e}", ephemeral=True
+                    )
+                else:
+                    await inter.followup.send(
+                        f"❌ Error handling selection: {e}", ephemeral=True
+                    )
         else:
             await inter.response.send_message("❌ No handler configured for file selection", ephemeral=True)
 

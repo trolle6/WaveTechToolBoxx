@@ -108,6 +108,20 @@ class Config:
         if self.data.get("DEBUG_MODE"):
             self.data["LOG_LEVEL"] = "DEBUG"
 
+        for key in (
+            "DISCORD_CHANNEL_ID",
+            "DISCORD_LOG_CHANNEL_ID",
+            "DISCORD_MODERATOR_ROLE_ID",
+            "TTS_ROLE_ID",
+        ):
+            val = self.data.get(key)
+            if val is None or val == "":
+                continue
+            try:
+                self.data[key] = int(val)
+            except (ValueError, TypeError):
+                warnings.warn(f"Invalid snowflake for {key!r}: {val!r}", UserWarning)
+
         log_level = str(self.data.get("LOG_LEVEL", "INFO")).upper()
         if not isinstance(getattr(logging, log_level, None), int):
             warnings.warn(f"Invalid LOG_LEVEL {log_level!r}, using INFO", UserWarning)
@@ -529,12 +543,7 @@ async def send_to_discord_log(message: str, level: str = "INFO"):
     """Send message to Discord log channel"""
     await send_discord_message(config.DISCORD_LOG_CHANNEL_ID, message, level, include_level=True)
 
-async def send_to_discord_channel(message: str, level: str = "INFO"):
-    """Send message to default Discord channel"""
-    await send_discord_message(config.DISCORD_CHANNEL_ID, message, level, include_level=False)
-
 bot.send_to_discord_log = send_to_discord_log
-bot.send_to_discord_channel = send_to_discord_channel
 
 
 # ============ DAILY MAINTENANCE ============
