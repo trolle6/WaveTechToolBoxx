@@ -35,6 +35,7 @@ from .secret_santa_views import (
     BackupListPaginator,
     CommunicationsPaginator,
     SecretSantaReplyView,
+    StartSecretSantaModal,
     YearHistoryPaginator,
     YearTimelinePaginator,
 )
@@ -78,6 +79,18 @@ class SecretSantaCommandsMixin:
         """Start event; optional auto-shuffle and auto-stop times"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
+        await self._start_event_core(inter, message, shuffle, end, role)
+
+    async def _start_event_core(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        message: disnake.Message,
+        shuffle: Optional[str],
+        end: Optional[str],
+        role: Optional[disnake.Role],
+    ):
+        """Shared Secret Santa start logic for /ss start and the 'Start Secret
+        Santa' message command. `inter` must already be deferred (ephemeral)."""
         if not inter.guild:
             await self._safe_edit_response(inter, content="❌ Use this command in a server.")
             return
@@ -313,6 +326,28 @@ class SecretSantaCommandsMixin:
             log_msg += f" (shuffle scheduled for <t:{int(scheduled_timestamp)}:F>)"
         if hasattr(self.bot, 'send_to_discord_log'):
             await self.bot.send_to_discord_log(log_msg, "SUCCESS")
+
+    @commands.message_command(
+        name="Start Secret Santa",
+        default_member_permissions=disnake.Permissions(manage_guild=True),
+    )
+    @mod_check()
+    async def start_secret_santa_ctx(
+        self,
+        inter: disnake.MessageCommandInteraction,
+        message: disnake.Message,
+    ):
+        """Right-click a signup message -> Apps -> Start Secret Santa (mods only).
+
+        Captures the right-clicked message as the signup post and opens a modal
+        for the optional shuffle/end schedule, then reuses the /ss start logic.
+        """
+        if not inter.guild:
+            await inter.response.send_message(
+                content="❌ Use this in a server.", ephemeral=True
+            )
+            return
+        await inter.response.send_modal(StartSecretSantaModal(message))
 
     async def _execute_shuffle_internal(self, inter: Optional[disnake.ApplicationCommandInteraction] = None, scheduler_id: Optional[int] = None) -> tuple[bool, Optional[str]]:
         """
