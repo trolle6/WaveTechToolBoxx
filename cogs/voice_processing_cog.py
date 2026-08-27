@@ -52,6 +52,31 @@ from .secret_santa_checks import manage_guild_check
 OPENAI_TTS_MAX_CHARS_PER_REQUEST = 4096  # Maximum characters per TTS API request
 TTS_CHUNK_SIZE = 4000  # Characters per chunk when splitting (leaves buffer for API limit)
 
+# OpenAI TTS voice catalog (as of 2026). These are ALL 13 built-in voices.
+# NOTE: model matters — `tts-1`/`tts-1-hd` only support a 9-voice subset; the
+# newer voices (ballad, verse, marin, cedar) require `gpt-4o-mini-tts`.
+# Requesting an unsupported voice returns a non-retryable 400, so we only ever
+# assign voices the ACTIVE model supports (see voices_for_model()).
+OPENAI_TTS_VOICES_ALL = (
+    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova",
+    "onyx", "sage", "shimmer", "verse", "marin", "cedar",
+)
+# Subset supported by the legacy tts-1 / tts-1-hd models.
+OPENAI_TTS1_VOICES = (
+    "alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
+)
+
+
+def voices_for_model(model: str) -> list:
+    """Return the built-in voices the given OpenAI TTS model can render.
+
+    gpt-4o-mini-tts (and newer) supports the full 13-voice catalog; the older
+    tts-1 / tts-1-hd models only support a 9-voice subset.
+    """
+    if model in ("tts-1", "tts-1-hd"):
+        return list(OPENAI_TTS1_VOICES)
+    return list(OPENAI_TTS_VOICES_ALL)
+
 # Timeout Configuration (in seconds)
 TTS_API_TIMEOUT_BASE = 60  # Base timeout for TTS API requests
 TTS_API_TIMEOUT_PER_100_CHARS = 0.15  # Additional seconds per 100 characters
@@ -244,12 +269,20 @@ class VoiceProcessingCog(commands.Cog):
 
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
+        # Model used for speech synthesis. gpt-4o-mini-tts is the current-gen
+        # model: ~half the cost of tts-1-hd (~$0.015 vs ~$0.030 per minute),
+        # supports all 13 built-in voices (incl. the recommended marin/cedar),
+        # and allows steerable voice `instructions`. The assignable voice pool
+        # below is derived from this so we never request an unsupported voice.
+        # (Use "tts-1-hd"/"tts-1" to fall back to the legacy 9-voice models.)
+        self.tts_model = "gpt-4o-mini-tts"
         self.default_voice = "alloy"
-        # All available OpenAI TTS voices (13 total)
-        self.available_voices = [
-            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", 
-            "onyx", "sage", "shimmer", "verse", "marin", "cedar"
-        ]
+        # Voices we are allowed to assign for the active model (see voices_for_model).
+        self.available_voices = voices_for_model(self.tts_model)
+        self.logger.info(
+            "TTS model %s supports %d assignable voices: %s",
+            self.tts_model, len(self.available_voices), ", ".join(self.available_voices),
+        )
         
         # Voice assignments (per-guild, session-based - cleared when user leaves voice)
         # Structure: guild_id -> {user_id: {"voice": voice_name, "timestamp": timestamp}}
@@ -296,8 +329,12 @@ class VoiceProcessingCog(commands.Cog):
         
         DESIGN DECISIONS:
         - Session-based: Voice assignments are per-guild and cleared when user leaves voice channel
-        - Deterministic: Uses user_id hash to consistently assign same voice within a session
-        - All voices: Uses all 13 available voices for better variety
+        - Unique per session: A new speaker gets a voice that no other active speaker in
+          the same guild is currently using, so people in the same VC sound distinct.
+          The user's deterministic preferred voice (user_id hash) is used when it is free,
+          otherwise the next free voice is chosen. If there are more simultaneous speakers
+          than available voices, we fall back to the deterministic voice (voices repeat).
+        - Model-aware pool: Only voices the active TTS model supports are ever assigned.
         - Timestamp tracking: Tracks when voice was assigned to help debug issues and ensure persistence
         
         Args:
@@ -363,22 +400,64 @@ class VoiceProcessingCog(commands.Cog):
                     # Remove invalid assignment
                     guild_assignments.pop(user_id, None)
             
-            # Assign new voice for this session (deterministic based on user_id)
-            # Use modulo to ensure consistent assignment per user
-            voice_index = user_id % len(self.available_voices)
-            new_voice = self.available_voices[voice_index]
-            
+            # Assign a NEW voice for this session, avoiding voices already used by
+            # other active speakers in this guild so everyone sounds distinct.
+            new_voice = self._pick_unused_voice(user_id, guild_assignments)
+
             # Store assignment with timestamp
             guild_assignments[user_id] = {
                 "voice": new_voice,
                 "timestamp": current_time
             }
-            
-            self.logger.debug(
-                f"Assigned voice '{new_voice}' to user {user_id} in guild {guild_id} "
-                f"({user_id} % {len(self.available_voices)} = {voice_index})"
+
+            self.logger.info(
+                "Assigned voice '%s' to user %s in guild %s (%d/%d voices now in use)",
+                new_voice, user_id, guild_id,
+                len({a.get("voice") if isinstance(a, dict) else a for a in guild_assignments.values()}),
+                len(self.available_voices),
             )
             return new_voice
+
+    def _pick_unused_voice(self, user_id: int, guild_assignments: Dict[int, Any]) -> str:
+        """Choose a voice not currently used by other speakers in this guild.
+
+        Preference order:
+        1. The user's deterministic voice (user_id % pool) when it is still free —
+           keeps a user's voice stable across a session and spreads users out.
+        2. Otherwise the next free voice, scanning the pool starting from that
+           preferred index (deterministic, stable given the lock).
+        3. If every voice is taken (more speakers than voices), fall back to the
+           deterministic voice so playback still works (voices repeat).
+
+        Must be called while holding self._voice_lock.
+        """
+        pool = self.available_voices
+        # Voices currently taken by OTHER users in this guild session.
+        used = set()
+        for uid, assignment in guild_assignments.items():
+            if uid == user_id:
+                continue
+            voice = assignment.get("voice") if isinstance(assignment, dict) else assignment
+            if voice:
+                used.add(voice)
+
+        start = user_id % len(pool)
+        preferred = pool[start]
+        if preferred not in used:
+            return preferred
+
+        # Scan the pool starting at the preferred index for the first free voice.
+        ordered = pool[start:] + pool[:start]
+        for voice in ordered:
+            if voice not in used:
+                return voice
+
+        # All voices in use — more concurrent speakers than voices available.
+        self.logger.info(
+            "All %d TTS voices in use; reusing '%s' for user %s",
+            len(pool), preferred, user_id,
+        )
+        return preferred
 
     # ============ SYSTEM DIAGNOSTICS ============
     def _check_dave_availability(self) -> bool:
@@ -751,8 +830,9 @@ class VoiceProcessingCog(commands.Cog):
     # ============ TTS GENERATION ============
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
-        # Include format in key to avoid serving wrong format from cache after format changes
-        key_str = f"mp3:{voice}:{text}"
+        # Include model + format in key so we never serve audio rendered by a
+        # different model/voice/format (e.g. after switching TTS models).
+        key_str = f"{self.tts_model}:mp3:{voice}:{text}"
         return hashlib.sha256(key_str.encode('utf-8')).hexdigest()
 
     def _normalize_text_for_api(self, text: str) -> str:
@@ -799,7 +879,7 @@ class VoiceProcessingCog(commands.Cog):
 
         headers = self._get_openai_headers()
         payload = {
-            "model": "tts-1-hd",
+            "model": self.tts_model,
             "input": text,
             "voice": voice,
             "response_format": "mp3",
