@@ -1096,6 +1096,26 @@ class VoiceProcessingCog(commands.Cog):
         return bool(channel and any(not m.bot for m in channel.members))
 
     # ============ VOICE CONNECTION ============
+    async def _cleanup_stale_voice_client(self, guild: disnake.Guild) -> None:
+        """Best-effort teardown of a half-open voice client after a failed connect.
+
+        A timed-out/cancelled connect can leave a partially-initialised voice
+        client plus orphaned handshake tasks (the "Task was destroyed but it is
+        pending" warnings). Force-disconnecting it releases that state so the next
+        attempt starts clean and the log noise is reduced.
+        """
+        vc = getattr(guild, "voice_client", None)
+        if vc is None:
+            return
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+        try:
+            vc.cleanup()
+        except Exception:
+            pass
+
     async def _connect_to_voice(
         self, channel: disnake.VoiceChannel, timeout: int | None = None
     ) -> Optional[disnake.VoiceClient]:
@@ -1110,6 +1130,21 @@ class VoiceProcessingCog(commands.Cog):
         guild = channel.guild
         if not guild:
             return None
+
+        # Fail fast with a clear error if we lack Connect — otherwise the join just
+        # hangs until timeout. Speak is warned but not fatal (bot can join, not play).
+        me = getattr(guild, "me", None)
+        if me is not None:
+            perms = channel.permissions_for(me)
+            if not perms.connect:
+                self.logger.error(
+                    f"Missing 'Connect' permission in voice channel '{channel.name}' — cannot join"
+                )
+                return None
+            if not perms.speak:
+                self.logger.warning(
+                    f"Missing 'Speak' permission in '{channel.name}' — TTS audio may be silent"
+                )
 
         vc = guild.voice_client
 
@@ -1191,6 +1226,7 @@ class VoiceProcessingCog(commands.Cog):
                     f"Voice connect to '{channel.name}' timed out after {timeout + 5}s "
                     f"(attempt {attempt + 1}/{max_attempts})"
                 )
+                await self._cleanup_stale_voice_client(guild)
                 if attempt == max_attempts - 1:
                     self.logger.error(
                         f"Failed to connect to voice channel '{channel.name}' "
@@ -1202,6 +1238,7 @@ class VoiceProcessingCog(commands.Cog):
                     f"Voice connect to '{channel.name}' network error: {e!r} "
                     f"(attempt {attempt + 1}/{max_attempts})"
                 )
+                await self._cleanup_stale_voice_client(guild)
                 if attempt == max_attempts - 1:
                     self.logger.error(
                         f"Failed to connect to voice channel '{channel.name}' "
@@ -1212,6 +1249,7 @@ class VoiceProcessingCog(commands.Cog):
                 self.logger.error(
                     f"Voice connection to '{channel.name}' failed: {e!r}", exc_info=True
                 )
+                await self._cleanup_stale_voice_client(guild)
                 if attempt == max_attempts - 1:
                     return None
             await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
