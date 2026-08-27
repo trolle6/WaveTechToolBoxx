@@ -12,6 +12,13 @@ services:
     image: python:3.11-slim
     container_name: wave-bot
     restart: unless-stopped
+    # REQUIRED for Discord VOICE / TTS. Discord voice does a UDP "IP discovery"
+    # handshake; in Docker's default bridge (NAT) networking that UDP round-trip
+    # is dropped/mangled, so channel.connect() hangs and times out (symptoms:
+    # blank "Voice connection error:" + "Task was destroyed but it is pending").
+    # host networking shares the NAS network stack and makes voice UDP work.
+    # (The bot opens no inbound ports, so host mode is safe here.)
+    network_mode: host
     working_dir: /app
     volumes:
       - /mnt/HDDs/discord-bot:/app
