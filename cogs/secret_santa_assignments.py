@@ -130,31 +130,22 @@ def validate_assignment_possibility(participants: List[int], history: Dict[str, 
     
     # Check each participant's available options
     problematic_users = []
-    limited_users = []
-    
+
     for giver in participants:
         unacceptable = history.get(str(giver), [])
         available = [p for p in participants if p not in unacceptable and p != giver]
-        
+
         if not available:
             # CRITICAL: Zero options - truly impossible
             problematic_users.append(str(giver))
-        elif len(available) == 1:
-            # Limited but possible - track for warning
-            limited_users.append(giver)
-    
+
     # Only fail if someone has ZERO options (truly impossible)
     if problematic_users:
         return f"Assignment impossible - users {', '.join(problematic_users)} have no valid receivers. Use fallback or clear history."
-    
-    # If many limited users, log warning but DON'T fail
-    # (The algorithm can handle this with retries!)
-    if len(limited_users) > len(participants) // 2:
-        # Just log it, don't fail validation
-        # The algorithm will try 10 times with different orderings
-        pass
-    
-    return None  # ✅ Let algorithm try (it's smart enough!)
+
+    # Limited-but-possible cases are left to make_assignments, which retries with
+    # different orderings and is smart enough to resolve them.
+    return None
 
 
 def _validate_assignment_integrity(assignments: Dict[int, int], participants: List[int]) -> None:

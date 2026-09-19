@@ -35,6 +35,7 @@ from .secret_santa_views import (
     BackupListPaginator,
     CommunicationsPaginator,
     SecretSantaReplyView,
+    StartSecretSantaModal,
     YearHistoryPaginator,
     YearTimelinePaginator,
 )
@@ -78,6 +79,18 @@ class SecretSantaCommandsMixin:
         """Start event; optional auto-shuffle and auto-stop times"""
         if not await self._safe_defer(inter, ephemeral=True):
             return  # Interaction expired, can't proceed
+        await self._start_event_core(inter, message, shuffle, end, role)
+
+    async def _start_event_core(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        message: disnake.Message,
+        shuffle: Optional[str],
+        end: Optional[str],
+        role: Optional[disnake.Role],
+    ):
+        """Shared Secret Santa start logic for /ss start and the 'Start Secret
+        Santa' message command. `inter` must already be deferred (ephemeral)."""
         if not inter.guild:
             await self._safe_edit_response(inter, content="❌ Use this command in a server.")
             return
@@ -314,6 +327,28 @@ class SecretSantaCommandsMixin:
         if hasattr(self.bot, 'send_to_discord_log'):
             await self.bot.send_to_discord_log(log_msg, "SUCCESS")
 
+    @commands.message_command(
+        name="Start Secret Santa",
+        default_member_permissions=disnake.Permissions(manage_guild=True),
+    )
+    @mod_check()
+    async def start_secret_santa_ctx(
+        self,
+        inter: disnake.MessageCommandInteraction,
+        message: disnake.Message,
+    ):
+        """Right-click a signup message -> Apps -> Start Secret Santa (mods only).
+
+        Captures the right-clicked message as the signup post and opens a modal
+        for the optional shuffle/end schedule, then reuses the /ss start logic.
+        """
+        if not inter.guild:
+            await inter.response.send_message(
+                content="❌ Use this in a server.", ephemeral=True
+            )
+            return
+        await inter.response.send_modal(StartSecretSantaModal(message))
+
     async def _execute_shuffle_internal(self, inter: Optional[disnake.ApplicationCommandInteraction] = None, scheduler_id: Optional[int] = None) -> tuple[bool, Optional[str]]:
         """
         Internal method to execute shuffle logic. Can be called from manual command or scheduled task.
@@ -526,12 +561,8 @@ class SecretSantaCommandsMixin:
             if not event:
                 return False, "❌ No active event"
             
-            # Use current year (not stale state) - update state if needed
-            current_year = dt.date.today().year
-            if self.state.get("current_year") != current_year:
-                self.state["current_year"] = current_year
-            
-            year = current_year
+            # Archive under the year the event was started (not calendar "today")
+            year = self.state.get("current_year") or dt.date.today().year
             
             # Archive event (with automatic backup protection)
             saved_filename = self._archive_event(event, year)
@@ -577,69 +608,6 @@ class SecretSantaCommandsMixin:
             )
         
         return True, saved_filename
-
-    def _parse_datetime(self, date_str: str, time_str: str, tz_info: Optional[ZoneInfo] = None) -> Optional[float]:
-        """
-        Parse date and time strings into a Unix timestamp.
-        
-        Supports intuitive formats:
-        - Date: "YYYY-MM-DD", "MM/DD/YYYY", "December 25, 2025"
-        - Time: "HH:MM" (24-hour), "HH:MM AM/PM" (12-hour)
-        
-        If tz_info is set, the time is interpreted in that timezone (e.g. user local).
-        Otherwise the time is interpreted in server local time (often UTC).
-        
-        Returns:
-            Unix timestamp (float) or None if parsing fails
-        """
-        try:
-            # Try common date formats
-            date_obj = None
-            date_formats = [
-                "%Y-%m-%d",      # 2025-12-25
-                "%m/%d/%Y",      # 12/25/2025
-                "%B %d, %Y",     # December 25, 2025
-                "%b %d, %Y",     # Dec 25, 2025
-                "%d %B %Y",      # 25 December 2025
-                "%d %b %Y",      # 25 Dec 2025
-            ]
-            
-            for fmt in date_formats:
-                try:
-                    date_obj = dt.datetime.strptime(date_str, fmt).date()
-                    break
-                except ValueError:
-                    continue
-            
-            if not date_obj:
-                return None
-            
-            # Try common time formats
-            time_obj = None
-            time_formats = [
-                "%H:%M",         # 14:30 (24-hour)
-                "%I:%M %p",      # 02:30 PM (12-hour)
-                "%I:%M%p",       # 02:30PM (12-hour, no space)
-                "%H:%M:%S",      # 14:30:00 (24-hour with seconds)
-            ]
-            
-            for fmt in time_formats:
-                try:
-                    time_obj = dt.datetime.strptime(time_str, fmt).time()
-                    break
-                except ValueError:
-                    continue
-            
-            if not time_obj:
-                return None
-            
-            # Combine date and time; if timezone given, interpret in that zone
-            datetime_obj = dt.datetime.combine(date_obj, time_obj, tzinfo=tz_info)
-            return datetime_obj.timestamp()
-            
-        except Exception as e:
-            self.logger.debug(f"Date/time parsing error: {e}")
-            return None
 
     def _parse_datetime_combined(self, date_time_str: str, tz_info: Optional[ZoneInfo] = None) -> Optional[float]:
         """
@@ -1433,7 +1401,7 @@ class SecretSantaCommandsMixin:
                 value="\n".join(f"{i+1}. {w}" for i, w in enumerate(user_wishlist)),
                 inline=False
             )
-            await self._safe_edit_response(inter, embed=embed)
+        await self._safe_edit_response(inter, embed=embed)
     
     @wishlist_remove.autocomplete("item_number")
     async def autocomplete_wishlist_item_number_decorator(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
@@ -2347,7 +2315,11 @@ class SecretSantaCommandsMixin:
         # Add participant only if event is still current (re-check inside lock)
         async with self._lock:
             current = self.state.get("current_event")
-            if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
+            if not current or not current.get("active") or current.get("join_closed"):
+                return
+            if current.get("guild_id") and payload.guild_id and current.get("guild_id") != payload.guild_id:
+                return
+            if current.get("announcement_message_id") != payload.message_id:
                 return  # Event was stopped or is different
             if "participants" not in current:
                 current["participants"] = {}

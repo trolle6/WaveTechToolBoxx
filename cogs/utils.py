@@ -356,10 +356,13 @@ class LRUCache(Generic[T]):
                 self._cache[key] = (value, now)
 
     async def get_stats(self) -> dict:
-        """Get cache statistics"""
-        await self.cleanup()
-
+        """Get cache statistics (cleanup runs under the same lock — Lock is not reentrant)."""
         async with self._lock:
+            now = time.time()
+            expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self.ttl]
+            for key in expired_keys:
+                del self._cache[key]
+
             total_requests = self._hits + self._misses
             hit_rate = (self._hits / total_requests * 100) if total_requests > 0 else 0.0
 

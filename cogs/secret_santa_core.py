@@ -16,7 +16,6 @@ from disnake.ext import commands
 
 from .utils import (
     RateLimiter,
-    autocomplete_safety_wrapper,
     get_openai_headers,
     safe_edit_response,
     safe_followup_send,
@@ -24,22 +23,9 @@ from .utils import (
 
 # Import from modular components
 from .secret_santa_storage import (
-    ARCHIVE_DIR, BACKUPS_DIR, STATE_FILE,
-    load_state_with_fallback, save_state, load_all_archives, archive_event,
-    load_json, save_json, get_default_state
-)
-from .secret_santa_assignments import (
-    load_history_from_archives, validate_assignment_possibility, make_assignments
-)
-from .secret_santa_views import (
-    SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
-    CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
-)
-from .secret_santa_checks import (
-    GIFT_NO_SUBMISSION_ROW,
-    format_gift_description_for_display,
-    mod_check,
-    safe_display_name,
+    ARCHIVE_DIR,
+    load_state_with_fallback, save_state, archive_event,
+    get_default_state,
 )
 
 # Constants
@@ -283,7 +269,7 @@ class SecretSantaCore(commands.Cog):
     
     async def _get_available_years_async(self) -> List[int]:
         """Get list of available years asynchronously (non-blocking)"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self._get_available_years)
     
     def _ensure_list_result(self, result: Any, function_name: str) -> List[str]:
@@ -723,7 +709,7 @@ class SecretSantaCore(commands.Cog):
     async def cog_load(self):
         """Initialize cog - load state from disk (non-blocking), then start tasks"""
         # Load state in executor to avoid blocking event loop during startup (file I/O)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loaded_state = await loop.run_in_executor(
             self._executor,
             lambda: load_state_with_fallback(logger=self.logger)
@@ -755,16 +741,15 @@ class SecretSantaCore(commands.Cog):
         
         # Schedule async cleanup for backup task
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running() and self._backup_task:
-                # Create task for async cleanup
-                loop.create_task(self._async_unload())
-            else:
-                # No loop or no task, we're done
-                self.logger.info("Secret Santa cog unloaded (sync)")
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No event loop available
-            self.logger.info("Secret Santa cog unloaded (no loop)")
+            loop = None
+        if loop is not None and self._backup_task:
+            # Create task for async cleanup
+            loop.create_task(self._async_unload())
+        else:
+            # No running loop or no task, we're done
+            self.logger.info("Secret Santa cog unloaded (sync)")
     
     async def _async_unload(self):
         """Async cleanup operations — persist state before cancelling background tasks."""
@@ -797,7 +782,7 @@ class SecretSantaCore(commands.Cog):
     
     async def _save_async(self):
         """Save state to disk asynchronously (non-blocking)"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, self._save)
 
     async def _backup_loop(self):
@@ -835,15 +820,20 @@ class SecretSantaCore(commands.Cog):
                             "INFO",
                         )
 
-                    # Clear the schedule first to prevent double execution
-                    async with self._lock:
-                        event.pop("scheduled_shuffle_time", None)
-                        event.pop("scheduled_by_user_id", None)
-                        await self._save_async()
-                    
                     # Execute the shuffle (without interaction, so we pass None for inter)
                     try:
-                        await self._execute_shuffle_internal(scheduler_id=scheduler_id)
+                        success, err_msg = await self._execute_shuffle_internal(scheduler_id=scheduler_id)
+                        ev = self.state.get("current_event")
+                        should_clear = success or bool(ev and ev.get("assignments"))
+                        if should_clear:
+                            async with self._lock:
+                                ev = self.state.get("current_event")
+                                if ev:
+                                    ev.pop("scheduled_shuffle_time", None)
+                                    ev.pop("scheduled_by_user_id", None)
+                                    await self._save_async()
+                        elif err_msg:
+                            self.logger.warning("Scheduled shuffle did not complete: %s", err_msg)
                     except Exception as e:
                         self.logger.error(f"Error executing scheduled shuffle: {e}", exc_info=True)
                         # Try to notify scheduler about the error

@@ -36,7 +36,6 @@ class GenerationJob:
     Represents a single image generation request in the processing queue.
     
     Attributes:
-        user_id: Discord user ID who requested the generation
         prompt: Text description of the image to generate
         size: Image size (1024x1024, 1792x1024, or 1024x1792)
         quality: Image quality (standard or hd)
@@ -46,7 +45,6 @@ class GenerationJob:
     Design: Separates job creation from processing to enable queue management and prevent
     API rate limiting by processing requests sequentially.
     """
-    user_id: int
     prompt: str
     size: str
     quality: str
@@ -539,20 +537,13 @@ class DALLECog(commands.Cog):
 
         await inter.response.defer(ephemeral=private)
 
-        # Check rate limit
-        if not await self.rate_limiter.check(str(inter.author.id)):
-            await inter.edit_original_response(
-                content="⏳ Rate limited. Please wait before generating another image."
-            )
-            return
-
-        # Validate prompt
+        # Validate prompt before rate limit / queue
         prompt = prompt.strip()
         if len(prompt) < 3:
             await inter.edit_original_response(content="❌ Prompt too short (min 3 characters)")
             return
 
-        # Check cache
+        # Check cache (no rate limit consumed on hits)
         cache_key = self._cache_key(prompt, size, quality)
         cached = await self.cache.get(cache_key)
 
@@ -564,9 +555,14 @@ class DALLECog(commands.Cog):
             await inter.edit_original_response(embed=embed)
             return
 
+        if not await self.rate_limiter.check(str(inter.author.id)):
+            await inter.edit_original_response(
+                content="⏳ Rate limited. Please wait before generating another image."
+            )
+            return
+
         # Create job
         job = GenerationJob(
-            user_id=inter.author.id,
             prompt=prompt,
             size=size,
             quality=quality,
@@ -614,12 +610,12 @@ class DALLECog(commands.Cog):
         self.logger.info("Unloading DALL-E cog...")
         
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._async_unload())
-            else:
-                self._shutdown.set()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(self._async_unload())
+        else:
             self._shutdown.set()
     
     async def _async_unload(self):
