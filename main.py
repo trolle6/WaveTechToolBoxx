@@ -62,7 +62,7 @@ CONFIG_DEFAULTS = {
     "MAX_QUEUE_SIZE": 50,
     "RATE_LIMIT_REQUESTS": 15,
     "RATE_LIMIT_WINDOW": 60,
-    "VOICE_TIMEOUT": 10,
+    "VOICE_TIMEOUT": 30,  # Increased from 10 to 30 for unstable networks (Hetzner, etc.)
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)

@@ -1109,7 +1109,13 @@ class VoiceProcessingCog(commands.Cog):
             timeout = int(self.bot.config.VOICE_TIMEOUT)
         guild = channel.guild
         if not guild:
+            self.logger.error("Cannot connect to voice: channel has no guild")
             return None
+
+        self.logger.info(
+            f"Attempting voice connection to '{channel.name}' (ID: {channel.id}) "
+            f"in guild '{guild.name}' (ID: {guild.id}), timeout: {timeout}s"
+        )
 
         vc = guild.voice_client
 
@@ -1187,11 +1193,30 @@ class VoiceProcessingCog(commands.Cog):
                     if attempt == max_attempts - 1:
                         return None
             except (OSError, asyncio.TimeoutError) as e:
-                self.logger.warning(f"Voice connection error: {e}")
+                error_type = type(e).__name__
+                error_details = str(e)
+                self.logger.warning(
+                    f"Voice connection error ({error_type}): {error_details}\n"
+                    f"  Attempt {attempt + 1}/{max_attempts}, channel: {channel.name} (ID: {channel.id})\n"
+                    f"  Guild: {guild.name if guild else 'None'}"
+                )
                 if attempt == max_attempts - 1:
+                    self.logger.error(
+                        f"VOICE CONNECTION FAILED after {max_attempts} attempts!\n"
+                        f"  Error: {error_type}: {error_details}\n"
+                        f"  Possible causes:\n"
+                        f"  - Network instability (check server connection to Discord)\n"
+                        f"  - Discord API issues\n"
+                        f"  - Firewall blocking UDP voice ports\n"
+                        f"  - Bot permissions missing in Discord server"
+                    )
                     return None
             except Exception as e:
-                self.logger.error(f"Voice connection failed: {e}", exc_info=True)
+                self.logger.error(
+                    f"Voice connection unexpected error: {type(e).__name__}: {e}\n"
+                    f"  Attempt {attempt + 1}/{max_attempts}, channel: {channel.name} (ID: {channel.id})",
+                    exc_info=True
+                )
                 if attempt == max_attempts - 1:
                     return None
             await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
@@ -1918,6 +1943,47 @@ class VoiceProcessingCog(commands.Cog):
             await inter.edit_original_response(content="❌ TTS is disabled")
             return
         embed = disnake.Embed(title="🔍 TTS System Diagnostics", color=disnake.Color.blue())
+        
+        # Bot connection health
+        if hasattr(self.bot, '_connection_stats'):
+            stats = self.bot._connection_stats
+            disconnect_count = stats.get('disconnect_count_24h', 0)
+            longest_uptime = stats.get('longest_uptime', 0)
+            
+            # Calculate current uptime
+            current_uptime = 0
+            if stats.get('last_connect'):
+                current_uptime = time.time() - stats['last_connect']
+            
+            health_emoji = "🟢" if disconnect_count < 5 else ("🟡" if disconnect_count < 10 else "🔴")
+            embed.add_field(
+                name=f"{health_emoji} Connection Health (24h)",
+                value=f"Disconnects: {disconnect_count}\n"
+                      f"Current uptime: {current_uptime/3600:.1f}h\n"
+                      f"Longest uptime: {longest_uptime/3600:.1f}h\n"
+                      f"Status: {'⚠️ UNSTABLE' if disconnect_count >= 10 else '✅ Stable'}",
+                inline=False
+            )
+        
+        # Discord gateway latency
+        latency_ms = self.bot.latency * 1000
+        latency_emoji = "🟢" if latency_ms < 100 else ("🟡" if latency_ms < 300 else "🔴")
+        embed.add_field(
+            name=f"{latency_emoji} Gateway Latency",
+            value=f"{latency_ms:.0f}ms",
+            inline=True
+        )
+        
+        # Voice client status
+        if inter.guild and inter.guild.voice_client:
+            vc = inter.guild.voice_client
+            embed.add_field(
+                name="🔊 Voice Status",
+                value=f"Connected: {vc.is_connected()}\n"
+                      f"Playing: {vc.is_playing()}\n"
+                      f"Channel: {getattr(vc.channel, 'name', 'Unknown')}",
+                inline=True
+            )
         
         # Check FFmpeg
         try:
