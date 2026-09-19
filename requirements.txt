@@ -14,4 +14,7 @@ python-dotenv>=1.0.0,<2.0.0
 # Voice encryption (also pulled in by disnake[voice]; explicit for clarity)
 PyNaCl>=1.5.0,<2.0.0
 
+# DNS resolution for improved connection stability (optional but recommended)
+aiodns>=3.0.0,<4.0.0
+
 # Note: OpenAI API is accessed via HTTP (aiohttp), not the openai package
