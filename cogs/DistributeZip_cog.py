@@ -37,12 +37,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import disnake
 from disnake.ext import commands
 
-from .secret_santa_checks import mod_check
-from .distributezip_file_browser import create_file_browser_view, FileBrowserSelectView
-from .secret_santa_views import FileListPaginator
-from .secret_santa_storage import load_json, save_json
+from .bot_checks import mod_check
+from .distributezip_file_browser import (
+    FileListPaginator,
+    create_file_browser_view,
+)
 from .utils import (
+    atomic_save_json,
     autocomplete_safety_wrapper,
+    load_json_file,
     safe_edit_response,
     safe_followup_send,
     safe_filename_in_dir,
@@ -68,7 +71,7 @@ MAX_RETRIES = 2  # Maximum retries for transient network errors
 
 def load_metadata() -> Dict:
     """Load file metadata (synchronous - call from executor). Always returns a dict."""
-    data = load_json(METADATA_FILE, default={})
+    data = load_json_file(METADATA_FILE, default={})
     return data if isinstance(data, dict) else {}
 
 
@@ -78,7 +81,7 @@ def save_metadata(data: Dict, logger=None):
         if logger:
             logger.warning("save_metadata: data is None or not a dict, skipping save")
         return
-    save_json(METADATA_FILE, data, logger=logger)
+    atomic_save_json(METADATA_FILE, data)
 
 
 class DistributeZipCog(commands.Cog):
@@ -377,12 +380,48 @@ class DistributeZipCog(commands.Cog):
         await self._safe_edit_response(inter, embed=embed, view=browser_view)
 
     # ============ DISTRIBUTION ============
-    async def _get_distribution_targets(self, guild: disnake.Guild) -> Tuple[list, str]:
-        """Get members to distribute to and distribution type"""
-        # Check if Secret Santa event is active
+    def _snapshot_ss_participant_ids(self) -> List[int]:
+        """Capture SS participant IDs at upload time so distribution cannot widen later."""
         secret_santa_cog = self.bot.get_cog("SecretSantaCog")
-        participant_ids = []
-        
+        if not secret_santa_cog:
+            return []
+        try:
+            event = secret_santa_cog.state.get("current_event")
+            if not event or not event.get("active"):
+                return []
+            participants = event.get("participants") or {}
+            return [int(uid) for uid in participants.keys() if str(uid).isdigit()]
+        except Exception as e:
+            self.logger.debug(f"Could not snapshot SS participants: {e}")
+            return []
+
+    async def _get_distribution_targets(
+        self,
+        guild: disnake.Guild,
+        *,
+        snapshot_user_ids: Optional[List[int]] = None,
+    ) -> Tuple[list, str]:
+        """Get members to distribute to. Uses upload-time snapshot when provided."""
+        if snapshot_user_ids:
+            members = []
+            for user_id in snapshot_user_ids:
+                try:
+                    member = guild.get_member(user_id)
+                    if member and not member.bot:
+                        members.append(member)
+                except Exception:
+                    pass
+            if members:
+                return members, "Secret Santa participants (upload snapshot)"
+            self.logger.warning(
+                "Upload snapshot had %s IDs but none resolved in guild cache",
+                len(snapshot_user_ids),
+            )
+
+        # Live SS participant list (upload path snapshots IDs at save time)
+        secret_santa_cog = self.bot.get_cog("SecretSantaCog")
+        participant_ids: List[int] = []
+
         if secret_santa_cog:
             try:
                 state = secret_santa_cog.state
@@ -394,8 +433,7 @@ class DistributeZipCog(commands.Cog):
                         self.logger.info(f"Using Secret Santa participants: {len(participant_ids)} participants")
             except Exception as e:
                 self.logger.debug(f"Could not check Secret Santa state: {e}")
-        
-        # Get members to send to
+
         if participant_ids:
             members = []
             for user_id in participant_ids:
@@ -406,9 +444,8 @@ class DistributeZipCog(commands.Cog):
                 except Exception:
                     pass
             return members, "Secret Santa participants"
-        else:
-            members = [member for member in guild.members if not member.bot]
-            return members, "all server members"
+
+        return [], "no eligible recipients"
 
     async def _distribute_uploaded_files(
         self,
@@ -496,10 +533,22 @@ class DistributeZipCog(commands.Cog):
         
         # If still no member (DM with no guild), use None (we'll handle in embed)
         
-        members, distribution_type = await self._get_distribution_targets(guild)
+        file_meta = self.metadata.get("files", {}).get(file_id, {})
+        snapshot = file_meta.get("target_user_ids") if isinstance(file_meta, dict) else None
+        members, distribution_type = await self._get_distribution_targets(
+            guild, snapshot_user_ids=snapshot if snapshot else None
+        )
         
         if not members:
-            await self._safe_followup_send(inter, content="⚠️ No members found to send the file to", ephemeral=True)
+            await self._safe_followup_send(
+                inter,
+                content=(
+                    "⚠️ **No eligible recipients** for this file.\n\n"
+                    "Distribution is limited to Secret Santa participants from when the file was uploaded. "
+                    "If the event ended or members left, re-upload from a server channel during an active event."
+                ),
+                ephemeral=True,
+            )
             return
         
         # Create embed
@@ -509,9 +558,14 @@ class DistributeZipCog(commands.Cog):
             color=disnake.Color.green()
         )
         
-        required_by_text = "🎅 A Secret Santa requires this file" if distribution_type == "Secret Santa participants" else "📋 A server member requires this file"
+        required_by_text = (
+            "🎅 A Secret Santa requires this file"
+            if "Secret Santa" in distribution_type
+            else "📋 A server member requires this file"
+        )
         embed.add_field(name="Required By", value=required_by_text, inline=False)
-        embed.add_field(name="Uploaded At", value=f"<t:{int(time.time())}:F>", inline=False)
+        uploaded_at = file_meta.get("uploaded_at", time.time()) if isinstance(file_meta, dict) else time.time()
+        embed.add_field(name="Uploaded At", value=f"<t:{int(uploaded_at)}:F>", inline=False)
         embed.set_footer(text=f"This file is required for {distribution_type}")
         
         # Send to all members with improved error handling and rate limiting
@@ -637,10 +691,10 @@ class DistributeZipCog(commands.Cog):
                     # Improved rate limiting - Discord allows 5 DMs per 5 seconds per user
                     # We're sending to different users, so we can be more aggressive
                     # But still respect overall rate limits
-                    if i % 5 == 0:
-                        await asyncio.sleep(0.5)  # Small delay every 5 messages
-                    elif i % 20 == 0:
-                        await asyncio.sleep(1)  # Longer delay every 20 messages
+                    if i % 20 == 0:
+                        await asyncio.sleep(1)
+                    elif i % 5 == 0:
+                        await asyncio.sleep(0.5)
                     
                     # Progress updates for large distributions
                     if show_progress and i % 25 == 0:
@@ -829,6 +883,7 @@ class DistributeZipCog(commands.Cog):
                 
                 # Update metadata and persist immediately (crash-safe per file)
                 file_id = str(int(time.time() * 1000) + idx)  # Ensure unique IDs for multiple files
+                target_user_ids = self._snapshot_ss_participant_ids()
                 async with self._metadata_lock:
                     self.metadata["files"][file_id] = {
                         "name": file_name,
@@ -837,7 +892,8 @@ class DistributeZipCog(commands.Cog):
                         "required_by": requester_user.id,
                         "uploaded_at": time.time(),
                         "size": att.size,
-                        "download_count": 0
+                        "download_count": 0,
+                        "target_user_ids": target_user_ids,
                     }
                     
                     self.metadata["history"].append({
@@ -1048,10 +1104,7 @@ class DistributeZipCog(commands.Cog):
                 try:
                     await interaction.followup.send(f"❌ Error removing file: {str(e)}", ephemeral=True)
                 except Exception:
-                    try:
-                        await interaction.response.send_message(f"❌ Error removing file: {str(e)}", ephemeral=True)
-                    except Exception:
-                        pass
+                    pass
         
         if not file_name:
             await self._handle_file_browser(inter, "remove", remove_handler)

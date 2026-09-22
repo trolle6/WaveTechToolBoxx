@@ -118,7 +118,7 @@ DISCORD_LOCALE_TO_IANA: Dict[str, str] = {
 }
 
 
-class SecretSantaCore(commands.Cog):
+class SecretSantaCore:
     """Secret Santa event management"""
 
     def __init__(self, bot):
@@ -835,15 +835,20 @@ class SecretSantaCore(commands.Cog):
                             "INFO",
                         )
 
-                    # Clear the schedule first to prevent double execution
-                    async with self._lock:
-                        event.pop("scheduled_shuffle_time", None)
-                        event.pop("scheduled_by_user_id", None)
-                        await self._save_async()
-                    
                     # Execute the shuffle (without interaction, so we pass None for inter)
                     try:
-                        await self._execute_shuffle_internal(scheduler_id=scheduler_id)
+                        success, err_msg = await self._execute_shuffle_internal(scheduler_id=scheduler_id)
+                        ev = self.state.get("current_event")
+                        should_clear = success or bool(ev and ev.get("assignments"))
+                        if should_clear:
+                            async with self._lock:
+                                ev = self.state.get("current_event")
+                                if ev:
+                                    ev.pop("scheduled_shuffle_time", None)
+                                    ev.pop("scheduled_by_user_id", None)
+                                    await self._save_async()
+                        elif err_msg:
+                            self.logger.warning("Scheduled shuffle did not complete: %s", err_msg)
                     except Exception as e:
                         self.logger.error(f"Error executing scheduled shuffle: {e}", exc_info=True)
                         # Try to notify scheduler about the error
