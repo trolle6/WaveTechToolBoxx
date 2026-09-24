@@ -1225,7 +1225,10 @@ class VoiceProcessingCog(commands.Cog):
             vc = None
             await asyncio.sleep(VOICE_CLEANUP_DELAY)
 
-        max_attempts = 4  # Extra attempt for stubborn "already connected" cases
+        # "Already connected" / DAVE-not-ready can need a couple retries.
+        # UDP handshake TimeoutError will NOT recover on retry 2–4 — on Pterodactyl that
+        # just burns 4 × VOICE_TIMEOUT (e.g. 8 minutes) and leaves orphaned Event.wait tasks.
+        max_attempts = 4
         for attempt in range(max_attempts):
             # Abort early if everyone left while we were retrying
             if not self._has_humans_in_voice(channel):
@@ -1282,23 +1285,20 @@ class VoiceProcessingCog(commands.Cog):
                     if attempt == max_attempts - 1:
                         return None
             except asyncio.TimeoutError:
-                self.logger.warning(
-                    f"Voice connect to '{channel.name}' timed out after {timeout + 5}s "
-                    f"(attempt {attempt + 1}/{max_attempts})"
-                )
                 await self._cleanup_stale_voice_client(guild)
-                if attempt == max_attempts - 1:
-                    self.logger.critical(
-                        f"VOICE UDP HANDSHAKE NEVER COMPLETED on '{channel.name}' "
-                        f"after {max_attempts} attempts.\n"
-                        f"  The bot DID try to join — Discord never finished the voice UDP path.\n"
-                        f"  Slash commands / TTS API / DAVE code are fine (proven when the same bot\n"
-                        f"  runs on a NAS with host networking and connects in ~1s).\n"
-                        f"  This host (often Pterodactyl/VPS) cannot complete outbound Discord voice UDP.\n"
-                        f"  Fix: run on NAS/bare metal with network_mode: host, or ask the host provider\n"
-                        f"  to allow outbound UDP to Discord voice (not a bot permission issue)."
-                    )
-                    return None
+                # One TimeoutError on the UDP handshake means this host cannot reach
+                # Discord voice. Retrying 3 more times (esp. with VOICE_TIMEOUT=120)
+                # only produces blank TimeoutErrors + "Task was destroyed but it is pending".
+                self.logger.critical(
+                    f"VOICE UDP HANDSHAKE TIMED OUT on '{channel.name}' "
+                    f"after {timeout + 5}s (attempt {attempt + 1}).\n"
+                    f"  Timeline matches a blackholed Discord voice UDP path — not missing perms.\n"
+                    f"  Same bot connects in ~1s on NAS+host network; Pterodactyl often cannot.\n"
+                    f"  Not retrying further timeout loops (avoids multi-minute hangs + orphaned tasks).\n"
+                    f"  Fix: run TTS on NAS with network_mode: host, or get the host to allow "
+                    f"outbound UDP to Discord voice."
+                )
+                return None
             except OSError as e:
                 self.logger.warning(
                     f"Voice connect to '{channel.name}' network error: {e!r} "

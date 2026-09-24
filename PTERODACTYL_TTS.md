@@ -37,14 +37,20 @@ Cleared voice assignment … (left VC)   ← 20s later, handshake still not done
 - **Not** OpenAI / FFmpeg / DAVE (NAS completed the full path).
 - **Is** the Pterodactyl host failing Discord’s **voice UDP handshake**. Slash commands keep working because they are TCP only.
 
-## What to do
+## Your full Pterodactyl timeline (decoded)
 
-1. **Run TTS on the NAS** with `network_mode: host` (see `docker-compose.truenas.example.yml`).
-2. Or ask the Pterodactyl provider to allow **outbound UDP** to Discord voice endpoints / offer host networking.
-3. Do not raise `VOICE_TIMEOUT` to 120 hoping it “tries harder” — on a broken UDP path it only sits silent longer. Prefer ~30s and read the new progress warnings.
+```
+21:54:21  Attempting voice connection … timeout: 120s
+21:54:41  You left VC (connect still hung — no "Connected" line)
+21:56:21  TimeoutError attempt 1/4   ← exactly +120s
+21:58:22  TimeoutError attempt 2/4   ← +120s again
+          Task was destroyed but it is pending!  ← half-open voice handshake leftovers
+22:00:22  TimeoutError attempt 3/4   ← +120s again
+```
 
-After updating this branch, a stuck Ptero join logs every 5s:
+So the bot **did** commit to joining. It waited the full 120s, timed out, retried, and left orphaned `Event.wait()` tasks (`Task was destroyed but it is pending!`). That warning is a symptom of cancelled UDP handshakes — same class of failure as blank `Voice connection error:` on Docker bridge.
 
-`Still waiting for Discord voice UDP handshake…`
+**NAS:** connect succeeds in ~1s.  
+**Ptero:** connect never succeeds; old code then burns ~8 minutes on 4×120s retries.
 
-instead of looking idle until you leave the channel.
+New code on this branch: fail after the **first** UDP timeout (no multi-minute death spiral), cancel/cleanup the half-open client, and log CRITICAL naming host UDP / Pterodactyl.
