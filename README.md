@@ -6,11 +6,10 @@ Discord bot: TTS voice, DALL·E images, Secret Santa events, and file distributi
 
 1. `pip install -r requirements.txt`
 2. `cp config.env.example config.env` — fill in tokens/IDs
-3. Copy runtime templates if missing:
-   - `cogs/secret_santa_state.json.example` → `cogs/secret_santa_state.json`
-   - `cogs/distributed_files_metadata.json.example` → `cogs/distributed_files_metadata.json`
-4. `python3 check_config.py`
-5. `python main.py`
+3. `python3 check_config.py`
+4. `python main.py`
+
+Runtime JSON under `cogs/` (Secret Santa state, file metadata) is created automatically on first run.
 
 ## Requirements
 

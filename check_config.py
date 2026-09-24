@@ -137,23 +137,18 @@ def check_config_env():
     return all_good
 
 def check_runtime_files():
-    """Check runtime JSON files"""
+    """Check runtime JSON files (optional — bot creates them on first run)."""
     files = {
         "cogs/secret_santa_state.json": False,
-        "cogs/distributed_files_metadata.json": False
+        "cogs/distributed_files_metadata.json": False,
     }
-    
+
     print(f"\n{BLUE}Checking runtime files...{RESET}")
-    all_good = True
     for filepath, required in files.items():
         if not check_file_exists(filepath, required):
-            if required:
-                all_good = False
-            example = f"{filepath}.example"
-            if Path(example).exists():
-                print_info(f"  → Create with: cp {example} {filepath}")
-    
-    return all_good
+            print_info(f"  → {filepath} will be created automatically on first bot start")
+
+    return True
 
 def validate_config_values():
     """Validate format of config values"""

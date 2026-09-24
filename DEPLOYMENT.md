@@ -33,9 +33,8 @@ python main.py
 
 ## Runtime files (not in git)
 
-Copy examples on a fresh install:
+Created automatically on first bot start (no template copy needed):
 
-```bash
-cp cogs/secret_santa_state.json.example cogs/secret_santa_state.json
-cp cogs/distributed_files_metadata.json.example cogs/distributed_files_metadata.json
-```
+- `cogs/secret_santa_state.json`
+- `cogs/distributed_files_metadata.json`
+- `cogs/archive/` (past Secret Santa years)

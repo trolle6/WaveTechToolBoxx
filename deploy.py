@@ -135,25 +135,21 @@ def check_file_structure():
         'cogs/secret_santa_core.py',
         'requirements.txt',
     ]
-    state_file = Path('cogs/secret_santa_state.json')
-    if not state_file.exists():
-        example = Path('cogs/secret_santa_state.json.example')
-        if example.exists():
-            print("⚠️ cogs/secret_santa_state.json missing — copy from secret_santa_state.json.example")
-        else:
-            missing_files = ['cogs/secret_santa_state.json']
-            print(f"❌ Missing files: {missing_files}")
-            return False
-    
+
     missing_files = []
     for file in required_files:
         if not Path(file).exists():
             missing_files.append(file)
-    
+
     if missing_files:
         print(f"❌ Missing files: {missing_files}")
         return False
-    
+
+    # Runtime JSON is created by the bot on first run — not required here
+    state_file = Path('cogs/secret_santa_state.json')
+    if not state_file.exists():
+        print("ℹ️ cogs/secret_santa_state.json not present yet (created on first run)")
+
     print("✅ All required files present")
     return True
 
