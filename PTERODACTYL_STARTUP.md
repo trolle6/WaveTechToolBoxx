@@ -17,6 +17,8 @@ Bot secrets (`DISCORD_TOKEN`, `OPENAI_API_KEY`, channel IDs, `VOICE_TIMEOUT`, �
 stay in **Environment** and/or `config.env` — same as TrueNAS. Do **not** put them
 in the startup command.
 
+Back up Secret Santa archives / state yourself in the panel when you want — not here.
+
 ## Startup command (paste into the egg / server)
 
 Replaces the egg default `git pull` (which does **not** force overwrite).
@@ -29,30 +31,6 @@ if [[ -d .git ]] && [[ "{{AUTO_UPDATE}}" == "1" ]]; then
   if [[ -z "${BRANCH_NAME}" || "${BRANCH_NAME}" == "{{BRANCH}}" ]]; then
     BRANCH_NAME=master
   fi
-
-  # Backup runtime data BEFORE reset (reset only touches tracked git files;
-  # git clean is intentionally NOT used — it would delete secrets/archives).
-  TS=$(date +%Y%m%d-%H%M%S)
-  BAK=".deploy-backups/${TS}"
-  mkdir -p "${BAK}"
-  for f in config.env \
-           cogs/secret_santa_state.json \
-           cogs/secret_santa_state.backup \
-           cogs/distributed_files_metadata.json \
-           bot.log; do
-    if [ -e "$f" ]; then
-      mkdir -p "${BAK}/$(dirname "$f")"
-      cp -a "$f" "${BAK}/$f"
-    fi
-  done
-  if [ -d cogs/archive ]; then
-    cp -a cogs/archive "${BAK}/archive"
-  fi
-  if [ -d cogs/distributed_files ]; then
-    cp -a cogs/distributed_files "${BAK}/distributed_files"
-  fi
-  # Keep only the last 10 deploy backups
-  ls -1dt .deploy-backups/* 2>/dev/null | tail -n +11 | xargs -r rm -rf
 
   echo "Updating origin/${BRANCH_NAME} (hard reset of tracked files only)..."
   git fetch origin "${BRANCH_NAME}" --prune
@@ -77,16 +55,15 @@ done
 exec /usr/local/bin/python /home/container/{{PY_FILE}}
 ```
 
-## What is safe / what is not
+## What this does / does not
 
 | Action | Effect |
 |---|---|
-| `git reset --hard origin/master` | Overwrites **tracked** code to match GitHub. Correct. |
-| `git clean -fd` | **Do not use** here — deletes untracked `config.env`, archives, state. |
-| Backup to `.deploy-backups/` | Copies Secret Santa state/archives + config before update. |
+| `git reset --hard origin/master` | Overwrites **tracked** code to match GitHub. |
+| `git clean -fd` | **Not used** — would delete untracked `config.env`, archives, state. |
 
-`config.env`, `cogs/archive/`, `secret_santa_state.json`, and uploads are gitignored /
-untracked, so a hard reset alone does **not** wipe them. The backup is extra safety.
+`config.env`, `cogs/archive/`, `secret_santa_state.json`, and uploads are untracked /
+gitignored, so a hard reset alone does **not** wipe them.
 
 ## After restart you should see
 
