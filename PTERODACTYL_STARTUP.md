@@ -1,46 +1,75 @@
-# Pterodactyl startup command (pulls TTS fix branch)
+# Pterodactyl startup (always overwrite → origin/master)
 
-Paste this as the **Startup Command** in the Pterodactyl egg / server settings.
-It checks out the fix branch (not a silent `git pull` of whatever was left on disk),
-installs deps into `.local` with PYTHONPATH set, and starts the bot.
+Same idea as TrueNAS: fetch master, **hard reset** so local edits/old code cannot stick,
+install deps, then `exec` Python as PID 1.
+
+**Secrets stay out of this command** — put `DISCORD_TOKEN`, `OPENAI_API_KEY`, channel IDs,
+etc. in the panel **Environment** tab and/or `config.env` in `/home/container` (same as NAS).
+
+## Startup command (paste into Pterodactyl)
 
 ```bash
-set -e
+set -euo pipefail
 cd /home/container
+
+GIT_BRANCH="${GIT_BRANCH:-master}"
+GIT_REMOTE="${GIT_REMOTE:-origin}"
+
 if [ -d .git ]; then
-  git fetch origin cursor/odysseus-hardening-adapt-715b
-  git checkout -B cursor/odysseus-hardening-adapt-715b origin/cursor/odysseus-hardening-adapt-715b
-  git reset --hard origin/cursor/odysseus-hardening-adapt-715b
-  echo "Deployed: $(git rev-parse --short HEAD) $(git rev-parse --abbrev-ref HEAD)"
+  echo "Updating ${GIT_REMOTE}/${GIT_BRANCH} (hard reset — local changes discarded)..."
+  git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" --prune
+  git checkout -B "${GIT_BRANCH}" "${GIT_REMOTE}/${GIT_BRANCH}"
+  git reset --hard "${GIT_REMOTE}/${GIT_BRANCH}"
+  git clean -fd
+  echo "Deployed: branch=$(git rev-parse --abbrev-ref HEAD) commit=$(git rev-parse --short HEAD)"
+else
+  echo "WARN: no .git directory — using files already on disk"
 fi
-pip install -U --prefix .local -r requirements.txt
-export PATH="/home/container/.local/bin:${PATH}"
-# Pick the site-packages dir that matches this egg's Python (3.11 / 3.12 / 3.13)
+
+if [ -f requirements.txt ]; then
+  pip install -U --prefix .local -r requirements.txt
+fi
+
+export PATH="/home/container/.local/bin:${PATH:-}"
 for d in /home/container/.local/lib/python*/site-packages; do
   [ -d "$d" ] && export PYTHONPATH="${d}${PYTHONPATH:+:$PYTHONPATH}"
 done
-# Do NOT use 120s — on a broken UDP path it only hangs longer. Prefer 30.
+
+# Optional: override in panel env; 30 is enough. Do not use 120 on broken UDP hosts.
 export VOICE_TIMEOUT="${VOICE_TIMEOUT:-30}"
+
+exec python /home/container/main.py
+```
+
+If your egg’s Python is not on `PATH` as `python`, use the full path instead, e.g.:
+
+```bash
 exec /usr/local/bin/python /home/container/main.py
 ```
 
-## How to know the new code actually loaded
+## Panel environment (not in the startup script)
 
-Within ~5–10 seconds of `Attempting voice connection` you MUST see:
+Keep these in **Environment** / `config.env` like TrueNAS:
+
+- `DISCORD_TOKEN`
+- `DISCORD_CHANNEL_ID`
+- `DISCORD_LOG_CHANNEL_ID`
+- `OPENAI_API_KEY`
+- `DISCORD_MODERATOR_ROLE_ID` (optional)
+- `GIT_BRANCH=master` (optional; default above is already master)
+- `VOICE_TIMEOUT=30` (optional)
+
+## After each restart you should see
 
 ```
-Still waiting for Discord voice UDP handshake to 'WaveTech A' (5s / 30s, attempt 1/4)...
+Updating origin/master (hard reset — local changes discarded)...
+Deployed: branch=master commit=<short sha>
 ```
 
-Then after one timeout (~35s), a **CRITICAL** line ending retries.
+If that line never appears, the startup command was not saved/applied.
 
-If you only see `Attempting voice connection … timeout: 120s` and nothing else for minutes,
-you are still on **old master** — the startup command did not check out this branch.
+## TTS reality check
 
-## Important
-
-Even with this branch, **Pterodactyl will still fail to join voice** if the host blocks Discord UDP.
-You will get a fast, loud failure instead of a 5–8 minute silent hang.
-For working TTS, run on the NAS with `network_mode: host` (that path already works).
-
-After PR #30 merges to master, change the branch name above to `master`.
+Hard-reset to master guarantees you run **whatever is on GitHub master**.
+Voice UDP still has to work on the host. NAS + `network_mode: host` already works;
+Pterodactyl often cannot complete Discord voice UDP even with correct code.
