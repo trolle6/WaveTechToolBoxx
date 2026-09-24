@@ -4,6 +4,8 @@
 # 2. Put secrets in /mnt/HDDs/discord-bot/config.env — NOT inline in compose.
 # 3. Set GIT_BRANCH to the branch you deploy (usually master).
 # 4. First boot installs ffmpeg+git once (.truenas-deps-ready marker on the volume).
+# 5. TTS REQUIRES host networking (see network_mode below). Without it, slash
+#    commands work but voice/TTS always times out — Discord voice uses UDP.
 #
 # Do NOT commit real tokens to git.
 
@@ -12,6 +14,14 @@ services:
     image: python:3.11-slim
     container_name: wave-bot
     restart: unless-stopped
+    # REQUIRED for Discord VOICE / TTS. Discord voice does a UDP "IP discovery"
+    # handshake; in Docker's default bridge (NAT) networking that UDP round-trip
+    # is dropped/mangled, so channel.connect() hangs and times out every time
+    # (slash commands still work — they use TCP only). host networking shares
+    # the NAS network stack so the voice UDP handshake completes.
+    # TrueNAS UI: also enable "Host Network" if the YAML field is ignored.
+    # (The bot opens no inbound ports, so host mode is safe here.)
+    network_mode: host
     working_dir: /app
     volumes:
       - /mnt/HDDs/discord-bot:/app
@@ -20,9 +30,12 @@ services:
     environment:
       # Deploy branch (NOT origin default — that was resetting you to master @ 69fb076)
       GIT_BRANCH: master
+      GIT_UPDATE: "true"
       # Production: DEBUG_MODE=false, LOG_LEVEL=INFO
       DEBUG_MODE: "false"
       LOG_LEVEL: "INFO"
+      # Voice handshake needs headroom; 10s is too short and fails reliably
+      VOICE_TIMEOUT: "30"
     command:
       - sh
       - -c
@@ -35,5 +48,5 @@ services:
           rm -rf /var/lib/apt/lists/*
           touch /app/.truenas-deps-ready
         fi
-        chmod +x /app/truenas-start.sh 2>/dev/null || true
+        chmod +x /app/truenas-start.sh /app/docker-entrypoint.sh 2>/dev/null || true
         exec /app/truenas-start.sh

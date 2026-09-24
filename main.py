@@ -45,13 +45,14 @@ load_dotenv("config.env", override=True)
 #
 # Required (config.env):
 #   DISCORD_TOKEN          - Bot token
-#   DISCORD_CHANNEL_ID     - main: send_discord_message; voice_processing: optional TTS channel restriction
+#   DISCORD_CHANNEL_ID     - main: send_discord_message; Secret Santa DM fallback channel
 #   DISCORD_LOG_CHANNEL_ID - DiscordLogHandler, send_to_discord_log, reconnect notifications
 #   OPENAI_API_KEY        - TTS, DALL-E, Secret Santa anonymize
 #
 # Optional (CONFIG_DEFAULTS below or in config.env):
 #   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
 #                              (missing/invalid → warn; guild admins/owner still pass)
+#   TTS_CHANNEL_ID         - voice_processing: restrict TTS to one text channel (None = all)
 #   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
 #   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
 # Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
@@ -73,6 +74,7 @@ CONFIG_DEFAULTS = {
     "VOICE_TIMEOUT": 30,  # Increased from 10 to 30 for unstable networks (Hetzner, etc.)
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
+    "TTS_CHANNEL_ID": None,
     "DISCORD_MODERATOR_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }

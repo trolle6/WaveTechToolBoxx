@@ -1,12 +1,14 @@
 # Changelog
 
-## 2026-09 — Hardening (Odysseus review, adapted)
+## 2026-09 — TTS always-fail fix + Odysseus hardening
 
-- Optional `DISCORD_MODERATOR_ROLE_ID` (warn, don't crash); guild owner always passes mod checks
-- Global slash-command error handler (ephemeral replies); cog load failures log full tracebacks
-- Corrupt JSON backed up to `*.corrupt`; atomic saves create parent dirs
-- `on_member_remove` alerts mods (removes pre-shuffle roster entries; never auto-reshuffles)
-- Docker entrypoint: soft-fail on git fetch; Dockerfile installs `git`; `chunk_text` for long fallback posts
+- **TTS:** restore `network_mode: host` in TrueNAS compose (was never on master — Discord
+  voice UDP fails 100% of the time on Docker bridge while slash commands still work)
+- **TTS:** stop gating speech on `DISCORD_CHANNEL_ID`; optional `TTS_CHANNEL_ID` instead
+- **TTS:** detect Docker bridge at startup and log CRITICAL; clearer connect-timeout errors
+- **TTS:** stale-client cleanup after timeout; thread-safe playback done callback
+- Optional `DISCORD_MODERATOR_ROLE_ID`; guild owner always passes mod checks
+- Global slash error handler; corrupt JSON → `*.corrupt`; soft git-fetch; member-leave alerts
 
 ## 2026-05 — Secret Santa simplify & cleanup
 

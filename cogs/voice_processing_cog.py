@@ -32,9 +32,11 @@ import asyncio
 import hashlib
 import os
 import re
+import socket
 import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
 import aiohttp
@@ -279,17 +281,57 @@ class VoiceProcessingCog(commands.Cog):
         self._unloaded = False
 
         # Convert channel ID to int (config loads as string from env)
-        channel_id_raw = bot.config.DISCORD_CHANNEL_ID
+        # TTS text-channel filter uses OPTIONAL TTS_CHANNEL_ID only.
+        # Do NOT reuse DISCORD_CHANNEL_ID here — that ID is for bot announcements /
+        # Secret Santa fallbacks, and gating TTS on it makes voice appear "always broken"
+        # whenever people chat in any other channel while in VC.
+        channel_id_raw = getattr(bot.config, "TTS_CHANNEL_ID", None)
         try:
-            self.allowed_channel = int(channel_id_raw) if channel_id_raw else None
+            self.allowed_channel = int(channel_id_raw) if channel_id_raw not in (None, "") else None
             if self.allowed_channel:
-                self.logger.info(f"Allowed channel configured: {self.allowed_channel}")
+                self.logger.info(f"TTS restricted to text channel: {self.allowed_channel}")
             else:
-                self.logger.warning("DISCORD_CHANNEL_ID not set - TTS will work in all channels")
+                self.logger.info("TTS_CHANNEL_ID not set — TTS listens in all text channels")
         except (ValueError, TypeError) as e:
-            self.logger.error(f"Failed to convert DISCORD_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
+            self.logger.error(f"Failed to convert TTS_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
             self.allowed_channel = None
 
+        self._warn_if_docker_bridge_blocks_voice()
+
+    def _warn_if_docker_bridge_blocks_voice(self) -> None:
+        """
+        Discord voice UDP IP-discovery fails through Docker bridge NAT — every time.
+        Slash commands still work (TCP). Detect likely bridge mode and scream loudly.
+        """
+        if not Path("/.dockerenv").exists():
+            return
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(("8.8.8.8", 80))
+            ip = probe.getsockname()[0]
+            probe.close()
+        except OSError:
+            ip = ""
+        parts = ip.split(".")
+        in_docker_bridge = (
+            len(parts) == 4
+            and parts[0] == "172"
+            and parts[1].isdigit()
+            and 16 <= int(parts[1]) <= 31
+        )
+        if in_docker_bridge:
+            self.logger.critical(
+                "TTS WILL FAIL: container looks like Docker BRIDGE networking "
+                f"(IP {ip}). Discord voice needs UDP; bridge NAT drops the handshake "
+                "so channel.connect() times out every time while slash commands still work. "
+                "Fix: set network_mode: host (TrueNAS: enable Host Network) and restart. "
+                "See docker-compose.truenas.example.yml / DEPLOYMENT.md."
+            )
+        else:
+            self.logger.info(
+                "Docker detected; primary IP %s — if TTS still times out, enable host networking",
+                ip or "unknown",
+            )
     # ============ VOICE ASSIGNMENT ============
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
         """
@@ -992,13 +1034,17 @@ class VoiceProcessingCog(commands.Cog):
                         pass
                 return False
 
-            # Play with callback
+            # Play with callback — Event.set must hop onto the bot loop (FFmpeg thread)
             play_done = asyncio.Event()
+            loop = asyncio.get_running_loop()
 
             def after(error):
                 if error:
                     self.logger.error(f"Playback error: {error}")
-                play_done.set()
+                try:
+                    loop.call_soon_threadsafe(play_done.set)
+                except RuntimeError:
+                    play_done.set()
                 if temp_file and os.path.exists(temp_file):
                     try:
                         os.unlink(temp_file)
@@ -1096,6 +1142,25 @@ class VoiceProcessingCog(commands.Cog):
         return bool(channel and any(not m.bot for m in channel.members))
 
     # ============ VOICE CONNECTION ============
+    async def _cleanup_stale_voice_client(self, guild: disnake.Guild) -> None:
+        """Tear down a half-open voice client after a failed/timed-out connect.
+
+        A cancelled handshake leaves a partial client and orphaned tasks
+        ("Task was destroyed but it is pending"). Force-disconnect so the next
+        attempt starts clean.
+        """
+        vc = getattr(guild, "voice_client", None)
+        if vc is None:
+            return
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+        try:
+            vc.cleanup()
+        except Exception:
+            pass
+
     async def _connect_to_voice(
         self, channel: disnake.VoiceChannel, timeout: int | None = None
     ) -> Optional[disnake.VoiceClient]:
@@ -1116,6 +1181,20 @@ class VoiceProcessingCog(commands.Cog):
             f"Attempting voice connection to '{channel.name}' (ID: {channel.id}) "
             f"in guild '{guild.name}' (ID: {guild.id}), timeout: {timeout}s"
         )
+
+        # Fail fast if we lack Connect — otherwise the join just hangs until timeout.
+        me = getattr(guild, "me", None)
+        if me is not None:
+            perms = channel.permissions_for(me)
+            if not perms.connect:
+                self.logger.error(
+                    f"Missing 'Connect' permission in voice channel '{channel.name}' — cannot join"
+                )
+                return None
+            if not perms.speak:
+                self.logger.warning(
+                    f"Missing 'Speak' permission in '{channel.name}' — TTS audio may be silent"
+                )
 
         vc = guild.voice_client
 
@@ -1150,7 +1229,7 @@ class VoiceProcessingCog(commands.Cog):
         for attempt in range(max_attempts):
             try:
                 vc = await asyncio.wait_for(
-                    channel.connect(timeout=timeout, reconnect=False),
+                    channel.connect(timeout=timeout, reconnect=True),
                     timeout=timeout + 5
                 )
                 self.logger.info(f"Connected to {channel.name} (attempt {attempt + 1})")
@@ -1192,31 +1271,40 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.warning(f"Voice ClientException: {e}")
                     if attempt == max_attempts - 1:
                         return None
-            except (OSError, asyncio.TimeoutError) as e:
-                error_type = type(e).__name__
-                error_details = str(e)
+            except asyncio.TimeoutError:
                 self.logger.warning(
-                    f"Voice connection error ({error_type}): {error_details}\n"
-                    f"  Attempt {attempt + 1}/{max_attempts}, channel: {channel.name} (ID: {channel.id})\n"
-                    f"  Guild: {guild.name if guild else 'None'}"
+                    f"Voice connect to '{channel.name}' timed out after {timeout + 5}s "
+                    f"(attempt {attempt + 1}/{max_attempts})"
                 )
+                await self._cleanup_stale_voice_client(guild)
                 if attempt == max_attempts - 1:
                     self.logger.error(
-                        f"VOICE CONNECTION FAILED after {max_attempts} attempts!\n"
-                        f"  Error: {error_type}: {error_details}\n"
-                        f"  Possible causes:\n"
-                        f"  - Network instability (check server connection to Discord)\n"
-                        f"  - Discord API issues\n"
-                        f"  - Firewall blocking UDP voice ports\n"
-                        f"  - Bot permissions missing in Discord server"
+                        f"VOICE CONNECTION FAILED after {max_attempts} timeouts on '{channel.name}'.\n"
+                        f"  Slash commands can still work — Discord voice is UDP, not TCP.\n"
+                        f"  If this bot runs in Docker/TrueNAS: set network_mode: host "
+                        f"(enable Host Network in the UI) and restart. "
+                        f"Bridge/NAT networking makes TTS fail every single time.\n"
+                        f"  Also check: bot Connect/Speak perms, VOICE_TIMEOUT>={timeout}, ffmpeg installed."
+                    )
+                    return None
+            except OSError as e:
+                self.logger.warning(
+                    f"Voice connect to '{channel.name}' network error: {e!r} "
+                    f"(attempt {attempt + 1}/{max_attempts})"
+                )
+                await self._cleanup_stale_voice_client(guild)
+                if attempt == max_attempts - 1:
+                    self.logger.error(
+                        f"VOICE CONNECTION FAILED after {max_attempts} attempts: {e!r}\n"
+                        f"  Docker/TrueNAS: use network_mode: host for Discord voice UDP."
                     )
                     return None
             except Exception as e:
                 self.logger.error(
-                    f"Voice connection unexpected error: {type(e).__name__}: {e}\n"
-                    f"  Attempt {attempt + 1}/{max_attempts}, channel: {channel.name} (ID: {channel.id})",
-                    exc_info=True
+                    f"Voice connection to '{channel.name}' failed: {e!r}",
+                    exc_info=True,
                 )
+                await self._cleanup_stale_voice_client(guild)
                 if attempt == max_attempts - 1:
                     return None
             await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
