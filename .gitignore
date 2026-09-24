@@ -26,6 +26,8 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+*.corrupt
+*.json.corrupt
 
 # Local / CI test suite — not needed on production NAS (run: python3 tests/test_all_features.py)
 tests/

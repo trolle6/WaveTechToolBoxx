@@ -47,18 +47,20 @@ load_dotenv("config.env", override=True)
 #   DISCORD_TOKEN          - Bot token
 #   DISCORD_CHANNEL_ID     - main: send_discord_message; voice_processing: optional TTS channel restriction
 #   DISCORD_LOG_CHANNEL_ID - DiscordLogHandler, send_to_discord_log, reconnect notifications
-#   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
 #   OPENAI_API_KEY        - TTS, DALL-E, Secret Santa anonymize
 #
 # Optional (CONFIG_DEFAULTS below or in config.env):
+#   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
+#                              (missing/invalid → warn; guild admins/owner still pass)
 #   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
 #   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
 # Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
 #
 REQUIRED_CONFIG_KEYS = {
     "DISCORD_TOKEN", "DISCORD_CHANNEL_ID",
-    "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID", "OPENAI_API_KEY",
+    "DISCORD_LOG_CHANNEL_ID", "OPENAI_API_KEY",
 }
+REQUIRED_SNOWFLAKE_KEYS = ("DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID")
 
 CONFIG_DEFAULTS = {
     "DEBUG_MODE": False,
@@ -71,8 +73,23 @@ CONFIG_DEFAULTS = {
     "VOICE_TIMEOUT": 30,  # Increased from 10 to 30 for unstable networks (Hetzner, etc.)
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
+    "DISCORD_MODERATOR_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }
+
+
+def _parse_optional_snowflake(name: str, raw: Optional[str]) -> Optional[int]:
+    """Parse an optional Discord snowflake env var; warn and return None if invalid."""
+    if raw is None:
+        return None
+    v = str(raw).strip().strip('"').strip("'")
+    if not v:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        warnings.warn(f"{name} must be an integer, got {raw!r} – ignoring", UserWarning)
+        return None
 
 
 class Config:
@@ -81,22 +98,49 @@ class Config:
     
     Loads environment variables, validates required keys, and provides
     type-safe access to configuration values with sensible defaults.
+    Missing DISCORD_TOKEN / OPENAI_API_KEY etc. exit cleanly; a missing or
+    invalid moderator role only warns (admins/owner still have mod access).
     """
     
     def __init__(self):
         self.data: dict[str, Any] = {}
-        missing = [key for key in REQUIRED_CONFIG_KEYS if not os.getenv(key)]
-        
-        if missing:
-            raise RuntimeError(f"Missing required config: {', '.join(missing)}")
-        
-        # Load required vars (already validated as non-empty)
+        missing = []
         for key in REQUIRED_CONFIG_KEYS:
-            val = os.getenv(key)
-            self.data[key] = val.strip() if isinstance(val, str) else val
-        
+            val = os.getenv(key, "")
+            if isinstance(val, str):
+                val = val.strip()
+            if not val:
+                missing.append(key)
+            else:
+                self.data[key] = val
+
+        if missing:
+            raise RuntimeError(f"Missing required config: {', '.join(sorted(missing))}")
+
+        for key in REQUIRED_SNOWFLAKE_KEYS:
+            try:
+                self.data[key] = int(
+                    str(self.data[key]).strip().strip('"').strip("'")
+                )
+            except ValueError as e:
+                raise RuntimeError(f"{key} must be a numeric Discord ID") from e
+
+        mod_role = _parse_optional_snowflake(
+            "DISCORD_MODERATOR_ROLE_ID",
+            os.getenv("DISCORD_MODERATOR_ROLE_ID"),
+        )
+        self.data["DISCORD_MODERATOR_ROLE_ID"] = mod_role
+        if mod_role is None:
+            warnings.warn(
+                "DISCORD_MODERATOR_ROLE_ID not set or invalid — only guild "
+                "administrators and the guild owner can run mod commands",
+                UserWarning,
+            )
+
         # Load optional vars with defaults and type conversion
         for key, default in CONFIG_DEFAULTS.items():
+            if key in self.data:
+                continue
             val = os.getenv(key)
             if val is None:
                 self.data[key] = default
@@ -594,6 +638,23 @@ async def on_ready():
         except Exception:
             pass
 
+        # Warn if configured moderator role is missing from any guild (does not crash)
+        mod_role_id = config.DISCORD_MODERATOR_ROLE_ID
+        if mod_role_id:
+            for guild in bot.guilds:
+                if not guild.get_role(mod_role_id):
+                    logger.warning(
+                        "Moderator role %s not found in guild %s (%s)",
+                        mod_role_id,
+                        guild.id,
+                        guild.name,
+                    )
+        else:
+            logger.warning(
+                "No DISCORD_MODERATOR_ROLE_ID configured — mod commands limited to "
+                "guild administrators and owners"
+            )
+
         asyncio.create_task(daily_maintenance_loop())
         
         try:
@@ -607,6 +668,34 @@ async def on_ready():
     else:
         # Reconnect after disconnect: on_resumed logs downtime; only track connect time here.
         stats["last_connect"] = now
+
+
+@bot.event
+async def on_slash_command_error(
+    inter: disnake.ApplicationCommandInteraction,
+    error: commands.CommandError,
+):
+    """
+    Ephemeral reply for every slash-command failure so interactions never hang.
+    CheckFailure keeps its message; other errors get a generic user-facing string.
+    """
+    original = getattr(error, "original", error)
+    if isinstance(error, commands.CheckFailure) or isinstance(original, commands.CheckFailure):
+        msg = str(error) or "You don't have permission to use this command."
+        # Avoid leaking empty CheckFailure() repr-ish strings
+        if not msg or msg == "None":
+            msg = "You don't have permission to use this command."
+    else:
+        msg = "Something went wrong."
+        logger.error("Slash command error on %s", getattr(inter.application_command, "qualified_name", "?"), exc_info=error)
+
+    try:
+        if inter.response.is_done():
+            await inter.followup.send(msg, ephemeral=True)
+        else:
+            await inter.response.send_message(msg, ephemeral=True)
+    except disnake.HTTPException:
+        pass
 
 
 @bot.event
@@ -831,15 +920,15 @@ COG_EXTENSIONS = [
 
 
 def load_cogs() -> int:
-    """Load all cogs and return count"""
+    """Load all cogs and return count. Failures are logged per extension (not silent)."""
     loaded = 0
     for cog in COG_EXTENSIONS:
         try:
             bot.load_extension(cog)
             logger.info(f"Loaded {cog}")
             loaded += 1
-        except Exception as e:
-            logger.error(f"Failed to load {cog}: {e}")
+        except Exception:
+            logger.exception("Failed to load %s", cog)
     
     return loaded
 
@@ -856,8 +945,8 @@ def reload_cogs() -> int:
                 bot.load_extension(cog)
                 logger.info(f"Loaded {cog}")
             loaded += 1
-        except Exception as e:
-            logger.error(f"Failed to reload {cog}: {e}")
+        except Exception:
+            logger.exception("Failed to reload %s", cog)
     return loaded
 
 

@@ -97,7 +97,6 @@ def check_config_env():
         "DISCORD_TOKEN": "Discord bot token",
         "DISCORD_CHANNEL_ID": "Discord channel ID",
         "DISCORD_LOG_CHANNEL_ID": "Discord log channel ID",
-        "DISCORD_MODERATOR_ROLE_ID": "Discord moderator role ID",
         "OPENAI_API_KEY": "OpenAI API key"
     }
     
@@ -121,6 +120,7 @@ def check_config_env():
     
     # Check optional values
     optional_keys = {
+        "DISCORD_MODERATOR_ROLE_ID": "Moderator role (unset = admins/owner only)",
         "TTS_ROLE_ID": "TTS role restriction (None = everyone)",
         "DEBUG_MODE": "Debug mode",
         "LOG_LEVEL": "Logging level"
@@ -129,7 +129,7 @@ def check_config_env():
     print(f"\n{BLUE}Checking optional environment variables...{RESET}")
     for key, description in optional_keys.items():
         value = os.getenv(key)
-        if value:
+        if value and value.strip():
             print_status(f"{key:<30}", True, f"{value} - {description}")
         else:
             print_warning(f"{key:<30} Not set (using default) - {description}")
@@ -188,15 +188,23 @@ def validate_config_values():
             print_status("OPENAI_API_KEY format", True, "Looks valid")
     
     # Check channel IDs are numeric
-    for key in ["DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID"]:
+    for key in ["DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID"]:
         value = os.getenv(key, "")
         if value:
             try:
-                int(value)
+                int(value.strip().strip('"').strip("'"))
                 print_status(f"{key} format", True, "Valid ID")
             except ValueError:
                 print_error(f"{key} should be a numeric ID (e.g. 1234567890123456789)")
                 all_good = False
+
+    mod_role = os.getenv("DISCORD_MODERATOR_ROLE_ID", "")
+    if mod_role and mod_role.strip():
+        try:
+            int(mod_role.strip().strip('"').strip("'"))
+            print_status("DISCORD_MODERATOR_ROLE_ID format", True, "Valid ID")
+        except ValueError:
+            print_warning("DISCORD_MODERATOR_ROLE_ID should be numeric — will be ignored at runtime")
     
     return all_good
 

@@ -1,6 +1,6 @@
 # Secret Santa Commands Reference
 
-Permissions: **Moderator** = server Administrator OR role `DISCORD_MODERATOR_ROLE_ID` in `config.env`.  
+Permissions: **Moderator** = server Administrator, guild owner, **or** role `DISCORD_MODERATOR_ROLE_ID` in `config.env` (optional; if unset, admins/owner only).  
 **Participant** = joined the active event (reacted on the signup message).  
 Testing: `SS_DEBUG_START=true` in `config.env` skips the “year already archived” warning on `/ss start`.
 
@@ -87,7 +87,7 @@ Use this so you don’t have to remember the flow from scratch.
 
 - [ ] **Last year is closed** — if an event is still active, run `/ss stop` first (archives to `cogs/archive/YYYY.json`).
 - [ ] **Bot is healthy** — online, slash commands sync, log channel works.
-- [ ] **Mod access** — your account is server Admin **or** has `DISCORD_MODERATOR_ROLE_ID` from `config.env`.
+- [ ] **Mod access** — your account is server Admin, guild owner, **or** has `DISCORD_MODERATOR_ROLE_ID` from `config.env` (optional).
 - [ ] **Roles (if using a join role)** — create e.g. `Secret Santa 2026`; in Server Settings → Roles, drag the **bot’s role above** that role (required for auto role on react).
 - [ ] **OpenAI key** — TTS/DALL·E/anonymized Q&A need credits; SS core commands do not.
 

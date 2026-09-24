@@ -78,10 +78,9 @@ def check_environment():
         "DISCORD_TOKEN",
         "DISCORD_CHANNEL_ID",
         "DISCORD_LOG_CHANNEL_ID",
-        "DISCORD_MODERATOR_ROLE_ID",
         "OPENAI_API_KEY",
     ]
-    optional_vars = ["DEBUG_MODE", "LOG_LEVEL"]
+    optional_vars = ["DISCORD_MODERATOR_ROLE_ID", "DEBUG_MODE", "LOG_LEVEL"]
     
     missing_required = []
     for var in required_vars:

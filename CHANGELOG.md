@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09 — Hardening (Odysseus review, adapted)
+
+- Optional `DISCORD_MODERATOR_ROLE_ID` (warn, don't crash); guild owner always passes mod checks
+- Global slash-command error handler (ephemeral replies); cog load failures log full tracebacks
+- Corrupt JSON backed up to `*.corrupt`; atomic saves create parent dirs
+- `on_member_remove` alerts mods (removes pre-shuffle roster entries; never auto-reshuffles)
+- Docker entrypoint: soft-fail on git fetch; Dockerfile installs `git`; `chunk_text` for long fallback posts
+
 ## 2026-05 — Secret Santa simplify & cleanup
 
 - Simplified `/ss start` params; added `/ss status`, `/ss oversight`, archive subgroup
