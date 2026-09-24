@@ -60,6 +60,9 @@ cogs/secret_santa_data.json
 # Generated deploy output
 deployment_report.json
 
+# Pterodactyl / deploy runtime backups (startup script)
+.deploy-backups/
+
 # Legacy deploy scripts (removed — use deploy.sh + deploy.py)
 deploy_cross_platform.py
 deploy_windows.ps1
