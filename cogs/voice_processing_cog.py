@@ -1227,11 +1227,15 @@ class VoiceProcessingCog(commands.Cog):
 
         max_attempts = 4  # Extra attempt for stubborn "already connected" cases
         for attempt in range(max_attempts):
-            try:
-                vc = await asyncio.wait_for(
-                    channel.connect(timeout=timeout, reconnect=True),
-                    timeout=timeout + 5
+            # Abort early if everyone left while we were retrying
+            if not self._has_humans_in_voice(channel):
+                self.logger.warning(
+                    f"Aborting voice connect to '{channel.name}' — no humans left in channel"
                 )
+                await self._cleanup_stale_voice_client(guild)
+                return None
+            try:
+                vc = await self._connect_with_progress(channel, timeout, attempt, max_attempts)
                 self.logger.info(f"Connected to {channel.name} (attempt {attempt + 1})")
                 # Do not self-deaf the bot: it is unnecessary for TTS and can break or confuse
                 # voice media on some clients/gateways. DAVE readiness is handled before play().
@@ -1246,6 +1250,12 @@ class VoiceProcessingCog(commands.Cog):
                     await asyncio.sleep(VOICE_CLEANUP_DELAY * 2)
                     continue
                 return vc
+            except asyncio.CancelledError:
+                self.logger.warning(
+                    f"Voice connect to '{channel.name}' cancelled (channel emptied during handshake)"
+                )
+                await self._cleanup_stale_voice_client(guild)
+                return None
             except disnake.ClientException as e:
                 err_lower = str(e).lower()
                 if "already connected" in err_lower:
@@ -1278,13 +1288,15 @@ class VoiceProcessingCog(commands.Cog):
                 )
                 await self._cleanup_stale_voice_client(guild)
                 if attempt == max_attempts - 1:
-                    self.logger.error(
-                        f"VOICE CONNECTION FAILED after {max_attempts} timeouts on '{channel.name}'.\n"
-                        f"  Slash commands can still work — Discord voice is UDP, not TCP.\n"
-                        f"  If this bot runs in Docker/TrueNAS: set network_mode: host "
-                        f"(enable Host Network in the UI) and restart. "
-                        f"Bridge/NAT networking makes TTS fail every single time.\n"
-                        f"  Also check: bot Connect/Speak perms, VOICE_TIMEOUT>={timeout}, ffmpeg installed."
+                    self.logger.critical(
+                        f"VOICE UDP HANDSHAKE NEVER COMPLETED on '{channel.name}' "
+                        f"after {max_attempts} attempts.\n"
+                        f"  The bot DID try to join — Discord never finished the voice UDP path.\n"
+                        f"  Slash commands / TTS API / DAVE code are fine (proven when the same bot\n"
+                        f"  runs on a NAS with host networking and connects in ~1s).\n"
+                        f"  This host (often Pterodactyl/VPS) cannot complete outbound Discord voice UDP.\n"
+                        f"  Fix: run on NAS/bare metal with network_mode: host, or ask the host provider\n"
+                        f"  to allow outbound UDP to Discord voice (not a bot permission issue)."
                     )
                     return None
             except OSError as e:
@@ -1309,6 +1321,61 @@ class VoiceProcessingCog(commands.Cog):
                     return None
             await asyncio.sleep(VOICE_CONNECTION_RETRY_DELAY)
         return None
+
+    async def _connect_with_progress(
+        self,
+        channel: disnake.VoiceChannel,
+        timeout: int,
+        attempt: int,
+        max_attempts: int,
+    ) -> disnake.VoiceClient:
+        """
+        Run channel.connect() while logging progress.
+
+        On broken hosts (typical Pterodactyl), connect hangs silently until timeout.
+        Progress logs make that visible instead of looking like the bot 'never tried'.
+        """
+        connect_task = asyncio.create_task(
+            channel.connect(timeout=timeout, reconnect=True)
+        )
+        start = time.monotonic()
+        hard_deadline = timeout + 5
+        try:
+            while True:
+                done, _ = await asyncio.wait({connect_task}, timeout=5.0)
+                if done:
+                    return connect_task.result()
+                elapsed = time.monotonic() - start
+                if elapsed >= hard_deadline:
+                    connect_task.cancel()
+                    try:
+                        await connect_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise asyncio.TimeoutError()
+                # Channel emptied mid-handshake — stop waiting
+                if not self._has_humans_in_voice(channel):
+                    connect_task.cancel()
+                    try:
+                        await connect_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    await self._cleanup_stale_voice_client(channel.guild)
+                    raise asyncio.CancelledError()
+                self.logger.warning(
+                    f"Still waiting for Discord voice UDP handshake to '{channel.name}' "
+                    f"({elapsed:.0f}s / {timeout}s, attempt {attempt + 1}/{max_attempts}). "
+                    f"If this stalls until timeout, the HOST cannot reach Discord voice "
+                    f"(common on Pterodactyl). Same codebase connects in ~1s on NAS+host network."
+                )
+        except Exception:
+            if not connect_task.done():
+                connect_task.cancel()
+                try:
+                    await connect_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
 
     # ============ STATE MANAGEMENT ============
     async def _get_or_create_state(self, guild_id: int) -> GuildVoiceState:
