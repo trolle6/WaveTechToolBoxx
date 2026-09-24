@@ -54,3 +54,15 @@ So the bot **did** commit to joining. It waited the full 120s, timed out, retrie
 **Ptero:** connect never succeeds; old code then burns ~8 minutes on 4×120s retries.
 
 New code on this branch: fail after the **first** UDP timeout (no multi-minute death spiral), cancel/cleanup the half-open client, and log CRITICAL naming host UDP / Pterodactyl.
+
+## What to do
+
+1. **Run TTS on the NAS** with `network_mode: host` (see `docker-compose.truenas.example.yml`).
+2. Or ask the Pterodactyl provider to allow **outbound UDP** to Discord voice / offer host networking.
+3. Do **not** set `VOICE_TIMEOUT=120` hoping it tries harder — on a blackholed UDP path it only sits silent longer and multiplies orphaned tasks. Prefer ~30s.
+
+After updating this branch, a stuck Ptero join logs every 5s:
+
+`Still waiting for Discord voice UDP handshake…`
+
+and stops after the first timeout instead of 4×120s.
