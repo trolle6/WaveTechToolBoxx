@@ -33,13 +33,15 @@ export_git_identity() {
 
 if [ "${GIT_UPDATE}" = "true" ] && [ -d .git ]; then
     echo "Updating ${GIT_REMOTE}/${GIT_BRANCH}..."
-    git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" --prune
-    if git show-ref --verify --quiet "refs/remotes/${GIT_REMOTE}/${GIT_BRANCH}"; then
-        git checkout -B "${GIT_BRANCH}" "${GIT_REMOTE}/${GIT_BRANCH}"
-        git reset --hard "${GIT_REMOTE}/${GIT_BRANCH}"
+    if git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" --prune; then
+        if git show-ref --verify --quiet "refs/remotes/${GIT_REMOTE}/${GIT_BRANCH}"; then
+            git checkout -B "${GIT_BRANCH}" "${GIT_REMOTE}/${GIT_BRANCH}"
+            git reset --hard "${GIT_REMOTE}/${GIT_BRANCH}"
+        else
+            echo "WARN: ${GIT_REMOTE}/${GIT_BRANCH} not found after fetch; using existing code" >&2
+        fi
     else
-        echo "ERROR: ${GIT_REMOTE}/${GIT_BRANCH} not found after fetch" >&2
-        exit 1
+        echo "WARN: git fetch failed; using existing code" >&2
     fi
     export_git_identity
 elif [ -d .git ]; then
@@ -50,4 +52,5 @@ if [ -f requirements.txt ] && [ "${PIP_INSTALL_ON_START}" = "true" ]; then
     python3 -m pip install -q -r requirements.txt
 fi
 
+# exec makes Python PID 1 so docker stop delivers SIGTERM to the bot
 exec "$@"

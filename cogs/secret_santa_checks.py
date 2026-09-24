@@ -24,8 +24,13 @@ def _get_member_from_inter(inter: disnake.ApplicationCommandInteraction) -> Opti
 
 
 def _has_mod_access(member: disnake.Member, bot: disnake.Client) -> bool:
-    """True if member is guild admin or has DISCORD_MODERATOR_ROLE_ID from config."""
-    if member.guild_permissions.administrator:
+    """
+    True if member is guild admin, guild owner, or has DISCORD_MODERATOR_ROLE_ID.
+
+    Admins and the guild owner always pass so a missing/wrong mod role cannot
+    lock everyone (including the server owner) out of mod commands.
+    """
+    if member.guild_permissions.administrator or member.id == member.guild.owner_id:
         return True
     config = getattr(bot, "config", None)
     if not config:
@@ -42,13 +47,13 @@ def _has_mod_access(member: disnake.Member, bot: disnake.Client) -> bool:
 
 
 def is_moderator(inter: "disnake.ApplicationCommandInteraction") -> bool:
-    """Return True if the user can run mod-gated commands (admin or mod role)."""
+    """Return True if the user can run mod-gated commands (admin, owner, or mod role)."""
     member = _get_member_from_inter(inter)
     return _has_mod_access(member, inter.bot) if member else False
 
 
 def mod_check():
-    """Check if user is server admin or has the configured moderator role."""
+    """Check if user is server admin, guild owner, or has the configured moderator role."""
     async def predicate(inter: "disnake.ApplicationCommandInteraction"):
         member = _get_member_from_inter(inter)
         if member and _has_mod_access(member, inter.bot):
@@ -57,7 +62,7 @@ def mod_check():
             inter.bot.logger.warning(
                 f"User {inter.author.name} ({inter.author.id}) attempted to use mod-only command"
             )
-        return False
+        raise commands.CheckFailure("Moderator only.")
 
     return commands.check(predicate)
 

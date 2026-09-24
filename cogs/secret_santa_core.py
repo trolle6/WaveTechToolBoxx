@@ -17,6 +17,7 @@ from disnake.ext import commands
 from .utils import (
     RateLimiter,
     autocomplete_safety_wrapper,
+    chunk_text,
     get_openai_headers,
     safe_edit_response,
     safe_followup_send,
@@ -1061,7 +1062,12 @@ class SecretSantaCore(commands.Cog):
             )
         for attempt in range(3):
             try:
-                await asyncio.wait_for(channel.send(text[:2000]), timeout=10.0)
+                first = True
+                for part in chunk_text(text):
+                    await asyncio.wait_for(channel.send(part), timeout=10.0)
+                    if not first:
+                        await asyncio.sleep(0.35)
+                    first = False
                 self.logger.info(f"Posted fallback for {len(failed_user_ids)} users in #{channel.name}")
                 return True
             except (disnake.HTTPException, ConnectionError, asyncio.TimeoutError) as e:

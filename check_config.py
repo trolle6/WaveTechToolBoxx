@@ -97,7 +97,6 @@ def check_config_env():
         "DISCORD_TOKEN": "Discord bot token",
         "DISCORD_CHANNEL_ID": "Discord channel ID",
         "DISCORD_LOG_CHANNEL_ID": "Discord log channel ID",
-        "DISCORD_MODERATOR_ROLE_ID": "Discord moderator role ID",
         "OPENAI_API_KEY": "OpenAI API key"
     }
     
@@ -121,6 +120,7 @@ def check_config_env():
     
     # Check optional values
     optional_keys = {
+        "DISCORD_MODERATOR_ROLE_ID": "Moderator role (unset = admins/owner only)",
         "TTS_ROLE_ID": "TTS role restriction (None = everyone)",
         "DEBUG_MODE": "Debug mode",
         "LOG_LEVEL": "Logging level"
@@ -129,7 +129,7 @@ def check_config_env():
     print(f"\n{BLUE}Checking optional environment variables...{RESET}")
     for key, description in optional_keys.items():
         value = os.getenv(key)
-        if value:
+        if value and value.strip():
             print_status(f"{key:<30}", True, f"{value} - {description}")
         else:
             print_warning(f"{key:<30} Not set (using default) - {description}")
@@ -137,23 +137,18 @@ def check_config_env():
     return all_good
 
 def check_runtime_files():
-    """Check runtime JSON files"""
+    """Check runtime JSON files (optional — bot creates them on first run)."""
     files = {
         "cogs/secret_santa_state.json": False,
-        "cogs/distributed_files_metadata.json": False
+        "cogs/distributed_files_metadata.json": False,
     }
-    
+
     print(f"\n{BLUE}Checking runtime files...{RESET}")
-    all_good = True
     for filepath, required in files.items():
         if not check_file_exists(filepath, required):
-            if required:
-                all_good = False
-            example = f"{filepath}.example"
-            if Path(example).exists():
-                print_info(f"  → Create with: cp {example} {filepath}")
-    
-    return all_good
+            print_info(f"  → {filepath} will be created automatically on first bot start")
+
+    return True
 
 def validate_config_values():
     """Validate format of config values"""
@@ -188,15 +183,23 @@ def validate_config_values():
             print_status("OPENAI_API_KEY format", True, "Looks valid")
     
     # Check channel IDs are numeric
-    for key in ["DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID", "DISCORD_MODERATOR_ROLE_ID"]:
+    for key in ["DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID"]:
         value = os.getenv(key, "")
         if value:
             try:
-                int(value)
+                int(value.strip().strip('"').strip("'"))
                 print_status(f"{key} format", True, "Valid ID")
             except ValueError:
                 print_error(f"{key} should be a numeric ID (e.g. 1234567890123456789)")
                 all_good = False
+
+    mod_role = os.getenv("DISCORD_MODERATOR_ROLE_ID", "")
+    if mod_role and mod_role.strip():
+        try:
+            int(mod_role.strip().strip('"').strip("'"))
+            print_status("DISCORD_MODERATOR_ROLE_ID format", True, "Valid ID")
+        except ValueError:
+            print_warning("DISCORD_MODERATOR_ROLE_ID should be numeric — will be ignored at runtime")
     
     return all_good
 
@@ -241,7 +244,7 @@ def main():
     else:
         print(f"{RED}❌ Some checks failed ({passed}/{total} passed){RESET}")
         print(f"\n{YELLOW}📋 Follow the instructions above to fix the issues.{RESET}")
-        print(f"{YELLOW}📖 See TTS_FIX_GUIDE.md for detailed help.{RESET}")
+        print(f"{YELLOW}📖 See README.md / DEPLOYMENT.md for setup help.{RESET}")
         return 1
 
 if __name__ == "__main__":

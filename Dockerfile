@@ -2,9 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# FFmpeg required for TTS playback (MP3 decode); disnake[voice] handles Opus/DAVE
+# FFmpeg required for TTS playback (MP3 decode); git for GIT_UPDATE in entrypoint;
+# disnake[voice] handles Opus/DAVE
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install script first for better caching

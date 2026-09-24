@@ -2432,6 +2432,66 @@ class SecretSantaCommandsMixin:
             self.logger.error(f"Error handling reaction remove: {e}")
 
     @commands.Cog.listener()
+    async def on_member_remove(self, member: disnake.Member):
+        """
+        Handle participants who leave the guild mid-event.
+
+        Before shuffle: remove them from the roster.
+        After shuffle: alert mods — do not auto-reassign (would reshuffle everyone).
+        """
+        event = self.state.get("current_event")
+        if not event or not event.get("active"):
+            return
+        event_guild_id = event.get("guild_id")
+        if event_guild_id and member.guild.id != event_guild_id:
+            return
+
+        user_id = str(member.id)
+        participants = event.get("participants") or {}
+        if not isinstance(participants, dict) or user_id not in participants:
+            return
+
+        display = member.display_name or member.name or user_id
+        assignments = event.get("assignments") or {}
+        if not isinstance(assignments, dict):
+            assignments = {}
+
+        if not assignments:
+            async with self._lock:
+                current = self.state.get("current_event")
+                if not current or not current.get("active"):
+                    return
+                parts = current.get("participants")
+                if isinstance(parts, dict):
+                    parts.pop(user_id, None)
+                await self._save_async()
+            msg = (
+                f"Secret Santa: **{display}** (`{user_id}`) left the server before shuffle "
+                f"and was removed from the roster."
+            )
+            self.logger.warning(msg)
+            if hasattr(self.bot, "send_to_discord_log"):
+                await self.bot.send_to_discord_log(msg, "WARNING")
+            return
+
+        # Already paired — alert only (persist assignments; never reshuffle silently)
+        their_giftee = assignments.get(user_id)
+        their_santa = next(
+            (g for g, r in assignments.items() if str(r) == user_id),
+            None,
+        )
+        details = [f"**{display}** (`{user_id}`) left after shuffle."]
+        if their_giftee:
+            details.append(f"They were Secret Santa for <@{their_giftee}>.")
+        if their_santa:
+            details.append(f"Their Secret Santa was <@{their_santa}>.")
+        details.append("Assignments were **not** reshuffled — handle manually if needed.")
+        msg = " ".join(details)
+        self.logger.warning("Secret Santa member left after shuffle: %s", msg)
+        if hasattr(self.bot, "send_to_discord_log"):
+            await self.bot.send_to_discord_log(f"Secret Santa: {msg}", "WARNING")
+
+    @commands.Cog.listener()
     async def on_ready(self):
         # Register persistent reply button view once — works after bot restarts
         if getattr(self, "_reply_view_registered", False):

@@ -20,10 +20,11 @@ import asyncio
 import functools
 import json
 import logging
+import shutil
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, Iterator, Optional, TypeVar
 
 import disnake
 
@@ -45,6 +46,7 @@ __all__ = [
     'safe_followup_send',
     'load_json_file',
     'atomic_save_json',
+    'chunk_text',
     'LOAD_JSON_MAX_BYTES',
 ]
 
@@ -390,7 +392,8 @@ def load_json_file(path: Path, default: Any = None, *, max_bytes: int = LOAD_JSO
     Load JSON from disk with graceful error handling and a size cap.
 
     Returns parsed content on success. On failure, returns ``default`` if
-    provided, otherwise ``{}``.
+    provided, otherwise ``{}``. Corrupt files are copied to ``*.corrupt``
+    before the fallback is returned so data can be inspected later.
     """
     fallback = default if default is not None else {}
     if path is None or not hasattr(path, "exists"):
@@ -407,7 +410,11 @@ def load_json_file(path: Path, default: Any = None, *, max_bytes: int = LOAD_JSO
             return fallback
         return json.loads(text)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-        logger.warning("Failed to load JSON from %s: %s", path, e)
+        logger.error("Corrupt %s (%s); backing up and using default", path, e)
+        try:
+            shutil.copy2(path, Path(f"{path}.corrupt"))
+        except OSError:
+            pass
     return fallback
 
 
@@ -415,9 +422,12 @@ def atomic_save_json(path: Path, data: Any, logger: Optional[logging.Logger] = N
     """
     Save JSON atomically with crash-safe write-temp-replace.
 
-    Writes to ``path.tmp`` first, then atomically replaces the target file.
+    Writes to a sibling ``*.tmp`` first, then atomically replaces the target file.
+    Creates parent directories if needed.
     """
     log = logger or globals()["logger"]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix('.tmp')
     try:
         temp.write_text(
@@ -433,6 +443,22 @@ def atomic_save_json(path: Path, data: Any, logger: Optional[logging.Logger] = N
                 pass
         log.error("Failed to save JSON to %s: %s", path, e)
         raise
+
+
+def chunk_text(text: str, limit: int = 1990) -> Iterator[str]:
+    """
+    Split ``text`` into Discord-safe chunks, preferring line breaks.
+
+    Discord message content max is 2000; default limit leaves a small buffer.
+    """
+    while text:
+        if len(text) <= limit:
+            yield text
+            return
+        cut = text.rfind("\n", 0, limit)
+        cut = cut if cut > 0 else limit
+        yield text[:cut]
+        text = text[cut:].lstrip("\n")
 
 
 async def safe_edit_response(
