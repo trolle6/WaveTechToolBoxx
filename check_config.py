@@ -249,7 +249,7 @@ def main():
     else:
         print(f"{RED}❌ Some checks failed ({passed}/{total} passed){RESET}")
         print(f"\n{YELLOW}📋 Follow the instructions above to fix the issues.{RESET}")
-        print(f"{YELLOW}📖 See TTS_FIX_GUIDE.md for detailed help.{RESET}")
+        print(f"{YELLOW}📖 See README.md / DEPLOYMENT.md for setup help.{RESET}")
         return 1
 
 if __name__ == "__main__":

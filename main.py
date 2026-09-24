@@ -10,12 +10,6 @@ USAGE:
     python main.py
 """
 
-# Load DNS fix first (before any network imports) to improve Discord connectivity
-try:
-    import dns_fix
-except ImportError:
-    pass  # dns_fix.py not present, continue normally
-
 import asyncio
 import io
 import logging
