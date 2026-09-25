@@ -131,7 +131,10 @@ class SecretSantaCommandsMixin:
                 )
 
         if existing_archive.exists() and debug_start:
-            self.logger.info(f"SS_DEBUG_START: skipping archive warning, will use history from other years (excluding {current_year})")
+            self.logger.debug(
+                "SS_DEBUG_START: skipping archive warning (excluding %s)",
+                current_year,
+            )
 
         # Collect participants from the message reactions (may be empty if no one reacted yet)
         participants = {}
@@ -375,9 +378,9 @@ class SecretSantaCommandsMixin:
                 lambda: load_history_from_archives(ARCHIVE_DIR, exclude_years=[current_year], logger=self.logger)
             )
             
-            self.logger.info(f"Attempting Secret Santa assignment with {len(participants)} participants")
-            self.logger.info(f"Available history years: {available_years}")
-            self.logger.info(f"Excluding current year {current_year} from history (creating new event for this year)")
+            self.logger.debug("Attempting Secret Santa assignment with %s participants", len(participants))
+            self.logger.debug("Available history years: %s", available_years)
+            self.logger.debug("Excluding current year %s from history", current_year)
             
             # PROGRESSIVE FALLBACK SYSTEM
             exclude_years = []
@@ -389,7 +392,7 @@ class SecretSantaCommandsMixin:
                 if attempt:
                     exclude_years = available_years[:attempt]
                     fallback_used = True
-                    self.logger.info(f"Fallback attempt {attempt}: Excluding years {exclude_years}")
+                    self.logger.debug("Fallback attempt %s: excluding years %s", attempt, exclude_years)
                     # Use default arg to capture exclude_years at definition time (closure safety)
                     exclude_copy = list(exclude_years)
                     history, _ = await loop.run_in_executor(
@@ -423,7 +426,7 @@ class SecretSantaCommandsMixin:
                         self._executor,
                         lambda: make_assignments(participants, history, logger=self.logger)
                     )
-                    self.logger.info("Assignment algorithm succeeded")
+                    self.logger.debug("Assignment algorithm succeeded")
                     break
                 except ValueError as e:
                     if attempt == len(available_years):
@@ -451,7 +454,7 @@ class SecretSantaCommandsMixin:
             event.pop("scheduled_shuffle_time", None)
             event.pop("scheduled_by_user_id", None)
             await self._save_async()
-            self.logger.info("Assignments saved, releasing lock before DMs")
+            self.logger.debug("Assignments saved, releasing lock before DMs")
         
         # Release lock before sending DMs (they can take time, don't block other operations)
         # Assignments are already saved, so concurrent shuffle attempts will see them and fail
@@ -471,9 +474,9 @@ class SecretSantaCommandsMixin:
             receiver_name = participants_dict.get(str(receiver), f"User {receiver}")
             msg = self._get_assignment_message(current_year, int(receiver) if isinstance(receiver, str) else receiver, receiver_name)
             dm_items.append((int(giver) if isinstance(giver, str) else giver, msg))
-        self.logger.info(f"Sending assignment DMs to {len(dm_items)} participants")
+        self.logger.debug("Sending assignment DMs to %s participants", len(dm_items))
         failed = await self._send_dms_to_participants(dm_items)
-        self.logger.info(f"DM send complete: {len(failed)} failed of {len(dm_items)}")
+        self.logger.debug("DM send complete: %s failed of %s", len(failed), len(dm_items))
         guild_id = event.get("guild_id")
         if failed:
             await self._post_fallback_for_failed_dms(guild_id, failed, "assignment", current_year)
@@ -503,7 +506,7 @@ class SecretSantaCommandsMixin:
         dm_stats = f"{success_dms}/{total_dms} DMs sent"
         if failed:
             dm_stats += f" ({len(failed)} fallback in channel)"
-        self.logger.info(f"Shuffle complete: {dm_stats}")
+        self.logger.debug("Shuffle complete: %s", dm_stats)
         executor_name = safe_display_name(inter.author) if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
         if hasattr(self.bot, 'send_to_discord_log'):
             log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs, {dm_stats}"
@@ -782,7 +785,7 @@ class SecretSantaCommandsMixin:
                 event.pop("scheduled_shuffle_time", None)
                 event.pop("scheduled_by_user_id", None)
                 await self._save_async()
-            self.logger.info(f"Manual shuffle cancelled scheduled shuffle (was scheduled for <t:{int(scheduled_time)}:F>)")
+            self.logger.debug("Manual shuffle cancelled scheduled shuffle")
         
         success, error = await self._execute_shuffle_internal(inter=inter)
         if not success and error:
@@ -811,7 +814,7 @@ class SecretSantaCommandsMixin:
                 event.pop("scheduled_stop_by_user_id", None)
                 await self._save_async()
             cancelled_scheduled = True
-            self.logger.info(f"Manual stop cancelled scheduled stop (was scheduled for <t:{int(scheduled_time)}:F>)")
+            self.logger.debug("Manual stop cancelled scheduled stop")
 
         # Execute stop using the helper function
         success, saved_filename = await self._execute_stop_internal(stopper_id=inter.author.id)
@@ -1281,7 +1284,7 @@ class SecretSantaCommandsMixin:
             
             await self._safe_edit_response(inter, embed=embed)
             
-            self.logger.info(f"User {safe_display_name(inter.author)} ({user_id}) updated their gift for {year}")
+            self.logger.debug("User %s updated gift for %s", user_id, year)
             
         except Exception as e:
             self.logger.error(f"Error editing gift for {year}: {e}", exc_info=True)

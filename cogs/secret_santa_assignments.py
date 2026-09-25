@@ -69,7 +69,7 @@ def load_history_from_archives(archive_dir: Path, exclude_years: List[int] = Non
             # Skip excluded years
             if year in exclude_years:
                 if logger:
-                    logger.info(f"Excluding year {year} from history (fallback mode)")
+                    logger.debug("Excluding year %s from history (fallback)", year)
                 continue
 
             archive_data = load_json(archive_file)

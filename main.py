@@ -21,7 +21,6 @@ import time
 import warnings
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -440,7 +439,7 @@ async def validate_openai_key(key: str, logger: logging.Logger, http_mgr: "HttpM
                 timeout=aiohttp.ClientTimeout(total=OPENAI_VALIDATION_TIMEOUT)
             ) as r:
                 if r.status == 200:
-                    logger.info("OpenAI API key is valid")
+                    logger.debug("OpenAI API key is valid")
                     return True
                 elif r.status == 401:
                     logger.error("API key is invalid or expired")
@@ -503,9 +502,11 @@ def validate_runtime_dependencies(logger: logging.Logger) -> bool:
             dotenv_ver = pkg_version("python-dotenv")
         except PackageNotFoundError:
             dotenv_ver = "unknown"
-        logger.info(
-            f"Runtime deps OK: disnake {disnake.__version__}, "
-            f"aiohttp {aiohttp.__version__}, python-dotenv {dotenv_ver}, dave-py present"
+        logger.debug(
+            "Runtime deps OK: disnake %s, aiohttp %s, python-dotenv %s, dave-py present",
+            disnake.__version__,
+            aiohttp.__version__,
+            dotenv_ver,
         )
     except ImportError as e:
         logger.critical(f"Missing dependency: {e}. Run: pip install -r requirements.txt")
@@ -583,33 +584,6 @@ bot.send_to_discord_log = send_to_discord_log
 bot.send_to_discord_channel = send_to_discord_channel
 
 
-# ============ DAILY MAINTENANCE ============
-async def daily_maintenance_loop():
-    """
-    Run once per day at midnight UTC. Cogs may implement async daily_maintenance()
-    for work that should not run on a tight loop (e.g. DALL-E image URL cache).
-    Voice uses its own 5-minute cleanup task instead.
-    """
-    while True:
-        now = datetime.now(timezone.utc)
-        tomorrow = (now.date() + timedelta(days=1))
-        next_midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
-        wait_seconds = (next_midnight - now).total_seconds()
-        if wait_seconds <= 0:
-            wait_seconds = SECONDS_PER_DAY
-        logger.info(f"Daily maintenance next at midnight UTC (in {wait_seconds/3600:.1f}h)")
-        await asyncio.sleep(wait_seconds)
-        logger.info("Daily maintenance (midnight UTC) — running cog cleanups")
-        for name, cog in bot.cogs.items():
-            fn = getattr(cog, "daily_maintenance", None)
-            if asyncio.iscoroutinefunction(fn):
-                try:
-                    await fn()
-                except Exception as e:
-                    logger.error(f"Daily maintenance failed for {name}: {e}", exc_info=True)
-        # No second fixed sleep here; loop recalculates next UTC midnight each iteration.
-
-
 # ============ BOT EVENTS ============
 @bot.event
 async def on_ready():
@@ -618,7 +592,7 @@ async def on_ready():
     stats = bot._connection_stats
     
     if not bot.ready_once:
-        logger.info(f"Logged in as {bot.user}")
+        logger.info("Logged in as %s", bot.user)
         
         # Track connection start time for uptime calculation
         stats["connection_start"] = now
@@ -626,7 +600,6 @@ async def on_ready():
         
         if discord_handler:
             discord_handler.set_bot(bot)
-            logger.info("Discord logging handler connected")
 
         # Clear any HTTP session from pre-bot validation (asyncio.run uses a different loop)
         try:
@@ -647,19 +620,10 @@ async def on_ready():
                     )
         else:
             logger.warning(
-                "No DISCORD_MODERATOR_ROLE_ID configured — mod commands limited to "
-                "guild administrators and owners"
+                "No DISCORD_MODERATOR_ROLE_ID configured — only guild "
+                "administrators and owners can run mod commands"
             )
 
-        asyncio.create_task(daily_maintenance_loop())
-        
-        try:
-            channel = bot.get_channel(config.DISCORD_LOG_CHANNEL_ID)
-            if channel:
-                await channel.send(f"🤖 **Bot Online** | {bot.user.name} is ready!")
-        except Exception:
-            pass
-        
         bot.ready_once = True
     else:
         # Reconnect after disconnect: on_resumed logs downtime; only track connect time here.
@@ -763,23 +727,27 @@ async def on_disconnect():
     # Calculate uptime percentage (capped at 100%)
     uptime_percent = min(100.0, (total_uptime_24h / SECONDS_PER_DAY * 100)) if total_uptime_24h > 0 else 0.0
     
-    # Log disconnect with context
+    # Log disconnect quietly; only warn when rate is unhealthy
     if len(stats["disconnects"]) > 1:
         time_since = now - stats["disconnects"][-2]
-        logger.info(
-            f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h, "
-            f"{time_since:.1f}s since last, uptime: {uptime_str})"
+        logger.debug(
+            "Disconnected (#%s in 24h, %.1fs since last, uptime %s)",
+            stats["disconnect_count_24h"],
+            time_since,
+            uptime_str,
         )
     else:
-        logger.info(
-            f"⚠️ Bot disconnected (#{stats['disconnect_count_24h']} in 24h, uptime: {uptime_str})"
+        logger.debug(
+            "Disconnected (#%s in 24h, uptime %s)",
+            stats["disconnect_count_24h"],
+            uptime_str,
         )
     
-    # Warn if disconnects are too frequent (indicates stability issues)
     if stats["disconnect_count_24h"] >= DISCONNECT_WARNING_THRESHOLD:
         logger.warning(
-            f"🚨 HIGH DISCONNECTION RATE: {stats['disconnect_count_24h']} disconnects in 24h "
-            f"(uptime: {uptime_percent:.1f}%)"
+            "High disconnection rate: %s disconnects in 24h (uptime: %.1f%%)",
+            stats["disconnect_count_24h"],
+            uptime_percent,
         )
         await send_to_discord_log(
             f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
@@ -806,11 +774,11 @@ async def on_resumed():
         duration = now - stats["last_disconnect"]
         
         if duration < 5:
-            logger.info(f"✅ Bot reconnected ({duration:.2f}s downtime - auto-reconnect working)")
+            logger.debug("Reconnected (%.2fs downtime)", duration)
         elif duration < 60:
-            logger.warning(f"⚠️ Bot reconnected after {duration:.1f}s downtime")
+            logger.warning("Reconnected after %.1fs downtime", duration)
         else:
-            logger.error(f"🚨 Bot reconnected after {duration:.1f}s - very long disconnection!")
+            logger.error("Reconnected after %.1fs — long disconnection", duration)
             await send_to_discord_log(
                 f"Long disconnection: {duration:.1f}s - may have interrupted operations",
                 "ERROR"
@@ -818,7 +786,7 @@ async def on_resumed():
         
         stats["last_disconnect"] = None
     else:
-        logger.info("✅ Bot reconnected")
+        logger.debug("Reconnected")
 
 
 # REMOVED: on_application_command_autocomplete event handler
@@ -921,11 +889,10 @@ def load_cogs() -> int:
     for cog in COG_EXTENSIONS:
         try:
             bot.load_extension(cog)
-            logger.info(f"Loaded {cog}")
+            logger.debug("Loaded %s", cog)
             loaded += 1
         except Exception:
             logger.exception("Failed to load %s", cog)
-    
     return loaded
 
 
@@ -936,10 +903,10 @@ def reload_cogs() -> int:
         try:
             if cog in bot.extensions:
                 bot.reload_extension(cog)
-                logger.info(f"Reloaded {cog}")
+                logger.debug("Reloaded %s", cog)
             else:
                 bot.load_extension(cog)
-                logger.info(f"Loaded {cog}")
+                logger.debug("Loaded %s", cog)
             loaded += 1
         except Exception:
             logger.exception("Failed to reload %s", cog)
@@ -977,10 +944,7 @@ def prepare_bot_for_retry() -> None:
 
     if bot.extensions:
         reload_cogs()
-    logger.info(
-        "Prepared fresh event loop for bot restart (loop_id=%s)",
-        id(bot.loop),
-    )
+    logger.debug("Prepared fresh event loop for bot restart (loop_id=%s)", id(bot.loop))
 
 
 def _resolve_git_short_commit() -> str:
@@ -1004,22 +968,20 @@ def _resolve_git_short_commit() -> str:
 
 
 def _log_deploy_identity() -> None:
-    """Log branch/commit and whether SS simplify layout is present."""
+    """One-line deploy identity so operators know which commit is running."""
     commit = _resolve_git_short_commit()
     branch = os.getenv("GIT_BRANCH_ACTUAL") or os.getenv("GIT_BRANCH") or "unknown"
     root = Path(__file__).resolve().parent
-    split_layout = (root / "cogs" / "secret_santa_core.py").is_file()
-    layout = "split" if split_layout else "legacy-monolith"
-    logger.info("Deploy identity: branch=%s commit=%s ss_layout=%s", branch, commit, layout)
-    if not split_layout:
+    if not (root / "cogs" / "secret_santa_core.py").is_file():
         logger.warning(
             "secret_santa_core.py missing — outdated code tree; check GIT_BRANCH / git pull."
         )
+        return
+    logger.info("Starting %s@%s", branch, commit)
 
 
 # ============ MAIN ============
 if __name__ == "__main__":
-    logger.info("Starting bot...")
     _log_deploy_identity()
     
     # Python version check - disnake 2.12+ (DAVE voice) requires Python 3.10+
@@ -1041,8 +1003,6 @@ if __name__ == "__main__":
         if not os.access(file_path, os.R_OK):
             logger.critical(f"Cannot read {file_path} - check permissions")
             sys.exit(1)
-    
-    logger.info("Production checks passed")
 
     if not validate_runtime_dependencies(logger):
         sys.exit(1)
@@ -1063,14 +1023,11 @@ if __name__ == "__main__":
             "Disable in production config.env."
         )
     
-    # Load cogs
     num_loaded = load_cogs()
     if num_loaded == 0:
         logger.critical("No cogs loaded!")
         sys.exit(1)
-    
-    logger.info(f"Successfully loaded {num_loaded} cogs")
-    logger.info("Bot runtime: crash-retry-v3 (bot.run + loop reset, no process exit on crash)")
+    logger.info("Loaded %s/%s cogs", num_loaded, len(COG_EXTENSIONS))
     
     # Retry configuration for infinite retry with exponential backoff
     MAX_RETRY_WAIT = 60  # Maximum wait time between retries (seconds)

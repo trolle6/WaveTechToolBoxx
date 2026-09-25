@@ -114,7 +114,7 @@ class DistributeZipCog(commands.Cog):
                     history_entry["status"] = "*deleted*"
                     self.logger.debug(f"Marked history entry {file_id} as deleted (migration)")
         
-        self.logger.info("DistributeZip cog initialized")
+        self.logger.debug("DistributeZip cog initialized")
 
     # ============ FILE UTILITIES ============
     def _find_file_by_name(self, file_name: str) -> Optional[Tuple[str, dict]]:
@@ -391,7 +391,10 @@ class DistributeZipCog(commands.Cog):
                     participants = event.get("participants", {})
                     if participants:
                         participant_ids = [int(uid) for uid in participants.keys() if uid.isdigit()]
-                        self.logger.info(f"Using Secret Santa participants: {len(participant_ids)} participants")
+                        self.logger.debug(
+                            "Using Secret Santa participants: %s",
+                            len(participant_ids),
+                        )
             except Exception as e:
                 self.logger.debug(f"Could not check Secret Santa state: {e}")
         
@@ -822,7 +825,11 @@ class DistributeZipCog(commands.Cog):
                         })
                         continue
                     file_path = conflict_path
-                    self.logger.info(f"File {att.filename} already exists, saving as {file_path.name}")
+                    self.logger.debug(
+                        "File %s already exists, saving as %s",
+                        att.filename,
+                        file_path.name,
+                    )
                 
                 # Save the file
                 file_path.write_bytes(file_data)
@@ -856,7 +863,12 @@ class DistributeZipCog(commands.Cog):
                     "filename": file_path.name
                 })
                 
-                self.logger.info(f"Successfully uploaded file {idx}/{len(attachments)}: {file_name}")
+                self.logger.debug(
+                    "Uploaded file %s/%s: %s",
+                    idx,
+                    len(attachments),
+                    file_name,
+                )
                 
             except Exception as e:
                 self.logger.error(f"Error uploading file {att.filename}: {e}", exc_info=True)
@@ -1090,9 +1102,7 @@ class DistributeZipCog(commands.Cog):
     # ============ COG LIFECYCLE ============
     async def cog_load(self):
         """Initialize cog"""
-        self.logger.info("DistributeZip cog loaded")
-        if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log("📦 DistributeZip cog loaded successfully", "SUCCESS")
+        self.logger.debug("DistributeZip cog loaded")
 
     async def _async_unload(self):
         """Persist metadata during cog unload."""
@@ -1107,7 +1117,7 @@ class DistributeZipCog(commands.Cog):
         if self._unloaded:
             return
         self._unloaded = True
-        self.logger.info("Unloading DistributeZip cog...")
+        self.logger.debug("Unloading DistributeZip cog...")
         if self.bot.is_closed():
             try:
                 save_metadata(self.metadata, logger=self.logger)

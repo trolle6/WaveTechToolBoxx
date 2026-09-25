@@ -193,7 +193,7 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         self.enabled = True
-        self.logger.info("TTS enabled")
+        self.logger.debug("TTS enabled")
         
         # Check FFmpeg and Discord DAVE (E2EE voice) dependencies
         self._check_ffmpeg_availability()
@@ -265,7 +265,7 @@ class VoiceProcessingCog(commands.Cog):
         if tts_role_id:
             try:
                 self.tts_role_id = int(str(tts_role_id).strip())
-                self.logger.info(f"TTS role requirement enabled: {self.tts_role_id}")
+                self.logger.debug("TTS role requirement enabled: %s", self.tts_role_id)
             except (ValueError, TypeError) as e:
                 self.logger.error(f"Failed to convert TTS_ROLE_ID to int: {tts_role_id} - {e}")
 
@@ -289,9 +289,9 @@ class VoiceProcessingCog(commands.Cog):
         try:
             self.allowed_channel = int(channel_id_raw) if channel_id_raw not in (None, "") else None
             if self.allowed_channel:
-                self.logger.info(f"TTS restricted to text channel: {self.allowed_channel}")
+                self.logger.debug("TTS restricted to text channel: %s", self.allowed_channel)
             else:
-                self.logger.info("TTS_CHANNEL_ID not set — TTS listens in all text channels")
+                self.logger.debug("TTS_CHANNEL_ID not set — TTS listens in all text channels")
         except (ValueError, TypeError) as e:
             self.logger.error(f"Failed to convert TTS_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
             self.allowed_channel = None
@@ -326,11 +326,6 @@ class VoiceProcessingCog(commands.Cog):
                 "so channel.connect() times out every time while slash commands still work. "
                 "Fix: set network_mode: host (TrueNAS: enable Host Network) and restart. "
                 "See docker-compose.truenas.example.yml / DEPLOYMENT.md."
-            )
-        else:
-            self.logger.info(
-                "Docker detected; primary IP %s — if TTS still times out, enable host networking",
-                ip or "unknown",
             )
     # ============ VOICE ASSIGNMENT ============
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
@@ -438,7 +433,7 @@ class VoiceProcessingCog(commands.Cog):
                 'Install: pip install "disnake[voice]>=2.12.0"'
             )
             return False
-        self.logger.info("Discord voice DAVE (dave-py) dependency OK")
+        self.logger.debug("Discord voice DAVE (dave-py) dependency OK")
         return True
 
     def _check_ffmpeg_availability(self):
@@ -462,7 +457,7 @@ class VoiceProcessingCog(commands.Cog):
                 )
                 return False
             
-            self.logger.info(f"FFmpeg found at: {ffmpeg_path}")
+            self.logger.debug("FFmpeg found at: %s", ffmpeg_path)
             
             # Try to get FFmpeg version and codec information
             try:
@@ -475,7 +470,7 @@ class VoiceProcessingCog(commands.Cog):
                 )
                 if result.returncode == 0:
                     version_line = result.stdout.split('\n')[0] if result.stdout else "Unknown"
-                    self.logger.info(f"FFmpeg version: {version_line}")
+                    self.logger.debug("FFmpeg version: %s", version_line)
                 else:
                     self.logger.warning(f"FFmpeg version check failed: {result.stderr}")
             except subprocess.TimeoutExpired:
@@ -500,7 +495,7 @@ class VoiceProcessingCog(commands.Cog):
                     if not has_opus:
                         self.logger.warning("⚠️ Opus codec not found in FFmpeg - Discord voice may fail")
                     if has_mp3 and has_opus:
-                        self.logger.info("FFmpeg has required codecs (MP3, Opus)")
+                        self.logger.debug("FFmpeg has required codecs (MP3, Opus)")
             except Exception as e:
                 self.logger.debug(f"Could not check FFmpeg codecs: {e}")
             
@@ -788,7 +783,7 @@ class VoiceProcessingCog(commands.Cog):
             chunks.append(remaining)
             self.logger.debug(f"Final chunk {chunk_num}: length={len(remaining)}")
         
-        self.logger.info(f"Split {original_length} chars into {len(chunks)} chunks: {[len(c) for c in chunks]}")
+        self.logger.debug("Split %s chars into %s chunks: %s", original_length, len(chunks), [len(c) for c in chunks])
         return chunks
 
     # ============ TTS GENERATION ============
@@ -1177,9 +1172,9 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.error("Cannot connect to voice: channel has no guild")
             return None
 
-        self.logger.info(
-            f"Attempting voice connection to '{channel.name}' (ID: {channel.id}) "
-            f"in guild '{guild.name}' (ID: {guild.id}), timeout: {timeout}s"
+        self.logger.debug(
+            "Attempting voice connection to %r (id=%s) guild=%r timeout=%ss",
+            channel.name, channel.id, guild.name, timeout,
         )
 
         # Fail fast if we lack Connect — otherwise the join just hangs until timeout.
@@ -1239,7 +1234,7 @@ class VoiceProcessingCog(commands.Cog):
                 return None
             try:
                 vc = await self._connect_with_progress(channel, timeout, attempt, max_attempts)
-                self.logger.info(f"Connected to {channel.name} (attempt {attempt + 1})")
+                self.logger.info("Connected to %s", channel.name)
                 # Do not self-deaf the bot: it is unnecessary for TTS and can break or confuse
                 # voice media on some clients/gateways. DAVE readiness is handled before play().
                 if not await self._wait_for_voice_media_ready(vc):
@@ -1545,7 +1540,7 @@ class VoiceProcessingCog(commands.Cog):
                     # (users might have left during playback)
                     if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel):
                         if not self._has_humans_in_voice(ch):
-                            self.logger.info(f"No humans left in voice channel after playback, disconnecting from {ch.name}")
+                            self.logger.debug("No humans left in %s — disconnecting", ch.name)
                             await vc.disconnect()
                             break  # Exit queue processing loop
 
@@ -1686,7 +1681,7 @@ class VoiceProcessingCog(commands.Cog):
                 self.logger.warning(f"Queue full, dropping TTS chunk {i} for user {message.author.id}")
                 break
 
-        self.logger.info(f"Message processing complete: {original_content_length} chars → {len(text_chunks)} chunks → {chunks_queued} queued")
+        self.logger.debug("Queued TTS: %s chars → %s chunks → %s queued", original_content_length, len(text_chunks), chunks_queued)
 
         # Record name announcement only when we actually queued (so empty/filtered messages don't consume it)
         if chunks_queued > 0 and is_first_message:
@@ -1733,10 +1728,11 @@ class VoiceProcessingCog(commands.Cog):
                     if old_assignment:
                         voice_name = old_assignment.get("voice") if isinstance(old_assignment, dict) else old_assignment
                         timestamp = old_assignment.get("timestamp") if isinstance(old_assignment, dict) else None
-                        self.logger.info(
-                            f"Cleared voice assignment '{voice_name}' for user {member.id} "
-                            f"(display_name: {member.display_name}) in guild {guild.id} "
-                            f"(left VC, assignment was {time.time() - timestamp:.1f}s old)" if timestamp else f"(left VC)"
+                        self.logger.debug(
+                            "Cleared voice assignment %r for user %s in guild %s (left VC)",
+                            voice_name,
+                            member.id,
+                            guild.id,
                         )
             
             # Check if should disconnect (wait to avoid race conditions)
@@ -1810,7 +1806,7 @@ class VoiceProcessingCog(commands.Cog):
                     for guild_id, state in list(self.guild_states.items()):
                         if state.processor_task and state.processor_task.done():
                             if state.queue.qsize() > 0:
-                                self.logger.info(f"Restarting processor for guild {guild_id}")
+                                self.logger.debug("Restarting processor for guild %s", guild_id)
                                 state.processor_task = asyncio.create_task(
                                     self._process_queue(guild_id)
                                 )
@@ -1849,7 +1845,7 @@ class VoiceProcessingCog(commands.Cog):
             await self._remove_state(gid)
 
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-        self.logger.info("Voice cog loaded")
+        self.logger.debug("Voice cog loaded")
 
     def cog_unload(self):
         """Cleanup cog"""
@@ -1857,7 +1853,7 @@ class VoiceProcessingCog(commands.Cog):
             return
         
         self._unloaded = True
-        self.logger.info("Unloading voice cog...")
+        self.logger.debug("Unloading voice cog...")
         
         try:
             loop = asyncio.get_event_loop()
@@ -1898,7 +1894,7 @@ class VoiceProcessingCog(commands.Cog):
                     except Exception:
                         pass
 
-            self.logger.info("Voice cog unloaded")
+            self.logger.debug("Voice cog unloaded")
         except Exception as e:
             self.logger.error(f"Async unload error: {e}")
 

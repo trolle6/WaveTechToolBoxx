@@ -125,7 +125,7 @@ class DALLECog(commands.Cog):
         self._unloaded = False
         self._health_check_task: Optional[asyncio.Task] = None
 
-        self.logger.info("DALL-E cog initialized")
+        self.logger.debug("DALL-E cog initialized")
 
     # ============ EMBED HELPERS ============
     # These methods standardize embed creation for consistent user experience
@@ -497,7 +497,7 @@ class DALLECog(commands.Cog):
                     
                     # Restart if queue has items
                     if not self.queue.empty() and not self.is_processing:
-                        self.logger.info("Restarting DALL-E processor task")
+                        self.logger.debug("Restarting DALL-E processor task")
                         self.processor_task = asyncio.create_task(self._process_queue())
                 
                 # Check for stuck queue
@@ -505,7 +505,11 @@ class DALLECog(commands.Cog):
                     if not self.processor_task or self.processor_task.done():
                         self.logger.warning("Queue stuck, restarting processor")
                         self.processor_task = asyncio.create_task(self._process_queue())
-                
+
+                # Quiet TTL sweep (replaces old midnight daily_maintenance hook)
+                if hasattr(self, "cache") and hasattr(self.cache, "cleanup"):
+                    await self.cache.cleanup()
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -587,14 +591,6 @@ class DALLECog(commands.Cog):
                 content="❌ Queue is full. Try again in a few minutes."
             )
 
-    async def daily_maintenance(self):
-        """Called by main at midnight UTC — clear expired cache entries."""
-        if not self.enabled:
-            return
-        if hasattr(self, "cache") and hasattr(self.cache, "cleanup"):
-            await self.cache.cleanup()
-        self.logger.debug("DALL-E: daily cache cleanup done")
-
     # ============ COG LIFECYCLE ============
     async def cog_load(self):
         """Initialize cog"""
@@ -603,7 +599,7 @@ class DALLECog(commands.Cog):
 
         self.processor_task = asyncio.create_task(self._process_queue())
         self._health_check_task = asyncio.create_task(self._health_check_loop())
-        self.logger.info("DALL-E cog loaded")
+        self.logger.debug("DALL-E cog loaded")
 
     def cog_unload(self):
         """Cleanup cog"""
@@ -611,7 +607,7 @@ class DALLECog(commands.Cog):
             return
         
         self._unloaded = True
-        self.logger.info("Unloading DALL-E cog...")
+        self.logger.debug("Unloading DALL-E cog...")
         
         try:
             loop = asyncio.get_event_loop()
@@ -641,7 +637,7 @@ class DALLECog(commands.Cog):
                 except asyncio.CancelledError:
                     pass
 
-            self.logger.info("DALL-E cog unloaded")
+            self.logger.debug("DALL-E cog unloaded")
         except Exception as e:
             self.logger.error(f"Async unload error: {e}")
 

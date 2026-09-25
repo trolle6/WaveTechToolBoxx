@@ -139,7 +139,7 @@ class SecretSantaCore(commands.Cog):
         self._limit_wishlist = RateLimiter(limit=SS_WISHLIST_RATE_LIMIT, window=SS_WISHLIST_RATE_WINDOW)
         self._limit_join_dm = RateLimiter(limit=SS_JOIN_DM_RATE_LIMIT, window=SS_JOIN_DM_RATE_WINDOW)
         
-        self.logger.info("Secret Santa cog initialized with persistent reply buttons")
+        self.logger.debug("Secret Santa cog initialized")
     
     async def _safe_defer(self, inter: disnake.ApplicationCommandInteraction, ephemeral: bool = True) -> bool:
         """
@@ -704,12 +704,12 @@ class SecretSantaCore(commands.Cog):
                 if role in member.roles:
                     return False
                 await member.add_roles(role, reason=reason)
-                self.logger.info(f"Added SS role '{role.name}' to {member.display_name} ({user_id})")
+                self.logger.debug("Added SS role %r to %s (%s)", role.name, member.display_name, user_id)
                 return True
             if role not in member.roles:
                 return False
             await member.remove_roles(role, reason=reason)
-            self.logger.info(f"Removed SS role '{role.name}' from {member.display_name} ({user_id})")
+            self.logger.debug("Removed SS role %r from %s (%s)", role.name, member.display_name, user_id)
             return True
         except disnake.Forbidden:
             self.logger.warning(
@@ -737,11 +737,7 @@ class SecretSantaCore(commands.Cog):
 
         self._backup_task = asyncio.create_task(self._backup_loop())
         self._scheduled_shuffle_task = asyncio.create_task(self._scheduled_shuffle_checker())
-        self.logger.info("Secret Santa cog loaded")
-        
-        # Notify Discord about cog loading
-        if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log("🎄 Secret Santa cog loaded successfully", "SUCCESS")
+        self.logger.debug("Secret Santa cog loaded")
 
     def cog_unload(self):
         """Cleanup cog (synchronous wrapper to prevent RuntimeWarning)"""
@@ -749,7 +745,7 @@ class SecretSantaCore(commands.Cog):
             return
         
         self._unloaded = True
-        self.logger.info("Unloading Secret Santa cog...")
+        self.logger.debug("Unloading Secret Santa cog...")
         
         # Do sync operations immediately
         self._save()  # Final save is sync, safe to call
@@ -762,10 +758,10 @@ class SecretSantaCore(commands.Cog):
                 loop.create_task(self._async_unload())
             else:
                 # No loop or no task, we're done
-                self.logger.info("Secret Santa cog unloaded (sync)")
+                self.logger.debug("Secret Santa cog unloaded (sync)")
         except RuntimeError:
             # No event loop available
-            self.logger.info("Secret Santa cog unloaded (no loop)")
+            self.logger.debug("Secret Santa cog unloaded (no loop)")
     
     async def _async_unload(self):
         """Async cleanup operations — persist state before cancelling background tasks."""
@@ -788,7 +784,7 @@ class SecretSantaCore(commands.Cog):
             
             # Executor is shared (bot.executor) - shutdown in main.py graceful_shutdown
             
-            self.logger.info("Secret Santa cog unloaded")
+            self.logger.debug("Secret Santa cog unloaded")
         except Exception as e:
             self.logger.error(f"Async unload error: {e}")
 
@@ -884,8 +880,8 @@ class SecretSantaCore(commands.Cog):
                                     self.logger.debug(f"Could not send stop notification to stopper {stopper_id} (DMs may be disabled)")
                         else:
                             if saved_filename and "No active event" in saved_filename:
-                                self.logger.info(
-                                    "Scheduled stop skipped — event already ended (manual /ss stop)"
+                                self.logger.debug(
+                                    "Scheduled stop skipped — event already ended"
                                 )
                             else:
                                 self.logger.error(f"Scheduled stop returned error: {saved_filename}")

@@ -143,7 +143,7 @@ def load_state_with_fallback(logger=None) -> dict:
         if logger:
             current_event = state.get("current_event")
             active = bool(current_event and current_event.get("active")) if isinstance(current_event, dict) else False
-            logger.info(f"State loaded successfully. Active event: {active}")
+            logger.debug("State loaded. Active event: %s", active)
         
         return state
         
@@ -156,11 +156,11 @@ def load_state_with_fallback(logger=None) -> dict:
     if backup_path.exists():
         try:
             if logger:
-                logger.info("Attempting to load from backup...")
+                logger.debug("Attempting to load from backup...")
             state = load_json(backup_path, get_default_state())
             state = validate_state_structure(state, logger)
             if logger:
-                logger.info("Backup state loaded successfully")
+                logger.debug("Backup state loaded successfully")
             return state
         except Exception as backup_error:
             if logger:
