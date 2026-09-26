@@ -1,3 +1,3 @@
 #!/bin/bash
-# Compat wrapper — official entrypoint is frozen startup.sh (do not edit that file).
+# Compat wrapper — prefer the stock Startup one-liner in the panel (see startup.md).
 exec bash /home/container/startup.sh

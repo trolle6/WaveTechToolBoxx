@@ -1,5 +1,5 @@
 {
-  "_comment": "WaveTechToolBoxx egg. Startup: bash startup.sh. Docs: startup.md.",
+  "_comment": "WaveTechToolBoxx egg. Stock Python startup one-liner. Docs: startup.md.",
   "meta": {
     "version": "PTDL_v2",
     "update_url": null
@@ -7,7 +7,7 @@
   "exported_at": "2026-09-26T00:00:00+00:00",
   "name": "WaveTechToolBoxx (Python)",
   "author": "wavetech",
-  "description": "WaveTechToolBoxx: bash startup.sh. AUTO_UPDATE git pull, or GIT_HARD_RESET_NUKE=1 for fetch+reset --hard to BRANCH.",
+  "description": "WaveTechToolBoxx: stock egg Startup (git pull + pip .local + python). See startup.md.",
   "features": null,
   "docker_images": {
     "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13",
@@ -16,7 +16,7 @@
     "Python 3.10": "ghcr.io/ptero-eggs/yolks:python_3.10"
   },
   "file_denylist": [],
-  "startup": "bash /home/container/startup.sh",
+  "startup": "if [[ -d .git ]] && [[ \"${AUTO_UPDATE}\" == \"1\" ]]; then git pull; fi; if [[ ! -z \"${PY_PACKAGES}\" ]]; then pip install -U --prefix .local ${PY_PACKAGES}; fi; if [[ -f /home/container/${REQUIREMENTS_FILE} ]]; then pip install -U --prefix .local -r ${REQUIREMENTS_FILE}; fi; /usr/local/bin/python /home/container/${PY_FILE}",
   "config": {
     "files": "{}",
     "startup": "{\r\n    \"done\": \"Logged in as\"\r\n}",
@@ -43,7 +43,7 @@
     },
     {
       "name": "Git Branch",
-      "description": "Kept for egg compatibility; startup always deploys origin/master.",
+      "description": "Branch used at install/clone time. Runtime Startup uses git pull on the checked-out branch.",
       "env_variable": "BRANCH",
       "default_value": "master",
       "user_viewable": true,
@@ -63,7 +63,7 @@
     },
     {
       "name": "Auto Update",
-      "description": "Hard-reset tracked files to origin/BRANCH on every start.",
+      "description": "Run git pull on every start (stock egg).",
       "env_variable": "AUTO_UPDATE",
       "default_value": "1",
       "user_viewable": true,
@@ -119,16 +119,6 @@
       "user_viewable": true,
       "user_editable": true,
       "rules": "required|string",
-      "field_type": "text"
-    },
-    {
-      "name": "Git Hard Reset Nuke",
-      "description": "Use this to hard reset the repository only when conflicts can't be resolved easily and DO A BACKUP beforehand!!!",
-      "env_variable": "GIT_HARD_RESET_NUKE",
-      "default_value": "0",
-      "user_viewable": true,
-      "user_editable": true,
-      "rules": "required|boolean",
       "field_type": "text"
     }
   ]
