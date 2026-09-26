@@ -248,11 +248,11 @@ class VoiceProcessingCog(commands.Cog):
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
         self.default_voice = "alloy"
-        # gpt-4o-mini-tts voices (tts-1 / tts-1-hd only allow 9 — no ballad/verse/marin/cedar)
+        # Voices accepted by /v1/audio/speech (API enum as of 2026-09).
+        # ballad/verse/marin/cedar are rejected with 400 even when model=gpt-4o-mini-tts.
         self.tts_model = "gpt-4o-mini-tts"
         self.available_voices = [
-            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova",
-            "onyx", "sage", "shimmer", "verse", "marin", "cedar",
+            "alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
         ]
         
         # Voice assignments (per-guild, session-based - cleared when user leaves voice)
@@ -788,6 +788,12 @@ class VoiceProcessingCog(commands.Cog):
         return chunks
 
     # ============ TTS GENERATION ============
+    def _normalize_voice(self, voice: Optional[str]) -> str:
+        """Map unknown/retired voice names onto the API-allowed set."""
+        if voice and voice in self.available_voices:
+            return voice
+        return self.default_voice
+
     def _cache_key(self, text: str, voice: str) -> str:
         """Generate cache key using SHA256 to avoid collisions"""
         # Include format in key to avoid serving wrong format from cache after format changes
@@ -824,10 +830,10 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.debug("Circuit breaker open, skipping TTS request")
             return None
 
-        voice = voice or self.default_voice
-        if voice not in self.available_voices:
-            self.logger.warning(f"Invalid voice '{voice}', using default")
-            voice = self.default_voice
+        raw_voice = voice or self.default_voice
+        voice = self._normalize_voice(raw_voice)
+        if voice != raw_voice:
+            self.logger.warning("Invalid voice %r, using %r", raw_voice, voice)
         cache_key = self._cache_key(text, voice)
 
         # Check cache
