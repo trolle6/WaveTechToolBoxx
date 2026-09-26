@@ -16,6 +16,7 @@ FEATURES:
 
 COMMANDS:
 - /tts stats - View performance metrics
+- /tts join - Join your voice channel (manual UDP test)
 - /tts disconnect - Force disconnect (admin)
 - /tts clear - Clear TTS queue (admin)
 - /tts status - Check voice channel status
