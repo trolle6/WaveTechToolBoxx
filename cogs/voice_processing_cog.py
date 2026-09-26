@@ -1387,8 +1387,8 @@ class VoiceProcessingCog(commands.Cog):
                     except (asyncio.CancelledError, Exception):
                         pass
                     raise asyncio.TimeoutError()
-                # Channel emptied mid-handshake — stop waiting
-                if not self._has_humans_in_voice(channel):
+                # Stop waiting on shutdown or empty channel
+                if self._shutdown.is_set() or not self._has_humans_in_voice(channel):
                     connect_task.cancel()
                     try:
                         await connect_task
