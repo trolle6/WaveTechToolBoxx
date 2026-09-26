@@ -45,7 +45,8 @@ load_dotenv("config.env", override=True)
 # Optional (CONFIG_DEFAULTS below or in config.env):
 #   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
 #                              (missing/invalid → warn; guild admins/owner still pass)
-#   TTS_CHANNEL_ID         - voice_processing: restrict TTS to one text channel (None = all)
+#   TTS_CHANNEL_ID         - voice_processing: restrict TTS to this text channel ID (overrides name)
+#   TTS_CHANNEL_NAME       - voice_processing: restrict TTS by channel name (default: no-mic-bot; "all" = every channel)
 #   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
 #   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
 # Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
@@ -68,6 +69,7 @@ CONFIG_DEFAULTS = {
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
     "TTS_CHANNEL_ID": None,
+    "TTS_CHANNEL_NAME": "no-mic-bot",  # set to "all" to listen in every text channel
     "DISCORD_MODERATOR_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }

@@ -286,23 +286,67 @@ class VoiceProcessingCog(commands.Cog):
         self._shutdown = asyncio.Event()
         self._unloaded = False
 
-        # Convert channel ID to int (config loads as string from env)
-        # TTS text-channel filter uses OPTIONAL TTS_CHANNEL_ID only.
-        # Do NOT reuse DISCORD_CHANNEL_ID here — that ID is for bot announcements /
-        # Secret Santa fallbacks, and gating TTS on it makes voice appear "always broken"
-        # whenever people chat in any other channel while in VC.
+        # TTS text-channel filter — do NOT reuse DISCORD_CHANNEL_ID (announcements / SS).
+        # Default: only #no-mic-bot. Override with TTS_CHANNEL_ID or TTS_CHANNEL_NAME=all.
         channel_id_raw = getattr(bot.config, "TTS_CHANNEL_ID", None)
+        name_raw = getattr(bot.config, "TTS_CHANNEL_NAME", "no-mic-bot")
+        self.allowed_channel_name = (str(name_raw).strip() if name_raw not in (None, "") else "no-mic-bot")
+        self.listen_all_text_channels = self.allowed_channel_name.lower() in ("all", "*", "any")
         try:
             self.allowed_channel = int(channel_id_raw) if channel_id_raw not in (None, "") else None
-            if self.allowed_channel:
-                self.logger.debug("TTS restricted to text channel: %s", self.allowed_channel)
-            else:
-                self.logger.debug("TTS_CHANNEL_ID not set — TTS listens in all text channels")
         except (ValueError, TypeError) as e:
             self.logger.error(f"Failed to convert TTS_CHANNEL_ID to int: {repr(channel_id_raw)} - {e}")
             self.allowed_channel = None
 
+        if self.allowed_channel:
+            self.logger.info("TTS only reads text channel ID %s", self.allowed_channel)
+        elif self.listen_all_text_channels:
+            self.logger.warning("TTS_CHANNEL_NAME=all — TTS listens in every text channel")
+        else:
+            self.logger.info("TTS only reads #%s", self.allowed_channel_name)
+
         self._warn_if_docker_bridge_blocks_voice()
+
+    def _is_allowed_tts_text_channel(self, channel) -> bool:
+        """True if this text channel may trigger TTS."""
+        if self.listen_all_text_channels and self.allowed_channel is None:
+            return True
+        if self.allowed_channel is not None:
+            return getattr(channel, "id", None) == self.allowed_channel
+        name = (getattr(channel, "name", None) or "").lower()
+        if name == self.allowed_channel_name.lower():
+            # Cache snowflake so later checks are ID-exact across renames in the same process
+            cid = getattr(channel, "id", None)
+            if cid is not None:
+                self.allowed_channel = cid
+            return True
+        return False
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Resolve #no-mic-bot (or TTS_CHANNEL_NAME) to an ID once guilds are available."""
+        if self.allowed_channel is not None or self.listen_all_text_channels:
+            return
+        for guild in self.bot.guilds:
+            ch = disnake.utils.get(guild.text_channels, name=self.allowed_channel_name)
+            if ch is None:
+                ch = disnake.utils.find(
+                    lambda c: (c.name or "").lower() == self.allowed_channel_name.lower(),
+                    guild.text_channels,
+                )
+            if ch is not None:
+                self.allowed_channel = ch.id
+                self.logger.info(
+                    "TTS locked to #%s (%s) in guild %s",
+                    ch.name,
+                    ch.id,
+                    guild.name,
+                )
+                return
+        self.logger.warning(
+            "TTS channel #%s not found yet — will match by name when messages arrive",
+            self.allowed_channel_name,
+        )
 
     def _docker_bridge_ip(self) -> str | None:
         """Return container IPv4 if it looks like Docker bridge (172.16–31.x), else None."""
@@ -1820,8 +1864,8 @@ class VoiceProcessingCog(commands.Cog):
                 return False
             self._processed_messages.add(message_key)
 
-        # Check channel restriction
-        if self.allowed_channel is not None and message.channel.id != self.allowed_channel:
+        # Check channel restriction (default: #no-mic-bot only)
+        if not self._is_allowed_tts_text_channel(message.channel):
             return False
 
         # Check voice
