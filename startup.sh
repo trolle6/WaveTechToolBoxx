@@ -24,6 +24,7 @@ git reset --hard HEAD || true
 git checkout -f -B master origin/master
 git reset --hard origin/master
 
+# Do NOT exclude startup.sh — an old untracked soft-pull startup.sh must be replaced
 git clean -fd \
   -e config.env \
   -e .local \
@@ -31,8 +32,7 @@ git clean -fd \
   -e cogs/secret_santa_state.json \
   -e cogs/distributed_files \
   -e cogs/distributed_files_metadata.json \
-  -e __pycache__ \
-  -e startup.sh || true
+  -e __pycache__ || true
 
 export GIT_BRANCH_ACTUAL=master
 echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"
