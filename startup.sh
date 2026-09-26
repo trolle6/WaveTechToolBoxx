@@ -14,7 +14,9 @@ if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then
     git reset --hard "origin/${BRANCH_NAME}"
     echo "Deployed: branch=$(git rev-parse --abbrev-ref HEAD) commit=$(git rev-parse --short HEAD)"
   else
-    git pull -q
+    BRANCH_NAME="${BRANCH:-master}"
+    git fetch origin "${BRANCH_NAME}" --prune -q 2>/dev/null || true
+    git pull -q --ff-only origin "${BRANCH_NAME}" 2>/dev/null || git pull -q
   fi
 fi
 

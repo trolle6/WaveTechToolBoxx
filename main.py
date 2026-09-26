@@ -64,7 +64,7 @@ CONFIG_DEFAULTS = {
     "MAX_QUEUE_SIZE": 50,
     "RATE_LIMIT_REQUESTS": 15,
     "RATE_LIMIT_WINDOW": 60,
-    "VOICE_TIMEOUT": 30,  # Increased from 10 to 30 for unstable networks (Hetzner, etc.)
+    "VOICE_TIMEOUT": 45,  # Flaky Ptero UDP needs headroom; fail-fast retries use this per attempt
     "AUTO_DISCONNECT_TIMEOUT": 300,
     "TTS_ROLE_ID": None,
     "TTS_CHANNEL_ID": None,

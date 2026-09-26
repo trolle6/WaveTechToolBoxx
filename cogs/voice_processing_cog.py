@@ -106,6 +106,10 @@ AUDIO_START_CHECK_INITIAL_DELAYS = 3  # Number of initial attempts with longer d
 VOICE_DISCONNECT_DELAY = 3.0  # Seconds to wait before checking voice channel again (avoids race conditions)
 VOICE_CLEANUP_DELAY = 0.3  # Seconds to wait after cleanup before reconnecting
 VOICE_CONNECTION_RETRY_DELAY = 0.8  # Seconds between connection retry attempts
+# After a UDP handshake timeout, wait longer so Discord / NAT can clear half-open state.
+VOICE_UDP_TIMEOUT_RETRY_DELAY = 2.0
+# Cap timeout-retries so flaky Ptero can recover without 4×120s hangs.
+VOICE_UDP_TIMEOUT_MAX_ATTEMPTS = 3
 
 # Discord DAVE (E2EE voice): packets sent before the MLS key ratchet is ready are inaudible to clients.
 DAVE_ENCRYPT_READY_TIMEOUT = 20.0  # Max seconds to wait after connecting / before play
@@ -1197,15 +1201,13 @@ class VoiceProcessingCog(commands.Cog):
                 [r.name for r in getattr(me, "roles", [])],
             )
             if not perms.connect and not perms.administrator:
-                self.logger.warning(
-                    "Computed Connect=False for %r (roles=%s) — still attempting join; "
-                    "if Discord UI shows Connect allowed, ignore this and check the "
-                    "join error below / bot role channel overwrites",
+                self.logger.debug(
+                    "Computed Connect=False for %r (roles=%s) — still attempting join",
                     channel.name,
                     [r.name for r in getattr(me, "roles", [])],
                 )
             if not perms.speak and not perms.administrator:
-                self.logger.warning(
+                self.logger.debug(
                     "Computed Speak=False in %r — TTS audio may be silent",
                     channel.name,
                 )
@@ -1243,10 +1245,11 @@ class VoiceProcessingCog(commands.Cog):
             vc = None
             await asyncio.sleep(VOICE_CLEANUP_DELAY)
 
-        # "Already connected" / DAVE-not-ready can need a couple retries.
-        # UDP handshake TimeoutError will NOT recover on retry 2–4 — on Pterodactyl that
-        # just burns 4 × VOICE_TIMEOUT (e.g. 8 minutes) and leaves orphaned Event.wait tasks.
+        # Already-connected / DAVE-not-ready need a couple retries. UDP timeouts on
+        # flaky Ptero hosts sometimes succeed on attempt 2–3 after a clean teardown —
+        # but cap attempts so we never burn 4×120s again.
         max_attempts = 4
+        udp_timeouts = 0
         for attempt in range(max_attempts):
             # Abort early if everyone left while we were retrying
             if not self._has_humans_in_voice(channel):
@@ -1314,17 +1317,23 @@ class VoiceProcessingCog(commands.Cog):
                         return None
             except asyncio.TimeoutError:
                 await self._cleanup_stale_voice_client(guild)
-                # One TimeoutError on the UDP handshake means this host cannot reach
-                # Discord voice. Retrying 3 more times (esp. with VOICE_TIMEOUT=120)
-                # only produces blank TimeoutErrors + "Task was destroyed but it is pending".
-                self.logger.critical(
-                    f"VOICE UDP HANDSHAKE TIMED OUT on '{channel.name}' "
-                    f"after {timeout + 5}s (attempt {attempt + 1}).\n"
-                    f"  Timeline matches a blackholed Discord voice UDP path — not missing perms.\n"
-                    f"  Same bot connects in ~1s on NAS+host network; Pterodactyl often cannot.\n"
-                    f"  Not retrying further timeout loops (avoids multi-minute hangs + orphaned tasks).\n"
-                    f"  Fix: run TTS on NAS with network_mode: host, or get the host to allow "
-                    f"outbound UDP to Discord voice."
+                udp_timeouts += 1
+                if udp_timeouts < VOICE_UDP_TIMEOUT_MAX_ATTEMPTS and attempt < max_attempts - 1:
+                    self.logger.info(
+                        "Voice UDP handshake to %r timed out after %ss "
+                        "(try %s/%s) — cleaning up and retrying",
+                        channel.name,
+                        timeout,
+                        udp_timeouts,
+                        VOICE_UDP_TIMEOUT_MAX_ATTEMPTS,
+                    )
+                    await asyncio.sleep(VOICE_UDP_TIMEOUT_RETRY_DELAY)
+                    continue
+                self.logger.warning(
+                    "Voice UDP handshake to %r failed after %s timeout(s). "
+                    "Host may be blocking Discord voice UDP — try again, or use host networking.",
+                    channel.name,
+                    udp_timeouts,
                 )
                 return None
             except OSError as e:
@@ -1363,11 +1372,13 @@ class VoiceProcessingCog(commands.Cog):
         On broken hosts (typical Pterodactyl), connect hangs silently until timeout.
         Progress logs make that visible instead of looking like the bot 'never tried'.
         """
+        # reconnect=False: we own retries after a clean teardown (reconnect=True orphans tasks).
         connect_task = asyncio.create_task(
-            channel.connect(timeout=timeout, reconnect=True)
+            channel.connect(timeout=timeout, reconnect=False)
         )
         start = time.monotonic()
         hard_deadline = timeout + 5
+        logged_wait = False
         try:
             while True:
                 done, _ = await asyncio.wait({connect_task}, timeout=5.0)
@@ -1390,12 +1401,25 @@ class VoiceProcessingCog(commands.Cog):
                         pass
                     await self._cleanup_stale_voice_client(channel.guild)
                     raise asyncio.CancelledError()
-                self.logger.warning(
-                    f"Still waiting for Discord voice UDP handshake to '{channel.name}' "
-                    f"({elapsed:.0f}s / {timeout}s, attempt {attempt + 1}/{max_attempts}). "
-                    f"If this stalls until timeout, the HOST cannot reach Discord voice "
-                    f"(common on Pterodactyl). Same codebase connects in ~1s on NAS+host network."
-                )
+                if not logged_wait:
+                    self.logger.info(
+                        "Waiting for voice UDP handshake to %r "
+                        "(%ss timeout, attempt %s/%s)...",
+                        channel.name,
+                        timeout,
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    logged_wait = True
+                else:
+                    self.logger.debug(
+                        "Still waiting for voice UDP to %r (%.0fs / %ss, attempt %s/%s)",
+                        channel.name,
+                        elapsed,
+                        timeout,
+                        attempt + 1,
+                        max_attempts,
+                    )
         except Exception:
             if not connect_task.done():
                 connect_task.cancel()
