@@ -17,9 +17,7 @@ Confirm in logs: `Deployed: branch=... commit=...`, then `Starting ...@...` and 
 
 ## Pterodactyl
 
-Stock **python generic** egg startup (`git pull` only, no `PYTHONPATH`) is wrong for
-this bot. Paste the command from `PTERODACTYL_STARTUP.md`, or import
-`pterodactyl-egg.wavetech.json`. TTS still needs NAS + host networking.
+See `startup.md`. TTS needs NAS + host networking.
 
 ## Docker image
 

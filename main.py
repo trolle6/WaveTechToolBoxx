@@ -999,8 +999,8 @@ def _log_deploy_identity() -> None:
         logger.critical(
             "STALE DEPLOY: voice cog is outdated while main.py is newer. "
             "Pterodactyl is NOT hard-resetting to origin/master. "
-            "Replace the Startup command with PTERODACTYL_STARTUP.md (FORCE RESET) "
-            "and restart. TTS on Ptero still needs NAS + host networking."
+            "Turn GIT_HARD_RESET_NUKE on in the panel (see startup.md) and restart. "
+            "TTS on Ptero still needs NAS + host networking."
         )
     if branch == "unknown":
         logger.warning(

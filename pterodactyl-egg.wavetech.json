@@ -1,5 +1,5 @@
 {
-  "_comment": "WaveTechToolBoxx \u2014 python generic egg with hard-reset startup + PYTHONPATH. Import as a custom egg, or just paste the startup string from PTERODACTYL_STARTUP.md into an existing server.",
+  "_comment": "WaveTechToolBoxx egg. Startup: bash startup.sh. Docs: startup.md.",
   "meta": {
     "version": "PTDL_v2",
     "update_url": null
