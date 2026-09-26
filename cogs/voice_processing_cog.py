@@ -2270,9 +2270,8 @@ class VoiceProcessingCog(commands.Cog):
             await inter.edit_original_response(
                 content=(
                     f"Could not join **{channel.name}**. "
-                    "If the log says Connect denied: channel → Permissions → bot → "
-                    "Allow **Connect** + **Speak**. "
-                    "(Same host already joined Public — this is usually channel perms, not UDP.)"
+                    "Allow **View Channel** + **Connect** + **Speak** for the bot on that VC "
+                    "(@everyone View deny makes Connect overwrites useless)."
                 )
             )
 
