@@ -10,11 +10,13 @@ if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then git pull; fi; if [[ ! -z
 
 ## Voice / TTS on Pterodactyl
 
-Discord voice needs outbound UDP. Many Ptero nodes use Docker **bridge** NAT — slash commands work, voice handshake hangs. Same bot joins in ~1s on NAS with host networking.
+Bot joins **whatever VC the speaking author is in**.
 
-1. In Discord: channel → Permissions → bot role → **Connect** + **Speak** allow on the VC.
-2. Test: `/tts join` while you are in the VC.
-3. If UDP still times out: run TTS on a host with `network_mode: host` (see `DEPLOYMENT.md`), or ask the node admin to allow outbound Discord voice UDP.
+This host already proved Discord voice UDP works (`Connected to Public`). If **WaveTech A** (or another VC) hangs/times out and the log says Connect denied, fix that channel’s permissions — it is not a generic “Ptero can’t do UDP” failure.
+
+1. Channel → Permissions → add the bot (or its role) → Allow **Connect** + **Speak**.
+2. Or give the bot **Manage Roles** so it can self-grant a member overwrite on join.
+3. Test: `/tts join` while you are in that VC.
 
 ## Variables
 

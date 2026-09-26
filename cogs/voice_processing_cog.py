@@ -2210,9 +2210,10 @@ class VoiceProcessingCog(commands.Cog):
         else:
             await inter.edit_original_response(
                 content=(
-                    f"Could not finish voice UDP join to **{channel.name}**. "
-                    "Grant the bot Connect+Speak on that channel. On Docker bridge / "
-                    "Pterodactyl, host networking is usually required for Discord voice."
+                    f"Could not join **{channel.name}**. "
+                    "If the log says Connect denied: channel → Permissions → bot → "
+                    "Allow **Connect** + **Speak**. "
+                    "(Same host already joined Public — this is usually channel perms, not UDP.)"
                 )
             )
 
