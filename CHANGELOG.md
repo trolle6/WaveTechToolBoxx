@@ -12,6 +12,7 @@
 - Pterodactyl: discard dirty local tracked files (`checkout -f` / `reset --hard`) so “commit or stash before merge” cannot block `origin/master`
 - Pterodactyl: repo `startup.sh` force-resets to `origin/master` (old local soft-`git pull` startup.sh was the abort)
 - Pterodactyl: panel/bootstrap **`rm -f startup.sh`** before fetch — old untracked soft-pull script was blocking its own replacement
+- Pterodactyl: **`startup.sh` FROZEN** — official panel command (`git pull` + pip `.local` + python); do not modify that file
 
 ## 2026-05 — Secret Santa simplify & cleanup
 

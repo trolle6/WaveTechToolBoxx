@@ -1,66 +1,49 @@
-# Pterodactyl — READ THIS
+# Pterodactyl startup
 
-## Why you are stuck on `7a72b8b`
+## `startup.sh` is FROZEN
 
-Your panel Startup is effectively:
+The file **`startup.sh` in this repo is the official startup command.**
+**Do not change it.** Future work must leave `startup.sh` exactly as committed.
 
-```text
-source startup.sh   ← OLD local file that only does soft `git pull`
+Panel Startup field (or console):
+
+```bash
+bash /home/container/startup.sh
 ```
 
-That old file:
+(or `source startup.sh` — same file)
 
-1. Runs `git pull`
-2. Aborts on dirty `main.py` / `deploy.py`
-3. Also aborts because untracked `startup.sh` blocks merge of the **new** `startup.sh`
-4. Then starts the bot anyway on ancient code
+## Required panel variables
 
-**GitHub is fine. Your container never installs it.**
+| Variable | Value |
+|---|---|
+| `AUTO_UPDATE` | `1` |
+| `BRANCH` | `master` |
+| `PY_FILE` | `main.py` |
+| `REQUIREMENTS_FILE` | `requirements.txt` |
+| Docker image | Python 3.12 or 3.13 |
 
-## STOP. Paste this in the console NOW
+Secrets stay in Environment / `config.env`.
 
-Do **not** type `source startup.sh`. Paste **all** of this:
+## One-time unblock (only if soft pull aborts)
+
+If logs show `Please commit your changes or stash them before you merge`,
+the working tree is dirty. Run **once** in the console (this is not a change to
+`startup.sh`):
 
 ```bash
 cd /home/container
-rm -f startup.sh
 git fetch origin master --prune
-git reset --hard HEAD
+git reset --hard origin/master
 git checkout -f -B master origin/master
 git reset --hard origin/master
-export GIT_BRANCH_ACTUAL=master
-echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"
 bash startup.sh
 ```
 
-Success looks like:
-
-```text
-FORCE RESET → origin/master (discard local tracked changes)
-Deployed: branch=master commit=472d89a   # or newer — NOT 7a72b8b
-Starting master@...
-Loaded 4/4 cogs
-```
-
-## Then fix the panel Startup field
-
-Replace whatever is there (`source startup.sh` or stock `git pull`) with:
-
-```bash
-cd /home/container; rm -f startup.sh; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"; exec bash /home/container/startup.sh
-```
-
-Save → Restart.
-
-## Log cheat sheet
-
-| You see | Means |
-|---|---|
-| `Updating 7a72b8b..` + stash/merge abort | Still on **old** soft-pull `startup.sh` |
-| `untracked ... startup.sh` would be overwritten | Old local `startup.sh` blocking the new one — `rm -f startup.sh` first |
-| `Starting unknown@7a72b8b` | Update never applied |
-| `FORCE RESET → origin/master` | Good — new path |
+After that, with a clean tree and `AUTO_UPDATE=1`, `startup.sh`’s `git pull` can
+update normally.
 
 ## TTS
 
-Voice `TimeoutError` on Ptero is host UDP. Use NAS + `network_mode: host` for TTS.
+Voice on typical Pterodactyl hosts still fails (Discord UDP). Use NAS +
+`network_mode: host` for TTS.

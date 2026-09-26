@@ -23,7 +23,7 @@ Runtime JSON under `cogs/` (Secret Santa state, file metadata) is created automa
 |--------|--------|
 | Docker | `Dockerfile`, `docker-entrypoint.sh` |
 | TrueNAS | `docker-compose.truenas.example.yml`, `truenas-start.sh` — TTS needs `network_mode: host` |
-| Pterodactyl | `PTERODACTYL_STARTUP.md` (+ optional `pterodactyl-egg.wavetech.json`) |
+| Pterodactyl | Frozen `startup.sh` + `PTERODACTYL_STARTUP.md` (+ optional egg JSON) |
 | Bare metal | `deploy.sh` → `deploy.py` |
 
 See `DEPLOYMENT.md` and `SECRET_SANTA_COMMANDS.md`. Privacy: `PRIVACY.md`.
