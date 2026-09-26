@@ -13,7 +13,13 @@ Use `docker-compose.truenas.example.yml` as the template.
 - Startup runs `truenas-start.sh` → `docker-entrypoint.sh` → `main.py`.
 - Prefer `VOICE_TIMEOUT=30` (or higher). `10` is too short for the voice handshake.
 
-Confirm in logs: `Deploy identity: ... ss_layout=split` and `Deployed: branch=... commit=...`.
+Confirm in logs: `Deployed: branch=... commit=...`, then `Starting ...@...` and `Loaded 4/4 cogs`.
+
+## Pterodactyl
+
+Stock **python generic** egg startup (`git pull` only, no `PYTHONPATH`) is wrong for
+this bot. Paste the command from `PTERODACTYL_STARTUP.md`, or import
+`pterodactyl-egg.wavetech.json`. TTS still needs NAS + host networking.
 
 ## Docker image
 

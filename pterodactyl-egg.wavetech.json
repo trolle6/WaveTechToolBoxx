@@ -1,0 +1,125 @@
+{
+  "_comment": "WaveTechToolBoxx — python generic egg with hard-reset startup + PYTHONPATH. Import as a custom egg, or just paste the startup string from PTERODACTYL_STARTUP.md into an existing server.",
+  "meta": {
+    "version": "PTDL_v2",
+    "update_url": null
+  },
+  "exported_at": "2026-09-26T00:00:00+00:00",
+  "name": "WaveTechToolBoxx (Python)",
+  "author": "wavetech",
+  "description": "Python generic egg tuned for WaveTechToolBoxx: hard-reset to BRANCH on start, pip --prefix .local with PYTHONPATH, main.py.",
+  "features": null,
+  "docker_images": {
+    "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13",
+    "Python 3.12": "ghcr.io/ptero-eggs/yolks:python_3.12",
+    "Python 3.11": "ghcr.io/ptero-eggs/yolks:python_3.11",
+    "Python 3.10": "ghcr.io/ptero-eggs/yolks:python_3.10"
+  },
+  "file_denylist": [],
+  "startup": "cd /home/container; if [[ -d .git ]] && [[ \"{{AUTO_UPDATE}}\" == \"1\" ]]; then BRANCH_NAME=\"{{BRANCH}}\"; if [[ -z \"${BRANCH_NAME}\" || \"${BRANCH_NAME}\" == \"{{BRANCH}}\" ]]; then BRANCH_NAME=master; fi; echo \"Updating origin/${BRANCH_NAME} (hard reset of tracked files only)...\"; git fetch origin \"${BRANCH_NAME}\" --prune; git checkout -B \"${BRANCH_NAME}\" \"origin/${BRANCH_NAME}\"; git reset --hard \"origin/${BRANCH_NAME}\"; export GIT_BRANCH_ACTUAL=\"$(git rev-parse --abbrev-ref HEAD)\"; echo \"Deployed: branch=${GIT_BRANCH_ACTUAL} commit=$(git rev-parse --short HEAD)\"; fi; if [[ ! -z \"{{PY_PACKAGES}}\" ]]; then pip install -U --prefix .local {{PY_PACKAGES}}; fi; if [[ -f /home/container/${REQUIREMENTS_FILE} ]]; then pip install -U --prefix .local -r ${REQUIREMENTS_FILE}; fi; export PATH=\"/home/container/.local/bin:${PATH:-}\"; for d in /home/container/.local/lib/python*/site-packages; do [ -d \"$d\" ] && export PYTHONPATH=\"${d}${PYTHONPATH:+:$PYTHONPATH}\"; done; exec /usr/local/bin/python /home/container/{{PY_FILE}}",
+  "config": {
+    "files": "{}",
+    "startup": "{\r\n    \"done\": \"Logged in as\"\r\n}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\n# WaveTechToolBoxx install — clone BRANCH into /mnt/server, pip --prefix .local\napt update\napt install -y git curl jq file unzip make gcc g++ libtool\n\nmkdir -p /mnt/server\ncd /mnt/server\n\nif [ \"${USER_UPLOAD}\" == \"true\" ] || [ \"${USER_UPLOAD}\" == \"1\" ]; then\n    echo -e \"assuming user knows what they are doing have a good day.\"\n    exit 0\nfi\n\nif [[ ${GIT_ADDRESS} != *.git ]]; then\n    GIT_ADDRESS=${GIT_ADDRESS}.git\nfi\n\nif [ -z \"${USERNAME}\" ] && [ -z \"${ACCESS_TOKEN}\" ]; then\n    echo -e \"using anon api call\"\nelse\n    GIT_ADDRESS=\"https://${USERNAME}:${ACCESS_TOKEN}@$(echo -e ${GIT_ADDRESS} | cut -d/ -f3-)\"\nfi\n\nif [ \"$(ls -A /mnt/server)\" ]; then\n    echo -e \"/mnt/server directory is not empty.\"\n    if [ -d .git ]; then\n        echo -e \".git directory exists\"\n        if [ -f .git/config ]; then\n            ORIGIN=$(git config --get remote.origin.url)\n        else\n            echo -e \"files found with no git config\"\n            echo -e \"closing out without touching things to not break anything\"\n            exit 10\n        fi\n    fi\n\n    if [ \"${ORIGIN}\" == \"${GIT_ADDRESS}\" ]; then\n        BRANCH_NAME=\"${BRANCH:-master}\"\n        echo \"fetch + hard reset to origin/${BRANCH_NAME}\"\n        git fetch origin \"${BRANCH_NAME}\" --prune\n        git checkout -B \"${BRANCH_NAME}\" \"origin/${BRANCH_NAME}\"\n        git reset --hard \"origin/${BRANCH_NAME}\"\n    fi\nelse\n    echo -e \"/mnt/server is empty.\\ncloning files into repo\"\n    if [ -z \"${BRANCH}\" ]; then\n        echo -e \"cloning default branch\"\n        git clone ${GIT_ADDRESS} .\n    else\n        echo -e \"cloning ${BRANCH}\"\n        git clone --single-branch --branch ${BRANCH} ${GIT_ADDRESS} .\n    fi\nfi\n\nexport HOME=/mnt/server\n\necho \"Installing python requirements into .local\"\nif [[ ! -z ${PY_PACKAGES} ]]; then\n    pip install -U --prefix .local ${PY_PACKAGES}\nfi\n\nif [ -f /mnt/server/${REQUIREMENTS_FILE:-requirements.txt} ]; then\n    pip install -U --prefix .local -r ${REQUIREMENTS_FILE:-requirements.txt}\nfi\n\necho -e \"install complete\"\nexit 0",
+      "container": "ghcr.io/ptero-eggs/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "name": "Git Repo Address",
+      "description": "Git repo to clone\n\nI.E. https://github.com/trolle6/WaveTechToolBoxx",
+      "env_variable": "GIT_ADDRESS",
+      "default_value": "https://github.com/trolle6/WaveTechToolBoxx",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string",
+      "field_type": "text"
+    },
+    {
+      "name": "Git Branch",
+      "description": "Branch to hard-reset to on each start when Auto Update is on. Use master.",
+      "env_variable": "BRANCH",
+      "default_value": "master",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string",
+      "field_type": "text"
+    },
+    {
+      "name": "User Uploaded Files",
+      "description": "Skip install clone if uploading files manually.\n\n0 = false (default)\n1 = true",
+      "env_variable": "USER_UPLOAD",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|boolean",
+      "field_type": "text"
+    },
+    {
+      "name": "Auto Update",
+      "description": "Hard-reset tracked files to origin/BRANCH on every start.",
+      "env_variable": "AUTO_UPDATE",
+      "default_value": "1",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|boolean",
+      "field_type": "text"
+    },
+    {
+      "name": "App py file",
+      "description": "Entry point.",
+      "env_variable": "PY_FILE",
+      "default_value": "main.py",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string",
+      "field_type": "text"
+    },
+    {
+      "name": "Additional Python packages",
+      "description": "Extra pip packages (space-separated). Usually leave empty.",
+      "env_variable": "PY_PACKAGES",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string",
+      "field_type": "text"
+    },
+    {
+      "name": "Git Username",
+      "description": "Username for private git auth (optional).",
+      "env_variable": "USERNAME",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string",
+      "field_type": "text"
+    },
+    {
+      "name": "Git Access Token",
+      "description": "PAT for private git auth (optional).",
+      "env_variable": "ACCESS_TOKEN",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string",
+      "field_type": "text"
+    },
+    {
+      "name": "Requirements file",
+      "description": "Requirements filename in the repo root.",
+      "env_variable": "REQUIREMENTS_FILE",
+      "default_value": "requirements.txt",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string",
+      "field_type": "text"
+    }
+  ]
+}
