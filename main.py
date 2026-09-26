@@ -886,13 +886,23 @@ COG_EXTENSIONS = [
 def load_cogs() -> int:
     """Load all cogs and return count. Failures are logged per extension (not silent)."""
     loaded = 0
+    root = Path(__file__).resolve().parent
     for cog in COG_EXTENSIONS:
+        cog_path = root / Path(*cog.split(".")).with_suffix(".py")
+        if not cog_path.is_file():
+            logger.error(
+                "Failed to load %s — file missing on disk: %s "
+                "(stale/partial deploy; Ptero must FORCE RESET to origin/master)",
+                cog,
+                cog_path,
+            )
+            continue
         try:
             bot.load_extension(cog)
             logger.debug("Loaded %s", cog)
             loaded += 1
         except Exception:
-            logger.exception("Failed to load %s", cog)
+            logger.exception("Failed to load %s (path=%s)", cog, cog_path)
     return loaded
 
 
@@ -978,6 +988,25 @@ def _log_deploy_identity() -> None:
         )
         return
     logger.info("Starting %s@%s", branch, commit)
+
+    # Mixed/partial Ptero deploys: new main.py + old cogs (soft git pull).
+    voice_py = root / "cogs" / "voice_processing_cog.py"
+    try:
+        voice_src = voice_py.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        voice_src = ""
+    if "Allowed channel configured" in voice_src:
+        logger.critical(
+            "STALE DEPLOY: voice cog is outdated while main.py is newer. "
+            "Pterodactyl is NOT hard-resetting to origin/master. "
+            "Replace the Startup command with PTERODACTYL_STARTUP.md (FORCE RESET) "
+            "and restart. TTS on Ptero still needs NAS + host networking."
+        )
+    if branch == "unknown":
+        logger.warning(
+            "Branch unknown — panel startup did not export GIT_BRANCH_ACTUAL "
+            "(still on stock egg git pull?)"
+        )
 
 
 # ============ MAIN ============

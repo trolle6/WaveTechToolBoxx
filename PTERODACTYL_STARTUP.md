@@ -1,114 +1,95 @@
 # Pterodactyl startup (python generic egg)
 
-The stock egg startup is **not enough** for this bot. It only runs `git pull`
-(soft, can leave you on old / dirty code) and installs into `.local` **without**
-putting that on `PYTHONPATH` — so imports fail or you keep running stale files.
+## Read this if logs still look “old”
 
-Use the startup below. Paste it into the server **Startup** command (replaces the
-egg default entirely). Secrets stay in Environment / `config.env` — never in this
-command.
+Your console must show **`Deployed: branch=master commit=…`** and a **recent**
+commit (currently `9ca62fb` or newer), then `Starting master@…`.
+
+If you see something like `Starting unknown@7a72b8b…` plus INFO spam
+(`TTS enabled`, `FFmpeg found`, `Allowed channel configured`) — **the panel is
+still on the stock egg startup** (soft `git pull`). GitHub `master` never made it
+onto the server. Paste the command below again, save, **restart**.
+
+Voice `TimeoutError` on Pterodactyl is **not** fixed by startup. Discord voice UDP
+does not work on typical Ptero hosts — use NAS + `network_mode: host` for TTS.
 
 ## Panel variables
 
 | Variable | Value |
 |---|---|
-| Docker image | **Python 3.12** (or 3.11/3.13). Not 3.8/3.9. |
-| `AUTO_UPDATE` | `1` |
+| Docker image | **Python 3.12** or **3.13** (not 3.8/3.9) |
 | `BRANCH` | `master` |
 | `PY_FILE` | `main.py` |
 | `REQUIREMENTS_FILE` | `requirements.txt` |
-| `GIT_ADDRESS` | your repo URL (used on **Reinstall**) |
-| `USER_UPLOAD` | `0` |
+| `AUTO_UPDATE` | `1` (unused by our startup; set anyway) |
+| `GIT_ADDRESS` | `https://github.com/trolle6/WaveTechToolBoxx` (Reinstall) |
 
-Bot secrets (`DISCORD_TOKEN`, `OPENAI_API_KEY`, channel IDs, optional
-`VOICE_TIMEOUT=30`, …) → **Environment** and/or `config.env` in `/home/container`.
+Secrets → Environment / `config.env`. Never put tokens in the startup command.
 
-## Startup command (paste this)
+## Startup command (replace the egg default entirely)
 
-One line (panel-friendly):
+**Always** hard-resets tracked files (does not depend on `AUTO_UPDATE`), then runs
+`ptero-start.sh` from the repo for pip + `PYTHONPATH`.
+
+One line (paste into Startup):
 
 ```bash
-cd /home/container; if [[ -d .git ]] && [[ "{{AUTO_UPDATE}}" == "1" ]]; then BRANCH_NAME="{{BRANCH}}"; if [[ -z "${BRANCH_NAME}" || "${BRANCH_NAME}" == "{{BRANCH}}" ]]; then BRANCH_NAME=master; fi; echo "Updating origin/${BRANCH_NAME} (hard reset of tracked files only)..."; git fetch origin "${BRANCH_NAME}" --prune; git checkout -B "${BRANCH_NAME}" "origin/${BRANCH_NAME}"; git reset --hard "origin/${BRANCH_NAME}"; export GIT_BRANCH_ACTUAL="$(git rev-parse --abbrev-ref HEAD)"; echo "Deployed: branch=${GIT_BRANCH_ACTUAL} commit=$(git rev-parse --short HEAD)"; fi; if [[ ! -z "{{PY_PACKAGES}}" ]]; then pip install -U --prefix .local {{PY_PACKAGES}}; fi; if [[ -f /home/container/${REQUIREMENTS_FILE} ]]; then pip install -U --prefix .local -r ${REQUIREMENTS_FILE}; fi; export PATH="/home/container/.local/bin:${PATH:-}"; for d in /home/container/.local/lib/python*/site-packages; do [ -d "$d" ] && export PYTHONPATH="${d}${PYTHONPATH:+:$PYTHONPATH}"; done; exec /usr/local/bin/python /home/container/{{PY_FILE}}
+cd /home/container; BRANCH_NAME="{{BRANCH}}"; if [[ -z "${BRANCH_NAME}" || "${BRANCH_NAME}" == "{{BRANCH}}" ]]; then BRANCH_NAME=master; fi; if [[ ! -d .git ]]; then echo "FATAL: no .git — Reinstall server with GIT_ADDRESS set"; exit 1; fi; echo "FORCE RESET → origin/${BRANCH_NAME}"; git fetch origin "${BRANCH_NAME}" --prune || { echo "FATAL: git fetch failed"; exit 1; }; git checkout -B "${BRANCH_NAME}" "origin/${BRANCH_NAME}"; git reset --hard "origin/${BRANCH_NAME}"; export GIT_BRANCH_ACTUAL="$(git rev-parse --abbrev-ref HEAD)"; echo "Deployed: branch=${GIT_BRANCH_ACTUAL} commit=$(git rev-parse --short HEAD)"; test -f /home/container/ptero-start.sh || { echo "FATAL: ptero-start.sh missing after reset — wrong repo/branch?"; exit 1; }; exec bash /home/container/ptero-start.sh
 ```
 
-Readable form (same logic):
+Readable:
 
 ```bash
 cd /home/container
 
-if [[ -d .git ]] && [[ "{{AUTO_UPDATE}}" == "1" ]]; then
-  BRANCH_NAME="{{BRANCH}}"
-  if [[ -z "${BRANCH_NAME}" || "${BRANCH_NAME}" == "{{BRANCH}}" ]]; then
-    BRANCH_NAME=master
-  fi
-
-  echo "Updating origin/${BRANCH_NAME} (hard reset of tracked files only)..."
-  git fetch origin "${BRANCH_NAME}" --prune
-  git checkout -B "${BRANCH_NAME}" "origin/${BRANCH_NAME}"
-  git reset --hard "origin/${BRANCH_NAME}"
-  export GIT_BRANCH_ACTUAL="$(git rev-parse --abbrev-ref HEAD)"
-  echo "Deployed: branch=${GIT_BRANCH_ACTUAL} commit=$(git rev-parse --short HEAD)"
+BRANCH_NAME="{{BRANCH}}"
+if [[ -z "${BRANCH_NAME}" || "${BRANCH_NAME}" == "{{BRANCH}}" ]]; then
+  BRANCH_NAME=master
 fi
 
-if [[ ! -z "{{PY_PACKAGES}}" ]]; then
-  pip install -U --prefix .local {{PY_PACKAGES}}
+if [[ ! -d .git ]]; then
+  echo "FATAL: no .git — Reinstall server with GIT_ADDRESS set"
+  exit 1
 fi
 
-if [[ -f /home/container/${REQUIREMENTS_FILE} ]]; then
-  pip install -U --prefix .local -r ${REQUIREMENTS_FILE}
-fi
+echo "FORCE RESET → origin/${BRANCH_NAME}"
+git fetch origin "${BRANCH_NAME}" --prune || { echo "FATAL: git fetch failed"; exit 1; }
+git checkout -B "${BRANCH_NAME}" "origin/${BRANCH_NAME}"
+git reset --hard "origin/${BRANCH_NAME}"
+export GIT_BRANCH_ACTUAL="$(git rev-parse --abbrev-ref HEAD)"
+echo "Deployed: branch=${GIT_BRANCH_ACTUAL} commit=$(git rev-parse --short HEAD)"
 
-export PATH="/home/container/.local/bin:${PATH:-}"
-for d in /home/container/.local/lib/python*/site-packages; do
-  [ -d "$d" ] && export PYTHONPATH="${d}${PYTHONPATH:+:$PYTHONPATH}"
-done
-
-exec /usr/local/bin/python /home/container/{{PY_FILE}}
+test -f /home/container/ptero-start.sh || {
+  echo "FATAL: ptero-start.sh missing after reset — wrong repo/branch?"
+  exit 1
+}
+exec bash /home/container/ptero-start.sh
 ```
 
-Optional: import `pterodactyl-egg.wavetech.json` as a custom egg (same startup baked in).
+Optional: import `pterodactyl-egg.wavetech.json` (same startup baked in).
 
-## Why the stock egg fails here
-
-Stock startup from the python generic egg:
+## After restart you MUST see
 
 ```text
-git pull  →  pip --prefix .local  →  python {{PY_FILE}}
-```
-
-| Problem | Effect |
-|---|---|
-| `git pull` only | Dirty / divergent tree → **old code keeps running** |
-| No `PYTHONPATH=.local/...` | `disnake` / deps installed but **not importable** |
-| No branch checkout | `BRANCH=master` ignored on start |
-
-This startup: `fetch` + `checkout -B` + `reset --hard` + `PYTHONPATH` + `exec python`.
-
-## What is / is not wiped
-
-| Action | Effect |
-|---|---|
-| `git reset --hard origin/master` | Overwrites **tracked** code to match GitHub |
-| `git clean -fd` | **Not used** — would delete `config.env`, archives, state |
-
-`config.env`, `cogs/archive/`, `secret_santa_state.json`, uploads are gitignored —
-hard reset does **not** wipe them. Back those up in the panel yourself if you want.
-
-## After restart you should see
-
-```text
-Updating origin/master (hard reset of tracked files only)...
-Deployed: branch=master commit=<sha>
-Starting master@<sha>
+FORCE RESET → origin/master
+Deployed: branch=master commit=<recent sha>
+PYTHONPATH=/home/container/.local/lib/python3.xx/site-packages
+Starting main.py (python=Python 3.xx.x)
+Starting master@<same sha>
 Loaded 4/4 cogs
-Logged in as <bot>
+Logged in as ...
 ```
 
-If you still see soft `Already up to date` from `git pull` and no `Deployed:` line,
-the panel is still on the **old** startup — paste again and restart.
+No `FORCE RESET` / `Deployed:` lines ⇒ panel still has the **old** startup. Paste again.
 
-## TTS note
+## What hard-reset does not wipe
 
-This fixes “stuck on old code / missing deps”. It does **not** fix Pterodactyl hosts
-that cannot complete Discord voice UDP. For TTS use NAS + `network_mode: host`
-(see `DEPLOYMENT.md`).
+`config.env`, `cogs/archive/`, `secret_santa_state.json`, uploads (gitignored).
+Does **not** run `git clean -fd`.
+
+## TTS
+
+| Host | Slash commands | TTS / voice |
+|---|---|---|
+| Pterodactyl | OK | **Fails** (UDP / IP discovery) |
+| TrueNAS + `network_mode: host` | OK | OK |
