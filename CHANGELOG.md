@@ -10,6 +10,7 @@
 - Pterodactyl: hard-reset startup + `PYTHONPATH` for `.local` (stock egg `git pull` is not enough); `pterodactyl-egg.wavetech.json`
 - Pterodactyl: FORCE RESET startup (no AUTO_UPDATE gate) + `ptero-start.sh`; stale-deploy critical if mixed old cogs
 - Pterodactyl: discard dirty local tracked files (`checkout -f` / `reset --hard`) so “commit or stash before merge” cannot block `origin/master`
+- Pterodactyl: repo `startup.sh` force-resets to `origin/master` (old local soft-`git pull` startup.sh was the abort)
 
 ## 2026-05 — Secret Santa simplify & cleanup
 

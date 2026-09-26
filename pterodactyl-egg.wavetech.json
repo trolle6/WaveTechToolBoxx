@@ -7,7 +7,7 @@
   "exported_at": "2026-09-26T00:00:00+00:00",
   "name": "WaveTechToolBoxx (Python)",
   "author": "wavetech",
-  "description": "WaveTechToolBoxx: always FORCE RESET to origin/master (discards dirty local tracked files that block git pull/merge), then ptero-start.sh.",
+  "description": "WaveTechToolBoxx: force-reset to origin/master then bash startup.sh (never soft git pull).",
   "features": null,
   "docker_images": {
     "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13",
@@ -16,7 +16,7 @@
     "Python 3.10": "ghcr.io/ptero-eggs/yolks:python_3.10"
   },
   "file_denylist": [],
-  "startup": "cd /home/container; if [[ ! -d .git ]]; then echo \"FATAL: no .git \u2014 Reinstall with GIT_ADDRESS set\"; exit 1; fi; echo \"FORCE RESET \u2192 origin/master (discard local tracked changes)\"; git fetch origin master --prune || { echo \"FATAL: git fetch failed\"; exit 1; }; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; git clean -fd -e config.env -e .local -e cogs/archive -e cogs/secret_santa_state.json -e cogs/distributed_files -e cogs/distributed_files_metadata.json -e __pycache__ || true; export GIT_BRANCH_ACTUAL=master; echo \"Deployed: branch=master commit=$(git rev-parse --short HEAD)\"; test -f /home/container/ptero-start.sh || { echo \"FATAL: ptero-start.sh missing after reset\"; exit 1; }; exec bash /home/container/ptero-start.sh",
+  "startup": "cd /home/container; if [[ ! -d .git ]]; then echo \"FATAL: no .git\"; exit 1; fi; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo \"Deployed: branch=master commit=$(git rev-parse --short HEAD)\"; exec bash /home/container/startup.sh",
   "config": {
     "files": "{}",
     "startup": "{\r\n    \"done\": \"Logged in as\"\r\n}",

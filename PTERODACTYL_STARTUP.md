@@ -1,96 +1,54 @@
-# Pterodactyl startup (python generic egg)
+# Pterodactyl startup
 
-## The error: “Please commit your changes or stash them before you merge”
+## Errors in your log (decoded)
 
-That means the container has **dirty local edits** on tracked files. Stock
-`git pull` (and a plain `git checkout`) **aborts**, so you stay forever on an
-ancient commit like `7a72b8b`.
-
-The startup below **throws away local tracked changes**, force-checks out
-`origin/master`, then starts the bot. Secrets/state are not wiped.
-
-## Panel variables
-
-| Variable | Value |
+| Log line | Meaning |
 |---|---|
-| Docker image | **Python 3.12** or **3.13** |
-| `BRANCH` | `master` (startup always deploys **master**) |
-| `PY_FILE` | `main.py` |
-| `REQUIREMENTS_FILE` | `requirements.txt` |
-| `GIT_ADDRESS` | `https://github.com/trolle6/WaveTechToolBoxx` |
+| `Updating 7a72b8b..e6781a1` then **commit or stash before you merge** | Soft `git pull` hit dirty `main.py` / `deploy.py` and **aborted**. Code never updated. |
+| `Starting unknown@7a72b8baf578` | Still on ancient commit (not current master). |
+| `Allowed channel configured` / `TTS enabled` at INFO | Old voice cog (master has these at DEBUG). |
+| `ExtensionNotFound: cogs.DALLE_cog` | Partial/stale tree after failed pull. |
+| Voice `TimeoutError` | Ptero host UDP limit — use NAS + host network for TTS. |
 
-Secrets → Environment / `config.env`. Never in the startup command.
+If you ran `source startup.sh` and still see the merge abort: that was an **old local**
+`startup.sh` that only did `git pull`. Repo now ships a force-reset `startup.sh`.
 
-## Startup command (replace egg default entirely)
+## Fix RIGHT NOW (paste in Ptero console)
 
-One line (paste into Startup):
-
-```bash
-cd /home/container; if [[ ! -d .git ]]; then echo "FATAL: no .git — Reinstall with GIT_ADDRESS set"; exit 1; fi; echo "FORCE RESET → origin/master (discard local tracked changes)"; git fetch origin master --prune || { echo "FATAL: git fetch failed"; exit 1; }; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; git clean -fd -e config.env -e .local -e cogs/archive -e cogs/secret_santa_state.json -e cogs/distributed_files -e cogs/distributed_files_metadata.json -e __pycache__ || true; export GIT_BRANCH_ACTUAL=master; echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"; test -f /home/container/ptero-start.sh || { echo "FATAL: ptero-start.sh missing after reset"; exit 1; }; exec bash /home/container/ptero-start.sh
-```
-
-Readable:
+Do **not** use the old `startup.sh` until this succeeds once:
 
 ```bash
 cd /home/container
-
-if [[ ! -d .git ]]; then
-  echo "FATAL: no .git — Reinstall with GIT_ADDRESS set"
-  exit 1
-fi
-
-echo "FORCE RESET → origin/master (discard local tracked changes)"
-git fetch origin master --prune || { echo "FATAL: git fetch failed"; exit 1; }
-
-# Fixes: "Please commit your changes or stash them before you merge"
-git reset --hard HEAD || true
+git fetch origin master --prune
+git reset --hard HEAD
 git checkout -f -B master origin/master
 git reset --hard origin/master
-
-# Drop untracked junk only (keep secrets, state, .local deps)
-git clean -fd \
-  -e config.env \
-  -e .local \
-  -e cogs/archive \
-  -e cogs/secret_santa_state.json \
-  -e cogs/distributed_files \
-  -e cogs/distributed_files_metadata.json \
-  -e __pycache__ || true
-
-export GIT_BRANCH_ACTUAL=master
-echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"
-
-test -f /home/container/ptero-start.sh || {
-  echo "FATAL: ptero-start.sh missing after reset"
-  exit 1
-}
-exec bash /home/container/ptero-start.sh
+bash startup.sh
 ```
 
-Optional egg import: `pterodactyl-egg.wavetech.json` (same startup).
+You must see `FORCE RESET → origin/master` and `Deployed: branch=master commit=…`
+with a sha that is **not** `7a72b8b`.
 
-## After restart you MUST see
+## Panel Startup field (replace egg default)
 
-```text
-FORCE RESET → origin/master (discard local tracked changes)
-Deployed: branch=master commit=<recent sha>
-PYTHONPATH=...
-Starting master@<same sha>
-Loaded 4/4 cogs
+```bash
+cd /home/container; if [[ ! -d .git ]]; then echo "FATAL: no .git"; exit 1; fi; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"; exec bash /home/container/startup.sh
 ```
 
-Still seeing `7a72b8b` / `Allowed channel configured` / no `FORCE RESET` line ⇒
-the Startup field was **not** replaced. Paste again, Save, Restart.
+Or simply (after the one-time console fix above):
 
-## Kept vs discarded
+```bash
+bash /home/container/startup.sh
+```
 
-| Kept | Discarded |
-|---|---|
-| `config.env` | Dirty edits to tracked code |
-| `cogs/archive/`, SS state, uploads | Untracked junk (via selective `git clean`) |
-| `.local/` pip packages | |
+Variables: Docker **Python 3.12/3.13**, `PY_FILE=main.py`, `REQUIREMENTS_FILE=requirements.txt`,
+`BRANCH=master`. Secrets in Environment / `config.env` only.
 
-## TTS
+## What startup.sh does
 
-Pterodactyl voice UDP usually fails. Use NAS + `network_mode: host` for TTS.
-Slash commands on Ptero are fine once master is actually deployed.
+1. `git fetch` + `reset --hard` + `checkout -f -B master origin/master` (discards dirty tracked files)
+2. Selective `git clean` (keeps `config.env`, `.local`, archives, state)
+3. `pip --prefix .local` + `PYTHONPATH`
+4. Run `main.py`
+
+Never uses soft `git pull`.

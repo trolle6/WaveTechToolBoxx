@@ -984,7 +984,7 @@ def _log_deploy_identity() -> None:
     root = Path(__file__).resolve().parent
     if not (root / "cogs" / "secret_santa_core.py").is_file():
         logger.warning(
-            "secret_santa_core.py missing — outdated code tree; check GIT_BRANCH / git pull."
+            "secret_santa_core.py missing — outdated code tree; run bash startup.sh (force reset)."
         )
         return
     logger.info("Starting %s@%s", branch, commit)
