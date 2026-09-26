@@ -94,8 +94,18 @@ TTS_API_RETRY_MAX_DELAY = 30.0  # Cap delay (e.g. from Retry-After)
 MIN_VALID_AUDIO_SIZE = 100  # Reject API responses smaller than this (likely errors)
 
 # Audio Processing - MP3 + FFmpegPCMAudio + PCMVolumeTransformer (avoids Opus re-encode)
-AUDIO_VOLUME_MULTIPLIER = 0.7  # 70% volume for clarity without clipping
+# gpt-4o-mini-tts output is mastered much quieter than tts-1-hd; loudnorm brings every
+# voice/model to a consistent speech level, TTS_VOLUME trims on top (1.0 = no change).
+AUDIO_LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
+DEFAULT_TTS_VOLUME = 1.0
 TTS_SPEED = 1.0  # Natural speed (no artificial slowdown)
+
+# Every voice /v1/audio/speech documents for gpt-4o-mini-tts. tts-1 / tts-1-hd accept
+# only the first nine; unsupported ones are dropped at runtime on a 400.
+ALL_TTS_VOICES = (
+    "alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
+    "ballad", "verse", "marin", "cedar",
+)
 AUDIO_PLAYBACK_START_DELAY = 0.3  # Delay after creating audio source before starting playback
 MP3_BYTES_PER_SECOND = 16000  # MP3 ~128kbps ≈ 16000 bytes/second (OpenAI TTS default)
 
@@ -252,13 +262,20 @@ class VoiceProcessingCog(commands.Cog):
 
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
-        self.default_voice = "alloy"
-        # Voices accepted by /v1/audio/speech (API enum as of 2026-09).
-        # ballad/verse/marin/cedar are rejected with 400 even when model=gpt-4o-mini-tts.
-        self.tts_model = "gpt-4o-mini-tts"
-        self.available_voices = [
-            "alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
-        ]
+        self.tts_model = str(getattr(bot.config, "TTS_MODEL", None) or "gpt-4o-mini-tts").strip()
+        self.available_voices = self._parse_voice_pool(getattr(bot.config, "OPENAI_VOICES", None))
+        self.default_voice = "alloy" if "alloy" in self.available_voices else self.available_voices[0]
+        try:
+            self.tts_volume = float(getattr(bot.config, "TTS_VOLUME", None) or DEFAULT_TTS_VOLUME)
+        except (TypeError, ValueError):
+            self.tts_volume = DEFAULT_TTS_VOLUME
+        self.tts_volume = max(0.1, min(2.0, self.tts_volume))
+        self.logger.info(
+            "TTS model %s, %s voices: %s",
+            self.tts_model,
+            len(self.available_voices),
+            ",".join(self.available_voices),
+        )
         
         # Voice assignments (per-guild, session-based - cleared when user leaves voice)
         # Structure: guild_id -> {user_id: {"voice": voice_name, "timestamp": timestamp}}
@@ -838,6 +855,34 @@ class VoiceProcessingCog(commands.Cog):
         return chunks
 
     # ============ TTS GENERATION ============
+    def _parse_voice_pool(self, raw: Optional[str]) -> list[str]:
+        """OPENAI_VOICES=alloy,fable,... → validated list; unset/empty → all voices."""
+        if not raw or not str(raw).strip():
+            return list(ALL_TTS_VOICES)
+        pool: list[str] = []
+        for name in str(raw).split(","):
+            name = name.strip().lower()
+            if not name:
+                continue
+            if name not in ALL_TTS_VOICES:
+                self.logger.warning("OPENAI_VOICES: unknown voice %r ignored", name)
+                continue
+            if name not in pool:
+                pool.append(name)
+        return pool or list(ALL_TTS_VOICES)
+
+    def _drop_rejected_voice(self, voice: str) -> None:
+        if voice in self.available_voices and len(self.available_voices) > 1:
+            self.available_voices.remove(voice)
+            if self.default_voice == voice:
+                self.default_voice = self.available_voices[0]
+            self.logger.warning(
+                "OpenAI rejected voice %r for %s — removed from pool (%s left)",
+                voice,
+                self.tts_model,
+                len(self.available_voices),
+            )
+
     def _normalize_voice(self, voice: Optional[str]) -> str:
         """Map unknown/retired voice names onto the API-allowed set."""
         if voice and voice in self.available_voices:
@@ -951,6 +996,13 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.error(f"TTS API error {resp.status} after retries: {error_body[:300]}")
                     else:
                         error_body = await resp.text()
+                        if (
+                            resp.status == 400
+                            and "voice" in error_body.lower()
+                            and voice != self.default_voice
+                        ):
+                            self._drop_rejected_voice(voice)
+                            return await self._generate_tts(text, self.default_voice)
                         self.logger.error(f"TTS API error {resp.status}: {error_body[:300]}")
                     await self.circuit_breaker.record_failure()
                     self.total_failed += 1
@@ -1069,9 +1121,9 @@ class VoiceProcessingCog(commands.Cog):
                 pcm_source = disnake.FFmpegPCMAudio(
                     temp_file,
                     before_options='-nostdin',
-                    options='-vn'
+                    options=f'-vn -af {AUDIO_LOUDNORM_FILTER}'
                 )
-                audio = disnake.PCMVolumeTransformer(pcm_source, volume=AUDIO_VOLUME_MULTIPLIER)
+                audio = disnake.PCMVolumeTransformer(pcm_source, volume=self.tts_volume)
             except Exception as e:
                 self.logger.error(
                     f"Failed to create audio source: {e}\n"

@@ -70,6 +70,9 @@ CONFIG_DEFAULTS = {
     "TTS_ROLE_ID": None,
     "TTS_CHANNEL_ID": None,
     "TTS_CHANNEL_NAME": "no-mic-bot",  # set to "all" to listen in every text channel
+    "OPENAI_VOICES": None,  # comma list; unset = all 13 voices
+    "TTS_MODEL": "gpt-4o-mini-tts",
+    "TTS_VOLUME": None,  # float 0.1–2.0 applied after loudness normalization (default 1.0)
     "DISCORD_MODERATOR_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }
