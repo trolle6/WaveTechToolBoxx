@@ -32,10 +32,12 @@ export_git_identity() {
 }
 
 if [ "${GIT_UPDATE}" = "true" ] && [ -d .git ]; then
-    echo "Updating ${GIT_REMOTE}/${GIT_BRANCH}..."
+    echo "Updating ${GIT_REMOTE}/${GIT_BRANCH} (discard local tracked changes)..."
     if git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" --prune; then
         if git show-ref --verify --quiet "refs/remotes/${GIT_REMOTE}/${GIT_BRANCH}"; then
-            git checkout -B "${GIT_BRANCH}" "${GIT_REMOTE}/${GIT_BRANCH}"
+            # Avoid "commit or stash before you merge" on dirty trees
+            git reset --hard HEAD || true
+            git checkout -f -B "${GIT_BRANCH}" "${GIT_REMOTE}/${GIT_BRANCH}"
             git reset --hard "${GIT_REMOTE}/${GIT_BRANCH}"
         else
             echo "WARN: ${GIT_REMOTE}/${GIT_BRANCH} not found after fetch; using existing code" >&2

@@ -7,7 +7,7 @@
   "exported_at": "2026-09-26T00:00:00+00:00",
   "name": "WaveTechToolBoxx (Python)",
   "author": "wavetech",
-  "description": "WaveTechToolBoxx: ALWAYS hard-reset to BRANCH, then ptero-start.sh (pip + PYTHONPATH).",
+  "description": "WaveTechToolBoxx: always FORCE RESET to origin/master (discards dirty local tracked files that block git pull/merge), then ptero-start.sh.",
   "features": null,
   "docker_images": {
     "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13",
@@ -16,7 +16,7 @@
     "Python 3.10": "ghcr.io/ptero-eggs/yolks:python_3.10"
   },
   "file_denylist": [],
-  "startup": "cd /home/container; BRANCH_NAME=\"{{BRANCH}}\"; if [[ -z \"${BRANCH_NAME}\" || \"${BRANCH_NAME}\" == \"{{BRANCH}}\" ]]; then BRANCH_NAME=master; fi; if [[ ! -d .git ]]; then echo \"FATAL: no .git \u2014 Reinstall server with GIT_ADDRESS set\"; exit 1; fi; echo \"FORCE RESET \u2192 origin/${BRANCH_NAME}\"; git fetch origin \"${BRANCH_NAME}\" --prune || { echo \"FATAL: git fetch failed\"; exit 1; }; git checkout -B \"${BRANCH_NAME}\" \"origin/${BRANCH_NAME}\"; git reset --hard \"origin/${BRANCH_NAME}\"; export GIT_BRANCH_ACTUAL=\"$(git rev-parse --abbrev-ref HEAD)\"; echo \"Deployed: branch=${GIT_BRANCH_ACTUAL} commit=$(git rev-parse --short HEAD)\"; test -f /home/container/ptero-start.sh || { echo \"FATAL: ptero-start.sh missing after reset \u2014 wrong repo/branch?\"; exit 1; }; exec bash /home/container/ptero-start.sh",
+  "startup": "cd /home/container; if [[ ! -d .git ]]; then echo \"FATAL: no .git \u2014 Reinstall with GIT_ADDRESS set\"; exit 1; fi; echo \"FORCE RESET \u2192 origin/master (discard local tracked changes)\"; git fetch origin master --prune || { echo \"FATAL: git fetch failed\"; exit 1; }; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; git clean -fd -e config.env -e .local -e cogs/archive -e cogs/secret_santa_state.json -e cogs/distributed_files -e cogs/distributed_files_metadata.json -e __pycache__ || true; export GIT_BRANCH_ACTUAL=master; echo \"Deployed: branch=master commit=$(git rev-parse --short HEAD)\"; test -f /home/container/ptero-start.sh || { echo \"FATAL: ptero-start.sh missing after reset\"; exit 1; }; exec bash /home/container/ptero-start.sh",
   "config": {
     "files": "{}",
     "startup": "{\r\n    \"done\": \"Logged in as\"\r\n}",
@@ -43,7 +43,7 @@
     },
     {
       "name": "Git Branch",
-      "description": "Branch to hard-reset to on each start when Auto Update is on. Use master.",
+      "description": "Kept for egg compatibility; startup always deploys origin/master.",
       "env_variable": "BRANCH",
       "default_value": "master",
       "user_viewable": true,
