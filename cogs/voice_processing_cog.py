@@ -1177,18 +1177,36 @@ class VoiceProcessingCog(commands.Cog):
             channel.name, channel.id, guild.name, timeout,
         )
 
-        # Fail fast if we lack Connect — otherwise the join just hangs until timeout.
-        me = getattr(guild, "me", None)
+        # Log computed perms (can disagree with the Discord UI). Do NOT abort on
+        # !connect — cached Member roles are sometimes incomplete and caused false
+        # "Missing Connect" while the channel actually allows the bot. Let Discord
+        # accept/reject the real join; UDP hangs are a separate host/network issue.
+        me = getattr(guild, "me", None) or (
+            guild.get_member(self.bot.user.id) if self.bot.user else None
+        )
         if me is not None:
             perms = channel.permissions_for(me)
-            if not perms.connect:
-                self.logger.error(
-                    f"Missing 'Connect' permission in voice channel '{channel.name}' — cannot join"
-                )
-                return None
-            if not perms.speak:
+            self.logger.debug(
+                "Voice perms in %r: connect=%s speak=%s view=%s admin=%s roles=%s",
+                channel.name,
+                perms.connect,
+                perms.speak,
+                perms.view_channel,
+                perms.administrator,
+                [r.name for r in getattr(me, "roles", [])],
+            )
+            if not perms.connect and not perms.administrator:
                 self.logger.warning(
-                    f"Missing 'Speak' permission in '{channel.name}' — TTS audio may be silent"
+                    "Computed Connect=False for %r (roles=%s) — still attempting join; "
+                    "if Discord UI shows Connect allowed, ignore this and check the "
+                    "join error below / bot role channel overwrites",
+                    channel.name,
+                    [r.name for r in getattr(me, "roles", [])],
+                )
+            if not perms.speak and not perms.administrator:
+                self.logger.warning(
+                    "Computed Speak=False in %r — TTS audio may be silent",
+                    channel.name,
                 )
 
         vc = guild.voice_client
