@@ -607,21 +607,20 @@ async def on_ready():
         except Exception:
             pass
 
-        # Warn if configured moderator role is missing from any guild (does not crash)
+        # Optional mod role: only note at debug if missing from a guild
         mod_role_id = config.DISCORD_MODERATOR_ROLE_ID
         if mod_role_id:
             for guild in bot.guilds:
                 if not guild.get_role(mod_role_id):
-                    logger.warning(
+                    logger.debug(
                         "Moderator role %s not found in guild %s (%s)",
                         mod_role_id,
                         guild.id,
                         guild.name,
                     )
         else:
-            logger.warning(
-                "No DISCORD_MODERATOR_ROLE_ID configured — only guild "
-                "administrators and owners can run mod commands"
+            logger.debug(
+                "No DISCORD_MODERATOR_ROLE_ID — mod commands limited to admins/owners"
             )
 
         bot.ready_once = True
@@ -1000,14 +999,7 @@ def _log_deploy_identity() -> None:
     if "Allowed channel configured" in voice_src:
         logger.critical(
             "STALE DEPLOY: voice cog is outdated while main.py is newer. "
-            "Pterodactyl is NOT hard-resetting to origin/master. "
-            "Turn GIT_HARD_RESET_NUKE on in the panel (see startup.md) and restart. "
-            "TTS on Ptero still needs NAS + host networking."
-        )
-    if branch == "unknown":
-        logger.warning(
-            "Branch unknown — panel startup did not export GIT_BRANCH_ACTUAL "
-            "(still on stock egg git pull?)"
+            "Turn GIT_HARD_RESET_NUKE on in the panel (see startup.md) and restart."
         )
 
 

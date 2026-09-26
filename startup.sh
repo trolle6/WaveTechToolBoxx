@@ -1,5 +1,8 @@
 #!/bin/bash
 
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_ROOT_USER_ACTION=ignore
+
 if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then
   if [[ "${GIT_HARD_RESET_NUKE}" == "1" ]]; then
     BRANCH_NAME="${BRANCH:-master}"
@@ -11,10 +14,15 @@ if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then
     git reset --hard "origin/${BRANCH_NAME}"
     echo "Deployed: branch=$(git rev-parse --abbrev-ref HEAD) commit=$(git rev-parse --short HEAD)"
   else
-    git pull
+    git pull -q
   fi
 fi
-if [[ ! -z "${PY_PACKAGES}" ]]; then pip install -U --prefix .local ${PY_PACKAGES}; fi
-if [[ -f /home/container/${REQUIREMENTS_FILE} ]]; then pip install -U --prefix .local -r ${REQUIREMENTS_FILE}; fi
+
+if [[ -d .git ]]; then
+  export GIT_BRANCH_ACTUAL="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo master)"
+fi
+
+if [[ ! -z "${PY_PACKAGES}" ]]; then pip install -q -U --prefix .local ${PY_PACKAGES}; fi
+if [[ -f /home/container/${REQUIREMENTS_FILE} ]]; then pip install -q -U --prefix .local -r ${REQUIREMENTS_FILE}; fi
 # exec so panel SIGTERM reaches Python (clean stop; no retry spam)
 exec /usr/local/bin/python /home/container/${PY_FILE}

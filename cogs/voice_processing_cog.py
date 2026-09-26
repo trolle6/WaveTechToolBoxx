@@ -300,10 +300,7 @@ class VoiceProcessingCog(commands.Cog):
         self._warn_if_docker_bridge_blocks_voice()
 
     def _warn_if_docker_bridge_blocks_voice(self) -> None:
-        """
-        Discord voice UDP IP-discovery fails through Docker bridge NAT — every time.
-        Slash commands still work (TCP). Detect likely bridge mode and scream loudly.
-        """
+        """Note bridge networking at debug — some hosts still complete voice UDP."""
         if not Path("/.dockerenv").exists():
             return
         try:
@@ -321,12 +318,9 @@ class VoiceProcessingCog(commands.Cog):
             and 16 <= int(parts[1]) <= 31
         )
         if in_docker_bridge:
-            self.logger.critical(
-                "TTS WILL FAIL: container looks like Docker BRIDGE networking "
-                f"(IP {ip}). Discord voice needs UDP; bridge NAT drops the handshake "
-                "so channel.connect() times out every time while slash commands still work. "
-                "Fix: set network_mode: host (TrueNAS: enable Host Network) and restart. "
-                "See docker-compose.truenas.example.yml / DEPLOYMENT.md."
+            self.logger.debug(
+                "Docker bridge IP %s — if voice UDP times out, use host networking",
+                ip or "unknown",
             )
     # ============ VOICE ASSIGNMENT ============
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
