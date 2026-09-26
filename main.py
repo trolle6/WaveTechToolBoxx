@@ -1089,14 +1089,12 @@ if __name__ == "__main__":
                 retry_count += 1
                 logger.critical(f"Bot crashed (attempt #{retry_count}): {e}", exc_info=True)
             else:
-                # bot.run() returned — stop if we were asked to shut down (Ptero SIGTERM)
-                if shutdown_flag[0] or _shutdown_in_progress:
-                    break
-                retry_count += 1
-                logger.critical(
-                    "Bot session ended without shutdown signal (attempt #%s)",
-                    retry_count,
-                )
+                # disnake's run() installs its own SIGINT/SIGTERM → loop.stop() handlers,
+                # replacing ours; a clean return means the panel asked us to stop.
+                # Gateway drops are retried inside run(reconnect=True), not here.
+                logger.info("Bot stopped")
+                shutdown_flag[0] = True
+                break
 
             if shutdown_flag[0] or _shutdown_in_progress:
                 shutdown_flag[0] = True
