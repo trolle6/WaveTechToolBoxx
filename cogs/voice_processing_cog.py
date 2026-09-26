@@ -1169,6 +1169,77 @@ class VoiceProcessingCog(commands.Cog):
         except Exception:
             pass
 
+    def _format_voice_overwrites(self, channel: disnake.VoiceChannel) -> str:
+        parts: list[str] = []
+        for target, ow in channel.overwrites.items():
+            name = getattr(target, "name", None) or str(getattr(target, "id", "?"))
+            parts.append(f"{name}: connect={ow.connect} speak={ow.speak} view={ow.view_channel}")
+        return "; ".join(parts) if parts else "(no channel overwrites)"
+
+    async def _ensure_voice_connect_perm(
+        self, channel: disnake.VoiceChannel, me: disnake.Member
+    ) -> bool:
+        """
+        Ensure the bot can Connect (+ Speak) in this VC.
+
+        Ptero can join Public fine; WaveTech A fails when Discord denies Connect —
+        that looks exactly like a UDP timeout. Prefer a member overwrite self-grant
+        when the bot has Manage Roles; otherwise fail fast (do not burn 3×60s).
+        """
+        perms = channel.permissions_for(me)
+        if perms.connect or perms.administrator:
+            if not perms.speak and not perms.administrator:
+                self.logger.warning(
+                    "Bot lacks Speak in %r — audio may be silent",
+                    channel.name,
+                )
+            return True
+
+        # VoiceChannel.permissions_for strips manage_roles when Connect is false —
+        # use guild-level flags to decide if we can edit overwrites.
+        gp = me.guild_permissions
+        can_edit = gp.administrator or gp.manage_roles or gp.manage_channels
+        if can_edit:
+            try:
+                overwrite = channel.overwrites_for(me)
+                overwrite.connect = True
+                overwrite.speak = True
+                overwrite.view_channel = True
+                await channel.set_permissions(
+                    me,
+                    overwrite=overwrite,
+                    reason="TTS: allow bot Connect+Speak in author VC",
+                )
+                self.logger.info(
+                    "Granted bot Connect+Speak on %r (member overwrite)",
+                    channel.name,
+                )
+                try:
+                    me = await channel.guild.fetch_member(me.id)
+                except Exception:
+                    pass
+                perms = channel.permissions_for(me)
+                if perms.connect or perms.administrator:
+                    return True
+            except disnake.Forbidden:
+                self.logger.warning(
+                    "Cannot edit overwrites on %r (Forbidden) — need Manage Roles "
+                    "above the denied roles, or a human must allow Connect for the bot",
+                    channel.name,
+                )
+            except Exception as e:
+                self.logger.warning("Connect self-grant failed on %r: %s", channel.name, e)
+
+        self.logger.error(
+            "Cannot join %r — Discord denies Connect for this bot "
+            "(roles=%s). Overwrites: %s. Fix: channel Permissions → select the bot "
+            "→ Allow Connect + Speak. (Public worked on this host; this is not UDP.)",
+            channel.name,
+            [r.name for r in getattr(me, "roles", [])],
+            self._format_voice_overwrites(channel),
+        )
+        return False
+
     async def _connect_to_voice(
         self, channel: disnake.VoiceChannel, timeout: int | None = None
     ) -> Optional[disnake.VoiceClient]:
@@ -1180,10 +1251,7 @@ class VoiceProcessingCog(commands.Cog):
         """
         if timeout is None:
             timeout = int(self.bot.config.VOICE_TIMEOUT)
-        # Flaky Ptero/bridge UDP needs headroom even if config.env still says 30.
-        timeout = max(timeout, 45)
-        if self._docker_bridge_ip():
-            timeout = max(timeout, 60)
+        timeout = max(timeout, 30)
         guild = channel.guild
         if not guild:
             self.logger.error("Cannot connect to voice: channel has no guild")
@@ -1195,27 +1263,14 @@ class VoiceProcessingCog(commands.Cog):
             timeout,
         )
 
-        # Refresh member cache — stale roles caused false Connect=False before.
         me = getattr(guild, "me", None)
         if self.bot.user:
             try:
                 me = await guild.fetch_member(self.bot.user.id)
             except Exception:
                 me = me or guild.get_member(self.bot.user.id)
-        if me is not None:
-            perms = channel.permissions_for(me)
-            if not perms.connect and not perms.administrator:
-                self.logger.warning(
-                    "Bot lacks Connect in %r (roles=%s) — grant Connect+Speak to the "
-                    "bot role on that channel, then retry",
-                    channel.name,
-                    [r.name for r in getattr(me, "roles", [])],
-                )
-            elif not perms.speak and not perms.administrator:
-                self.logger.warning(
-                    "Bot lacks Speak in %r — joined audio may be silent",
-                    channel.name,
-                )
+        if me is not None and not await self._ensure_voice_connect_perm(channel, me):
+            return None
 
         vc = guild.voice_client
 
