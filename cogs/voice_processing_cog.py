@@ -248,10 +248,11 @@ class VoiceProcessingCog(commands.Cog):
         # TTS config
         self.tts_url = "https://api.openai.com/v1/audio/speech"
         self.default_voice = "alloy"
-        # All available OpenAI TTS voices (13 total)
+        # gpt-4o-mini-tts voices (tts-1 / tts-1-hd only allow 9 — no ballad/verse/marin/cedar)
+        self.tts_model = "gpt-4o-mini-tts"
         self.available_voices = [
-            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", 
-            "onyx", "sage", "shimmer", "verse", "marin", "cedar"
+            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova",
+            "onyx", "sage", "shimmer", "verse", "marin", "cedar",
         ]
         
         # Voice assignments (per-guild, session-based - cleared when user leaves voice)
@@ -837,11 +838,11 @@ class VoiceProcessingCog(commands.Cog):
 
         headers = self._get_openai_headers()
         payload = {
-            "model": "tts-1-hd",
+            "model": self.tts_model,
             "input": text,
             "voice": voice,
             "response_format": "mp3",
-            "speed": TTS_SPEED
+            "speed": TTS_SPEED,
         }
         self.logger.debug(f"Sending to TTS API: length={len(text)}, voice={voice}")
 
