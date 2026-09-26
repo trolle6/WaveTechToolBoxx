@@ -865,12 +865,14 @@ async def graceful_shutdown():
 
 def handle_signal(signum, frame):
     """Handle shutdown signals - schedules graceful shutdown"""
-    logger.info(f"Received signal {signum} - shutting down")
+    global _shutdown_in_progress
+    logger.info("Received signal %s - shutting down", signum)
+    _shutdown_in_progress = True
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(graceful_shutdown())
     except RuntimeError:
-        # No running loop - bot.run() will handle shutdown
+        # No running loop — main retry loop will exit via shutdown_flag
         pass
 
 
@@ -1088,10 +1090,13 @@ if __name__ == "__main__":
                 shutdown_flag[0] = True
                 break
             except Exception as e:
+                if shutdown_flag[0] or _shutdown_in_progress:
+                    break
                 retry_count += 1
                 logger.critical(f"Bot crashed (attempt #{retry_count}): {e}", exc_info=True)
             else:
-                if shutdown_flag[0]:
+                # bot.run() returned — stop if we were asked to shut down (Ptero SIGTERM)
+                if shutdown_flag[0] or _shutdown_in_progress:
                     break
                 retry_count += 1
                 logger.critical(
@@ -1099,12 +1104,20 @@ if __name__ == "__main__":
                     retry_count,
                 )
 
-            if shutdown_flag[0]:
+            if shutdown_flag[0] or _shutdown_in_progress:
+                shutdown_flag[0] = True
                 break
 
             wait_time = min(MAX_RETRY_WAIT, RETRY_BACKOFF_MULTIPLIER * min(retry_count, RETRY_BACKOFF_CAP))
             logger.warning(f"Retrying in {wait_time}s... (will retry forever)")
-            time.sleep(wait_time)
+            # Sleep in small slices so SIGTERM during wait still sets the flag quickly
+            for _ in range(int(wait_time)):
+                if shutdown_flag[0] or _shutdown_in_progress:
+                    break
+                time.sleep(1)
+            if shutdown_flag[0] or _shutdown_in_progress:
+                shutdown_flag[0] = True
+                break
 
             if retry_count > RETRY_RESET_THRESHOLD:
                 retry_count = 0

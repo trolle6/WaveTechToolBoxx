@@ -1278,9 +1278,19 @@ class VoiceProcessingCog(commands.Cog):
                     continue
                 return vc
             except asyncio.CancelledError:
-                self.logger.warning(
-                    f"Voice connect to '{channel.name}' cancelled (channel emptied during handshake)"
-                )
+                if self._shutdown.is_set():
+                    await self._cleanup_stale_voice_client(guild)
+                    return None
+                if not self._has_humans_in_voice(channel):
+                    self.logger.warning(
+                        "Voice connect to %r cancelled — channel emptied during handshake",
+                        channel.name,
+                    )
+                else:
+                    self.logger.warning(
+                        "Voice connect to %r cancelled (shutdown or task cancel)",
+                        channel.name,
+                    )
                 await self._cleanup_stale_voice_client(guild)
                 return None
             except disnake.ClientException as e:
