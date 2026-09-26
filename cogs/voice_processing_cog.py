@@ -303,29 +303,36 @@ class VoiceProcessingCog(commands.Cog):
 
         self._warn_if_docker_bridge_blocks_voice()
 
-    def _warn_if_docker_bridge_blocks_voice(self) -> None:
-        """Note bridge networking at debug — some hosts still complete voice UDP."""
+    def _docker_bridge_ip(self) -> str | None:
+        """Return container IPv4 if it looks like Docker bridge (172.16–31.x), else None."""
         if not Path("/.dockerenv").exists():
-            return
+            return None
         try:
             probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             probe.connect(("8.8.8.8", 80))
             ip = probe.getsockname()[0]
             probe.close()
         except OSError:
-            ip = ""
+            return None
         parts = ip.split(".")
-        in_docker_bridge = (
+        if (
             len(parts) == 4
             and parts[0] == "172"
             and parts[1].isdigit()
             and 16 <= int(parts[1]) <= 31
-        )
-        if in_docker_bridge:
+        ):
+            return ip
+        return None
+
+    def _warn_if_docker_bridge_blocks_voice(self) -> None:
+        """Note bridge networking at debug — some hosts still complete voice UDP."""
+        ip = self._docker_bridge_ip()
+        if ip:
             self.logger.debug(
                 "Docker bridge IP %s — if voice UDP times out, use host networking",
-                ip or "unknown",
+                ip,
             )
+
     # ============ VOICE ASSIGNMENT ============
     async def _get_voice_for_user(self, member: disnake.Member) -> str:
         """
@@ -1172,43 +1179,40 @@ class VoiceProcessingCog(commands.Cog):
         """
         if timeout is None:
             timeout = int(self.bot.config.VOICE_TIMEOUT)
+        # Flaky Ptero/bridge UDP needs headroom even if config.env still says 30.
+        timeout = max(timeout, 45)
+        if self._docker_bridge_ip():
+            timeout = max(timeout, 60)
         guild = channel.guild
         if not guild:
             self.logger.error("Cannot connect to voice: channel has no guild")
             return None
 
-        self.logger.debug(
-            "Attempting voice connection to %r (id=%s) guild=%r timeout=%ss",
-            channel.name, channel.id, guild.name, timeout,
+        self.logger.info(
+            "Joining voice %r (timeout %ss)",
+            channel.name,
+            timeout,
         )
 
-        # Log computed perms (can disagree with the Discord UI). Do NOT abort on
-        # !connect — cached Member roles are sometimes incomplete and caused false
-        # "Missing Connect" while the channel actually allows the bot. Let Discord
-        # accept/reject the real join; UDP hangs are a separate host/network issue.
-        me = getattr(guild, "me", None) or (
-            guild.get_member(self.bot.user.id) if self.bot.user else None
-        )
+        # Refresh member cache — stale roles caused false Connect=False before.
+        me = getattr(guild, "me", None)
+        if self.bot.user:
+            try:
+                me = await guild.fetch_member(self.bot.user.id)
+            except Exception:
+                me = me or guild.get_member(self.bot.user.id)
         if me is not None:
             perms = channel.permissions_for(me)
-            self.logger.debug(
-                "Voice perms in %r: connect=%s speak=%s view=%s admin=%s roles=%s",
-                channel.name,
-                perms.connect,
-                perms.speak,
-                perms.view_channel,
-                perms.administrator,
-                [r.name for r in getattr(me, "roles", [])],
-            )
             if not perms.connect and not perms.administrator:
-                self.logger.debug(
-                    "Computed Connect=False for %r (roles=%s) — still attempting join",
+                self.logger.warning(
+                    "Bot lacks Connect in %r (roles=%s) — grant Connect+Speak to the "
+                    "bot role on that channel, then retry",
                     channel.name,
                     [r.name for r in getattr(me, "roles", [])],
                 )
-            if not perms.speak and not perms.administrator:
-                self.logger.debug(
-                    "Computed Speak=False in %r — TTS audio may be silent",
+            elif not perms.speak and not perms.administrator:
+                self.logger.warning(
+                    "Bot lacks Speak in %r — joined audio may be silent",
                     channel.name,
                 )
 
@@ -1369,12 +1373,11 @@ class VoiceProcessingCog(commands.Cog):
         """
         Run channel.connect() while logging progress.
 
-        On broken hosts (typical Pterodactyl), connect hangs silently until timeout.
-        Progress logs make that visible instead of looking like the bot 'never tried'.
+        Do not cancel mid-handshake when the member cache looks empty — that aborted
+        real joins. Only abort on shutdown; let disnake's timeout finish the rest.
         """
-        # reconnect=False: we own retries after a clean teardown (reconnect=True orphans tasks).
         connect_task = asyncio.create_task(
-            channel.connect(timeout=timeout, reconnect=False)
+            channel.connect(timeout=timeout, reconnect=True)
         )
         start = time.monotonic()
         hard_deadline = timeout + 5
@@ -1392,8 +1395,7 @@ class VoiceProcessingCog(commands.Cog):
                     except (asyncio.CancelledError, Exception):
                         pass
                     raise asyncio.TimeoutError()
-                # Stop waiting on shutdown or empty channel
-                if self._shutdown.is_set() or not self._has_humans_in_voice(channel):
+                if self._shutdown.is_set():
                     connect_task.cancel()
                     try:
                         await connect_task
@@ -1403,8 +1405,7 @@ class VoiceProcessingCog(commands.Cog):
                     raise asyncio.CancelledError()
                 if not logged_wait:
                     self.logger.info(
-                        "Waiting for voice UDP handshake to %r "
-                        "(%ss timeout, attempt %s/%s)...",
+                        "Waiting for voice UDP to %r (%ss, try %s/%s)...",
                         channel.name,
                         timeout,
                         attempt + 1,
@@ -1413,7 +1414,7 @@ class VoiceProcessingCog(commands.Cog):
                     logged_wait = True
                 else:
                     self.logger.debug(
-                        "Still waiting for voice UDP to %r (%.0fs / %ss, attempt %s/%s)",
+                        "Still waiting for voice UDP to %r (%.0fs / %ss, try %s/%s)",
                         channel.name,
                         elapsed,
                         timeout,
@@ -1543,66 +1544,87 @@ class VoiceProcessingCog(commands.Cog):
                         "TTS play in %s for user %s", channel.name, item.user_id
                     )
 
-                    # Generate TTS if not already generated
-                    if not item.audio_data:
-                        self.logger.debug(f"Generating TTS for {len(item.text)} chars")
-                        item.audio_data = await self._generate_tts(item.text, item.voice)
-                        if not item.audio_data:
-                            state.stats["errors"] += 1
-                            self.logger.warning("TTS generation failed")
-                            continue
-                        self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
-
-                    # Estimate playback duration to decide on pipeline generation
-                    estimated_duration = len(item.audio_data) / MP3_BYTES_PER_SECOND
-                    will_pipeline = estimated_duration > PIPELINE_THRESHOLD
-
-                    # If playback will be long, start generating next item in background (pipeline)
+                    # Start UDP join immediately while OpenAI TTS runs — do not serialize them.
+                    connect_task = asyncio.create_task(self._connect_to_voice(channel))
                     next_gen_task = None
-                    if will_pipeline:
-                        try:
-                            next_item = state.queue.get_nowait()
-                            # Only pipeline if next item exists and isn't expired
-                            if next_item.is_expired(MESSAGE_EXPIRY_TIME):
-                                state.stats["dropped"] += 1
-                                self.logger.debug("Pipeline: Next item expired, skipping pipeline")
-                            else:
-                                next_member = guild.get_member(next_item.user_id)
-                                if (
-                                    not next_member
-                                    or not next_member.voice
-                                    or not next_member.voice.channel
-                                    or next_member.voice.channel.id != next_item.channel_id
-                                ):
-                                    state.stats["dropped"] += 1
-                                    self.logger.debug(
-                                        "Pipeline: Next item member not in queued VC, skipping pipeline"
-                                    )
-                                elif not next_item.audio_data:
-                                    # Start generating next item in background
-                                    async def generate_next():
-                                        try:
-                                            self.logger.debug(f"Pipeline: Generating next TTS for {len(next_item.text)} chars")
-                                            next_item.audio_data = await self._generate_tts(next_item.text, next_item.voice)
-                                            if next_item.audio_data:
-                                                self.logger.debug(f"Pipeline: Next TTS generated: {len(next_item.audio_data)} bytes")
-                                        except Exception as e:
-                                            self.logger.error(f"Pipeline generation error: {e}", exc_info=True)
-                                    
-                                    next_gen_task = asyncio.create_task(generate_next())
-                                    prepared_item = next_item  # Store for next iteration
-                                    self.logger.debug(f"Pipeline: Started generating next item during playback (estimated {estimated_duration:.1f}s playback)")
-                        except asyncio.QueueEmpty:
-                            pass  # No next item, no pipeline needed
+                    try:
+                        if not item.audio_data:
+                            self.logger.debug(f"Generating TTS for {len(item.text)} chars")
+                            item.audio_data = await self._generate_tts(item.text, item.voice)
+                            if not item.audio_data:
+                                state.stats["errors"] += 1
+                                self.logger.warning("TTS generation failed")
+                                connect_task.cancel()
+                                try:
+                                    await connect_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                continue
+                            self.logger.debug(f"TTS generated: {len(item.audio_data)} bytes")
 
-                    # Connect to voice
-                    vc = await self._connect_to_voice(channel)
+                        estimated_duration = len(item.audio_data) / MP3_BYTES_PER_SECOND
+                        will_pipeline = estimated_duration > PIPELINE_THRESHOLD
+
+                        if will_pipeline:
+                            try:
+                                next_item = state.queue.get_nowait()
+                                if next_item.is_expired(MESSAGE_EXPIRY_TIME):
+                                    state.stats["dropped"] += 1
+                                    self.logger.debug("Pipeline: Next item expired, skipping pipeline")
+                                else:
+                                    next_member = guild.get_member(next_item.user_id)
+                                    if (
+                                        not next_member
+                                        or not next_member.voice
+                                        or not next_member.voice.channel
+                                        or next_member.voice.channel.id != next_item.channel_id
+                                    ):
+                                        state.stats["dropped"] += 1
+                                        self.logger.debug(
+                                            "Pipeline: Next item member not in queued VC, skipping pipeline"
+                                        )
+                                    elif not next_item.audio_data:
+                                        async def generate_next():
+                                            try:
+                                                self.logger.debug(
+                                                    f"Pipeline: Generating next TTS for {len(next_item.text)} chars"
+                                                )
+                                                next_item.audio_data = await self._generate_tts(
+                                                    next_item.text, next_item.voice
+                                                )
+                                                if next_item.audio_data:
+                                                    self.logger.debug(
+                                                        f"Pipeline: Next TTS generated: {len(next_item.audio_data)} bytes"
+                                                    )
+                                            except Exception as e:
+                                                self.logger.error(
+                                                    f"Pipeline generation error: {e}", exc_info=True
+                                                )
+
+                                        next_gen_task = asyncio.create_task(generate_next())
+                                        prepared_item = next_item
+                                        self.logger.debug(
+                                            f"Pipeline: Started generating next item during playback "
+                                            f"(estimated {estimated_duration:.1f}s playback)"
+                                        )
+                            except asyncio.QueueEmpty:
+                                pass
+
+                        vc = await connect_task
+                    except Exception:
+                        if not connect_task.done():
+                            connect_task.cancel()
+                            try:
+                                await connect_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                        raise
+
                     if not vc:
                         state.stats["errors"] += 1
                         self.logger.warning("Failed to connect to voice")
                         if next_gen_task:
                             next_gen_task.cancel()
-                        # Re-queue prepared item so it isn't lost (pipeline had removed it from queue)
                         if prepared_item:
                             try:
                                 state.queue.put_nowait(prepared_item)
@@ -2113,6 +2135,30 @@ class VoiceProcessingCog(commands.Cog):
         embed.timestamp = disnake.utils.utcnow()
 
         await inter.edit_original_response(embed=embed)
+
+    @tts_cmd.sub_command(name="join", description="Join your current voice channel")
+    async def tts_join(self, inter: disnake.ApplicationCommandInteraction):
+        """Manually join the caller's voice channel (useful to test UDP on Ptero)."""
+        await inter.response.defer(ephemeral=True)
+        if not self.enabled:
+            await inter.edit_original_response(content="TTS is disabled.")
+            return
+        member = inter.author if isinstance(inter.author, disnake.Member) else None
+        channel = getattr(getattr(member, "voice", None), "channel", None)
+        if not isinstance(channel, disnake.VoiceChannel):
+            await inter.edit_original_response(content="Join a voice channel first.")
+            return
+        vc = await self._connect_to_voice(channel)
+        if vc and vc.is_connected():
+            await inter.edit_original_response(content=f"Connected to **{channel.name}**.")
+        else:
+            await inter.edit_original_response(
+                content=(
+                    f"Could not finish voice UDP join to **{channel.name}**. "
+                    "Grant the bot Connect+Speak on that channel. On Docker bridge / "
+                    "Pterodactyl, host networking is usually required for Discord voice."
+                )
+            )
 
     @tts_cmd.sub_command(name="disconnect", description="Disconnect bot from voice")
     @manage_guild_check()
