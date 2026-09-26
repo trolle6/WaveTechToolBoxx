@@ -1546,9 +1546,16 @@ class VoiceProcessingCog(commands.Cog):
                                 self.logger.debug("Pipeline: Next item expired, skipping pipeline")
                             else:
                                 next_member = guild.get_member(next_item.user_id)
-                                if not next_member or not next_member.voice or not next_member.voice.channel:
+                                if (
+                                    not next_member
+                                    or not next_member.voice
+                                    or not next_member.voice.channel
+                                    or next_member.voice.channel.id != next_item.channel_id
+                                ):
                                     state.stats["dropped"] += 1
-                                    self.logger.debug("Pipeline: Next item member not in voice, skipping pipeline")
+                                    self.logger.debug(
+                                        "Pipeline: Next item member not in queued VC, skipping pipeline"
+                                    )
                                 elif not next_item.audio_data:
                                     # Start generating next item in background
                                     async def generate_next():
