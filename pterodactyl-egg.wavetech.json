@@ -7,7 +7,7 @@
   "exported_at": "2026-09-26T00:00:00+00:00",
   "name": "WaveTechToolBoxx (Python)",
   "author": "wavetech",
-  "description": "WaveTechToolBoxx: runs frozen repo startup.sh (git pull when AUTO_UPDATE=1, pip --prefix .local, python PY_FILE). Do not modify startup.sh.",
+  "description": "WaveTechToolBoxx: bash startup.sh. AUTO_UPDATE git pull, or GIT_HARD_RESET_NUKE=1 for fetch+reset --hard to BRANCH.",
   "features": null,
   "docker_images": {
     "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13",
@@ -119,6 +119,16 @@
       "user_viewable": true,
       "user_editable": true,
       "rules": "required|string",
+      "field_type": "text"
+    },
+    {
+      "name": "Git Hard Reset Nuke",
+      "description": "Use this to hard reset the repository only when conflicts can't be resolved easily and DO A BACKUP beforehand!!!",
+      "env_variable": "GIT_HARD_RESET_NUKE",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|boolean",
       "field_type": "text"
     }
   ]
