@@ -7,7 +7,7 @@
   "exported_at": "2026-09-26T00:00:00+00:00",
   "name": "WaveTechToolBoxx (Python)",
   "author": "wavetech",
-  "description": "WaveTechToolBoxx: force-reset to origin/master then bash startup.sh (never soft git pull).",
+  "description": "WaveTechToolBoxx: rm old startup.sh, FORCE RESET origin/master, bash startup.sh. Never soft git pull.",
   "features": null,
   "docker_images": {
     "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13",
@@ -16,7 +16,7 @@
     "Python 3.10": "ghcr.io/ptero-eggs/yolks:python_3.10"
   },
   "file_denylist": [],
-  "startup": "cd /home/container; if [[ ! -d .git ]]; then echo \"FATAL: no .git\"; exit 1; fi; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo \"Deployed: branch=master commit=$(git rev-parse --short HEAD)\"; exec bash /home/container/startup.sh",
+  "startup": "cd /home/container; rm -f startup.sh; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo \"Deployed: branch=master commit=$(git rev-parse --short HEAD)\"; exec bash /home/container/startup.sh",
   "config": {
     "files": "{}",
     "startup": "{\r\n    \"done\": \"Logged in as\"\r\n}",

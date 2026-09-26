@@ -1,54 +1,66 @@
-# Pterodactyl startup
+# Pterodactyl — READ THIS
 
-## Errors in your log (decoded)
+## Why you are stuck on `7a72b8b`
 
-| Log line | Meaning |
-|---|---|
-| `Updating 7a72b8b..e6781a1` then **commit or stash before you merge** | Soft `git pull` hit dirty `main.py` / `deploy.py` and **aborted**. Code never updated. |
-| `Starting unknown@7a72b8baf578` | Still on ancient commit (not current master). |
-| `Allowed channel configured` / `TTS enabled` at INFO | Old voice cog (master has these at DEBUG). |
-| `ExtensionNotFound: cogs.DALLE_cog` | Partial/stale tree after failed pull. |
-| Voice `TimeoutError` | Ptero host UDP limit — use NAS + host network for TTS. |
+Your panel Startup is effectively:
 
-If you ran `source startup.sh` and still see the merge abort: that was an **old local**
-`startup.sh` that only did `git pull`. Repo now ships a force-reset `startup.sh`.
+```text
+source startup.sh   ← OLD local file that only does soft `git pull`
+```
 
-## Fix RIGHT NOW (paste in Ptero console)
+That old file:
 
-Do **not** use the old `startup.sh` until this succeeds once:
+1. Runs `git pull`
+2. Aborts on dirty `main.py` / `deploy.py`
+3. Also aborts because untracked `startup.sh` blocks merge of the **new** `startup.sh`
+4. Then starts the bot anyway on ancient code
+
+**GitHub is fine. Your container never installs it.**
+
+## STOP. Paste this in the console NOW
+
+Do **not** type `source startup.sh`. Paste **all** of this:
 
 ```bash
 cd /home/container
+rm -f startup.sh
 git fetch origin master --prune
 git reset --hard HEAD
 git checkout -f -B master origin/master
 git reset --hard origin/master
+export GIT_BRANCH_ACTUAL=master
+echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"
 bash startup.sh
 ```
 
-You must see `FORCE RESET → origin/master` and `Deployed: branch=master commit=…`
-with a sha that is **not** `7a72b8b`.
+Success looks like:
 
-## Panel Startup field (replace egg default)
-
-```bash
-cd /home/container; if [[ ! -d .git ]]; then echo "FATAL: no .git"; exit 1; fi; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"; exec bash /home/container/startup.sh
+```text
+FORCE RESET → origin/master (discard local tracked changes)
+Deployed: branch=master commit=472d89a   # or newer — NOT 7a72b8b
+Starting master@...
+Loaded 4/4 cogs
 ```
 
-Or simply (after the one-time console fix above):
+## Then fix the panel Startup field
+
+Replace whatever is there (`source startup.sh` or stock `git pull`) with:
 
 ```bash
-bash /home/container/startup.sh
+cd /home/container; rm -f startup.sh; git fetch origin master --prune || exit 1; git reset --hard HEAD || true; git checkout -f -B master origin/master; git reset --hard origin/master; export GIT_BRANCH_ACTUAL=master; echo "Deployed: branch=master commit=$(git rev-parse --short HEAD)"; exec bash /home/container/startup.sh
 ```
 
-Variables: Docker **Python 3.12/3.13**, `PY_FILE=main.py`, `REQUIREMENTS_FILE=requirements.txt`,
-`BRANCH=master`. Secrets in Environment / `config.env` only.
+Save → Restart.
 
-## What startup.sh does
+## Log cheat sheet
 
-1. `git fetch` + `reset --hard` + `checkout -f -B master origin/master` (discards dirty tracked files)
-2. Selective `git clean` (keeps `config.env`, `.local`, archives, state)
-3. `pip --prefix .local` + `PYTHONPATH`
-4. Run `main.py`
+| You see | Means |
+|---|---|
+| `Updating 7a72b8b..` + stash/merge abort | Still on **old** soft-pull `startup.sh` |
+| `untracked ... startup.sh` would be overwritten | Old local `startup.sh` blocking the new one — `rm -f startup.sh` first |
+| `Starting unknown@7a72b8b` | Update never applied |
+| `FORCE RESET → origin/master` | Good — new path |
 
-Never uses soft `git pull`.
+## TTS
+
+Voice `TimeoutError` on Ptero is host UDP. Use NAS + `network_mode: host` for TTS.
