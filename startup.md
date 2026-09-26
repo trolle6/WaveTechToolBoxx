@@ -14,8 +14,9 @@ Bot joins **whatever VC the speaking author is in**.
 
 This host already proved Discord voice UDP works (`Connected to Public`). If **WaveTech A** (or another VC) hangs/times out and the log says Connect denied, fix that channel’s permissions — it is not a generic “Ptero can’t do UDP” failure.
 
-1. Channel → Permissions → add the bot (or its role) → Allow **Connect** + **Speak**.
-2. Or give the bot **Manage Roles** so it can self-grant a member overwrite on join.
+1. Channel → Permissions → **WaveTechTTS** (or **BOT**) → Allow **View Channel** + **Connect** + **Speak**.
+   If `@everyone` denies View, Connect-only allows do nothing.
+2. Or give the bot **Manage Roles** so it can self-grant View/Connect on join.
 3. Test: `/tts join` while you are in that VC.
 
 ## Variables

@@ -1176,15 +1176,60 @@ class VoiceProcessingCog(commands.Cog):
             parts.append(f"{name}: connect={ow.connect} speak={ow.speak} view={ow.view_channel}")
         return "; ".join(parts) if parts else "(no channel overwrites)"
 
+    async def _refresh_member(self, guild: disnake.Guild, user_id: int) -> disnake.Member | None:
+        try:
+            return await guild.fetch_member(user_id)
+        except Exception:
+            return guild.get_member(user_id)
+
+    async def _apply_voice_access_overwrite(
+        self,
+        channel: disnake.VoiceChannel,
+        target: disnake.Member | disnake.Role,
+        *,
+        label: str,
+    ) -> bool:
+        """Set View+Connect+Speak allow on a channel overwrite target."""
+        try:
+            overwrite = channel.overwrites_for(target)
+            overwrite.view_channel = True
+            overwrite.connect = True
+            overwrite.speak = True
+            await channel.set_permissions(
+                target,
+                overwrite=overwrite,
+                reason="TTS: View+Connect+Speak for author VC",
+            )
+            self.logger.info("Granted View+Connect+Speak on %r via %s", channel.name, label)
+            return True
+        except disnake.Forbidden:
+            return False
+        except Exception as e:
+            self.logger.debug("Overwrite grant via %s failed on %r: %s", label, channel.name, e)
+            return False
+
+    def _roles_granting_voice_view(self, channel: disnake.VoiceChannel, me: disnake.Member):
+        """Roles below the bot that already allow View(+Connect) on this channel."""
+        out: list[disnake.Role] = []
+        for target, ow in channel.overwrites.items():
+            if not isinstance(target, disnake.Role) or target.is_default():
+                continue
+            if target in me.roles or me.top_role <= target:
+                continue
+            if ow.view_channel is True and ow.connect is not False:
+                out.append(target)
+        out.sort(key=lambda r: r.position)
+        return out
+
     async def _ensure_voice_connect_perm(
         self, channel: disnake.VoiceChannel, me: disnake.Member
     ) -> bool:
         """
-        Ensure the bot can Connect (+ Speak) in this VC.
+        Ensure the bot can View + Connect (+ Speak) in this VC.
 
-        Ptero can join Public fine; WaveTech A fails when Discord denies Connect —
-        that looks exactly like a UDP timeout. Prefer a member overwrite self-grant
-        when the bot has Manage Roles; otherwise fail fast (do not burn 3×60s).
+        WaveTech A pattern: @everyone denies View; BOT/WaveTechTTS overwrites allow
+        Connect but leave View unset → disnake strips Connect (no View ⇒ no channel
+        perms). Public works because View is allowed there. This is not UDP.
         """
         perms = channel.permissions_for(me)
         if perms.connect or perms.administrator:
@@ -1195,49 +1240,63 @@ class VoiceProcessingCog(commands.Cog):
                 )
             return True
 
-        # VoiceChannel.permissions_for strips manage_roles when Connect is false —
-        # use guild-level flags to decide if we can edit overwrites.
+        missing_view = not perms.view_channel
+        if missing_view:
+            self.logger.warning(
+                "%r: bot has no View Channel (@everyone view deny; Connect overwrites "
+                "do nothing without View). Fixing…",
+                channel.name,
+            )
+
         gp = me.guild_permissions
         can_edit = gp.administrator or gp.manage_roles or gp.manage_channels
+
         if can_edit:
-            try:
-                overwrite = channel.overwrites_for(me)
-                overwrite.connect = True
-                overwrite.speak = True
-                overwrite.view_channel = True
-                await channel.set_permissions(
-                    me,
-                    overwrite=overwrite,
-                    reason="TTS: allow bot Connect+Speak in author VC",
-                )
-                self.logger.info(
-                    "Granted bot Connect+Speak on %r (member overwrite)",
-                    channel.name,
-                )
-                try:
-                    me = await channel.guild.fetch_member(me.id)
-                except Exception:
-                    pass
-                perms = channel.permissions_for(me)
-                if perms.connect or perms.administrator:
+            # 1) Member overwrite (WaveTechTTS entry in channel perms)
+            if await self._apply_voice_access_overwrite(channel, me, label="member overwrite"):
+                me = await self._refresh_member(channel.guild, me.id) or me
+                if channel.permissions_for(me).connect:
                     return True
-            except disnake.Forbidden:
-                self.logger.warning(
-                    "Cannot edit overwrites on %r (Forbidden) — need Manage Roles "
-                    "above the denied roles, or a human must allow Connect for the bot",
-                    channel.name,
-                )
-            except Exception as e:
-                self.logger.warning("Connect self-grant failed on %r: %s", channel.name, e)
+
+            # 2) Role overwrites the bot already has (e.g. BOT has Connect but not View)
+            for role in sorted(me.roles, key=lambda r: r.position, reverse=True):
+                if role.is_default():
+                    continue
+                if await self._apply_voice_access_overwrite(
+                    channel, role, label=f"role {role.name!r}"
+                ):
+                    me = await self._refresh_member(channel.guild, me.id) or me
+                    if channel.permissions_for(me).connect:
+                        return True
+
+        # 3) Take a role that already has View+Connect on this channel (e.g. Member, WaveBot)
+        if gp.administrator or gp.manage_roles:
+            for role in self._roles_granting_voice_view(channel, me):
+                try:
+                    await me.add_roles(role, reason=f"TTS: access {channel.name}")
+                    me = await self._refresh_member(channel.guild, me.id) or me
+                    if channel.permissions_for(me).connect:
+                        self.logger.info(
+                            "Added role %r so bot can join %r",
+                            role.name,
+                            channel.name,
+                        )
+                        return True
+                except disnake.Forbidden:
+                    continue
+                except Exception as e:
+                    self.logger.debug("add_roles(%s) failed: %s", role.name, e)
 
         self.logger.error(
-            "Cannot join %r — Discord denies Connect for this bot "
-            "(roles=%s). Overwrites: %s. Fix: channel Permissions → select the bot "
-            "→ Allow Connect + Speak. (Public worked on this host; this is not UDP.)",
+            "Cannot join %r — bot needs **View Channel** (and Connect+Speak). "
+            "@everyone denies View; Connect-only overwrites are ignored. "
+            "Discord → %r → Permissions → WaveTechTTS (or BOT) → Allow View Channel, "
+            "Connect, Speak. roles=%s",
+            channel.name,
             channel.name,
             [r.name for r in getattr(me, "roles", [])],
-            self._format_voice_overwrites(channel),
         )
+        self.logger.debug("Overwrites: %s", self._format_voice_overwrites(channel))
         return False
 
     async def _connect_to_voice(
