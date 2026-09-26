@@ -1218,7 +1218,7 @@ class VoiceProcessingCog(commands.Cog):
 
         vc = guild.voice_client
 
-        # Already connected to this exact channel - verify DAVE/media then return
+        # Already connected?
         if vc and vc.is_connected():
             ch = getattr(vc, "channel", None)
             if ch and ch.id == channel.id:
@@ -1230,13 +1230,39 @@ class VoiceProcessingCog(commands.Cog):
                 except Exception as e:
                     self.logger.debug(f"Disconnect for DAVE retry: {e}")
                 await asyncio.sleep(VOICE_CLEANUP_DELAY)
-            try:
-                await vc.disconnect()
-            except Exception as e:
-                self.logger.debug(f"Disconnect during reconnect: {e}")
-            await asyncio.sleep(VOICE_CLEANUP_DELAY)
+            elif ch and ch.id != channel.id:
+                # Switch with move_to — do NOT disconnect first. Disconnect-then-connect
+                # left the bot in limbo when the target VC UDP-failed, then the next
+                # queue item yanked it into a different channel (looked "random").
+                self.logger.info("Moving voice %s → %s", ch.name, channel.name)
+                try:
+                    await asyncio.wait_for(vc.move_to(channel), timeout=float(timeout))
+                    if await self._wait_for_voice_media_ready(vc):
+                        self.logger.info("Connected to %s", channel.name)
+                        return vc
+                    self.logger.warning(
+                        "move_to %s succeeded but DAVE not ready — will full reconnect",
+                        channel.name,
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.critical(
+                        "VOICE move/UDP TIMED OUT %s → %s — not abandoning via disconnect; "
+                        "dropping this join so a later item cannot yank the bot elsewhere",
+                        ch.name,
+                        channel.name,
+                    )
+                    await self._cleanup_stale_voice_client(guild)
+                    return None
+                except Exception as e:
+                    self.logger.warning("move_to %s failed: %s — full reconnect", channel.name, e)
+                try:
+                    await vc.disconnect(force=True)
+                except Exception as e:
+                    self.logger.debug(f"Disconnect after failed move_to: {e}")
+                await asyncio.sleep(VOICE_CLEANUP_DELAY)
 
         # Cleanup stale/invalid voice client (e.g. not connected but not cleaned)
+        vc = guild.voice_client
         if vc and not vc.is_connected():
             try:
                 vc.cleanup()
@@ -1466,14 +1492,34 @@ class VoiceProcessingCog(commands.Cog):
                         self.logger.debug("TTS item expired, dropping")
                         continue
 
-                    # Verify member is still in voice
+                    # Stick to the VC where the message was queued — do not follow the
+                    # member if they moved (that looked like the bot "randomly" hopping).
                     member = guild.get_member(item.user_id)
-                    if not member or not member.voice or not member.voice.channel:
+                    queued_channel = guild.get_channel(item.channel_id)
+                    if not isinstance(queued_channel, disnake.VoiceChannel):
                         state.stats["dropped"] += 1
-                        self.logger.debug("Member not in voice, dropping")
+                        self.logger.debug(
+                            "Queued voice channel %s gone — dropping TTS", item.channel_id
+                        )
+                        continue
+                    if (
+                        not member
+                        or not member.voice
+                        or not member.voice.channel
+                        or member.voice.channel.id != item.channel_id
+                    ):
+                        state.stats["dropped"] += 1
+                        self.logger.info(
+                            "User %s left queued VC %s — dropping TTS (not following)",
+                            item.user_id,
+                            queued_channel.name,
+                        )
                         continue
 
-                    channel = member.voice.channel
+                    channel = queued_channel
+                    self.logger.debug(
+                        "TTS play in %s for user %s", channel.name, item.user_id
+                    )
 
                     # Generate TTS if not already generated
                     if not item.audio_data:
