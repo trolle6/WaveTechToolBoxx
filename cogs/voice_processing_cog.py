@@ -301,6 +301,9 @@ class VoiceProcessingCog(commands.Cog):
         # Cleanup tasks
         self._cleanup_task: Optional[asyncio.Task] = None
         self._shutdown = asyncio.Event()
+        # Guilds where the bot is disconnecting on purpose (moving / retrying / leaving
+        # empty); its own voice-state "left" event must not tear down the queue there.
+        self._expected_disconnect: Set[int] = set()
         self._unloaded = False
 
         # TTS text-channel filter — do NOT reuse DISCORD_CHANNEL_ID (announcements / SS).
@@ -1398,6 +1401,18 @@ class VoiceProcessingCog(commands.Cog):
     async def _connect_to_voice(
         self, channel: disnake.VoiceChannel, timeout: int | None = None
     ) -> Optional[disnake.VoiceClient]:
+        guild = channel.guild
+        if not guild:
+            return await self._connect_to_voice_inner(channel, timeout)
+        self._expected_disconnect.add(guild.id)
+        try:
+            return await self._connect_to_voice_inner(channel, timeout)
+        finally:
+            self._expected_disconnect.discard(guild.id)
+
+    async def _connect_to_voice_inner(
+        self, channel: disnake.VoiceChannel, timeout: int | None = None
+    ) -> Optional[disnake.VoiceClient]:
         """
         Connect to voice channel with retries and robust edge-case handling.
 
@@ -1414,8 +1429,9 @@ class VoiceProcessingCog(commands.Cog):
 
         vc = guild.voice_client
 
-        # Sticky VC: once connected, stay until the channel empties or we are kicked.
-        # Never hop to another channel while still connected.
+        # Only called for a message written by someone in `channel`, so being elsewhere
+        # means the writer moved: follow them. Leaving empty channels is handled in
+        # on_voice_state_update.
         if vc and vc.is_connected():
             ch = getattr(vc, "channel", None)
             if ch and ch.id == channel.id:
@@ -1428,12 +1444,11 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.debug(f"Disconnect for DAVE retry: {e}")
                 await asyncio.sleep(VOICE_CLEANUP_DELAY)
             elif ch:
-                self.logger.debug(
-                    "Staying in %s — ignoring join request for %s (sticky VC until empty/kick)",
-                    ch.name,
-                    channel.name,
-                )
-                return None
+                self.logger.info("Moving from %s to %s (writer is there)", ch.name, channel.name)
+                # Fresh join instead of move_to(): reconnecting is the path proven to
+                # complete the DAVE handshake on this host.
+                await self._cleanup_stale_voice_client(guild)
+                await asyncio.sleep(VOICE_CLEANUP_DELAY)
 
         self.logger.info("Joining voice %r", channel.name)
 
@@ -1707,8 +1722,7 @@ class VoiceProcessingCog(commands.Cog):
                         continue
 
                     # Sticky VC rules:
-                    # - Author must still be in the channel they queued from
-                    # - If bot is already connected, only play for that same channel
+                    # Author must still be in the channel they queued from
                     member = guild.get_member(item.user_id)
                     queued_channel = guild.get_channel(item.channel_id)
                     if not isinstance(queued_channel, disnake.VoiceChannel):
@@ -1728,21 +1742,6 @@ class VoiceProcessingCog(commands.Cog):
                             "User %s left queued VC %s — dropping TTS",
                             item.user_id,
                             queued_channel.name,
-                        )
-                        continue
-
-                    current_vc = guild.voice_client
-                    if (
-                        current_vc
-                        and current_vc.is_connected()
-                        and getattr(current_vc, "channel", None)
-                        and current_vc.channel.id != item.channel_id
-                    ):
-                        state.stats["dropped"] += 1
-                        self.logger.info(
-                            "Dropping TTS for %s — bot sticky in %s",
-                            queued_channel.name,
-                            current_vc.channel.name,
                         )
                         continue
 
@@ -1920,19 +1919,6 @@ class VoiceProcessingCog(commands.Cog):
         if not message.author.voice or not message.author.voice.channel:
             return False
 
-        # Sticky VC: while the bot is already in a channel, only accept TTS from
-        # people in that same channel. Do not queue items that would pull it away.
-        vc = message.guild.voice_client
-        if vc and vc.is_connected() and getattr(vc, "channel", None):
-            if message.author.voice.channel.id != vc.channel.id:
-                self.logger.debug(
-                    "Ignoring TTS from %s in %s — bot sticky in %s",
-                    message.author.id,
-                    message.author.voice.channel.name,
-                    vc.channel.name,
-                )
-                return False
-
         # Check role (guard None/empty roles)
         author_roles = getattr(message.author, "roles", None) or []
         if self.tts_role_id:
@@ -2055,6 +2041,8 @@ class VoiceProcessingCog(commands.Cog):
         # Bot kicked / disconnected → clear state so the next TTS can rejoin
         if self.bot.user and member.id == self.bot.user.id:
             if before.channel and not after.channel:
+                if guild.id in self._expected_disconnect:
+                    return
                 self.logger.info(
                     "Left voice %s (kick/disconnect) — will rejoin on next TTS",
                     before.channel.name,
@@ -2087,16 +2075,31 @@ class VoiceProcessingCog(commands.Cog):
                             member.id,
                             guild.id,
                         )
-            
-            # Check if should disconnect (wait to avoid race conditions)
-            # Uses module-level VOICE_DISCONNECT_DELAY constant
-            if (vc := guild.voice_client) and vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
-                if not self._has_humans_in_voice(ch):
-                    await asyncio.sleep(VOICE_DISCONNECT_DELAY)
-                    if vc.is_connected() and (ch := vc.channel) and not vc.is_playing():
-                        if not self._has_humans_in_voice(ch):
-                            await vc.disconnect()
-                            await self._remove_state(guild.id)
+
+        # Someone left the bot's channel (disconnected OR moved to another VC):
+        # leave if no humans remain. Short delay avoids racing quick rejoins.
+        vc = guild.voice_client
+        if (
+            before.channel
+            and (not after.channel or after.channel.id != before.channel.id)
+            and vc
+            and vc.is_connected()
+            and getattr(vc, "channel", None)
+            and vc.channel.id == before.channel.id
+            and not self._has_humans_in_voice(vc.channel)
+        ):
+            await asyncio.sleep(VOICE_DISCONNECT_DELAY)
+            vc = guild.voice_client
+            if vc and vc.is_connected() and (ch := vc.channel) and not self._has_humans_in_voice(ch):
+                self.logger.info("Leaving %s — channel is empty", ch.name)
+                self._expected_disconnect.add(guild.id)
+                try:
+                    if vc.is_playing():
+                        vc.stop()
+                    await vc.disconnect()
+                    await self._remove_state(guild.id)
+                finally:
+                    self._expected_disconnect.discard(guild.id)
 
     # ============ CLEANUP ============
     async def _cleanup_loop(self):
