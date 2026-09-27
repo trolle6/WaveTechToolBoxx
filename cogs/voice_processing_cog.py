@@ -1120,7 +1120,7 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 pcm_source = disnake.FFmpegPCMAudio(
                     temp_file,
-                    before_options='-nostdin',
+                    before_options='-nostdin -loglevel error',
                     options=f'-vn -af {AUDIO_LOUDNORM_FILTER}'
                 )
                 audio = disnake.PCMVolumeTransformer(pcm_source, volume=self.tts_volume)
@@ -1412,21 +1412,6 @@ class VoiceProcessingCog(commands.Cog):
             self.logger.error("Cannot connect to voice: channel has no guild")
             return None
 
-        self.logger.info(
-            "Joining voice %r (timeout %ss)",
-            channel.name,
-            timeout,
-        )
-
-        me = getattr(guild, "me", None)
-        if self.bot.user:
-            try:
-                me = await guild.fetch_member(self.bot.user.id)
-            except Exception:
-                me = me or guild.get_member(self.bot.user.id)
-        if me is not None and not await self._ensure_voice_connect_perm(channel, me):
-            return None
-
         vc = guild.voice_client
 
         # Sticky VC: once connected, stay until the channel empties or we are kicked.
@@ -1443,12 +1428,23 @@ class VoiceProcessingCog(commands.Cog):
                     self.logger.debug(f"Disconnect for DAVE retry: {e}")
                 await asyncio.sleep(VOICE_CLEANUP_DELAY)
             elif ch:
-                self.logger.info(
+                self.logger.debug(
                     "Staying in %s — ignoring join request for %s (sticky VC until empty/kick)",
                     ch.name,
                     channel.name,
                 )
                 return None
+
+        self.logger.info("Joining voice %r", channel.name)
+
+        me = getattr(guild, "me", None)
+        if self.bot.user:
+            try:
+                me = await guild.fetch_member(self.bot.user.id)
+            except Exception:
+                me = me or guild.get_member(self.bot.user.id)
+        if me is not None and not await self._ensure_voice_connect_perm(channel, me):
+            return None
 
         # Cleanup stale/invalid voice client (e.g. not connected but not cleaned)
         vc = guild.voice_client
