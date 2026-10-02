@@ -98,6 +98,8 @@ MIN_VALID_AUDIO_SIZE = 100  # Reject API responses smaller than this (likely err
 # voice/model to a consistent speech level, TTS_VOLUME trims on top (1.0 = no change).
 AUDIO_LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
 DEFAULT_TTS_VOLUME = 1.0
+DEFAULT_TTS_MAX_FILE_CHARS = 20000  # ~15-20 min of speech per attached .txt
+TEXT_ATTACHMENT_MAX_BYTES = 1024 * 1024
 TTS_SPEED = 1.0  # Natural speed (no artificial slowdown)
 
 # Every voice /v1/audio/speech documents for gpt-4o-mini-tts. tts-1 / tts-1-hd accept
@@ -136,9 +138,11 @@ class TTSQueueItem:
     voice: str
     audio_data: Optional[bytes] = None
     timestamp: float = 0.0
+    # Chunks of a long .txt file are queued at once and play for minutes back to back.
+    expires: bool = True
 
     def is_expired(self, max_age: int = 60) -> bool:
-        return (time.time() - self.timestamp) > max_age
+        return self.expires and (time.time() - self.timestamp) > max_age
 
 
 class GuildVoiceState:
@@ -270,6 +274,10 @@ class VoiceProcessingCog(commands.Cog):
         except (TypeError, ValueError):
             self.tts_volume = DEFAULT_TTS_VOLUME
         self.tts_volume = max(0.1, min(2.0, self.tts_volume))
+        try:
+            self.max_file_chars = int(getattr(bot.config, "TTS_MAX_FILE_CHARS", None) or DEFAULT_TTS_MAX_FILE_CHARS)
+        except (TypeError, ValueError):
+            self.max_file_chars = DEFAULT_TTS_MAX_FILE_CHARS
         self.logger.info(
             "TTS model %s, %s voices: %s",
             self.tts_model,
@@ -1927,6 +1935,37 @@ class VoiceProcessingCog(commands.Cog):
 
         return True
 
+    async def _read_text_attachments(self, message: disnake.Message) -> str:
+        """Return the decoded text of any .txt attachments, capped at max_file_chars."""
+        parts = []
+        remaining = self.max_file_chars
+        for att in message.attachments:
+            ctype = (att.content_type or "").lower()
+            if not (att.filename.lower().endswith(".txt") or ctype.startswith("text/plain")):
+                continue
+            if att.size > TEXT_ATTACHMENT_MAX_BYTES:
+                self.logger.warning("Skipping %s: %s bytes is over the 1 MB limit", att.filename, att.size)
+                continue
+            try:
+                data = await att.read()
+            except (disnake.HTTPException, aiohttp.ClientError) as e:
+                self.logger.warning("Could not download %s: %s", att.filename, e)
+                continue
+            text = data.decode("utf-8-sig", errors="replace").strip()
+            if not text:
+                continue
+            if len(text) > remaining:
+                self.logger.info(
+                    "%s is %s chars; reading the first %s (TTS_MAX_FILE_CHARS)",
+                    att.filename, len(text), remaining,
+                )
+                text = text[:remaining]
+            parts.append(text)
+            remaining -= len(text)
+            if remaining <= 0:
+                break
+        return "\n\n".join(parts)
+
     @commands.Cog.listener()
     async def on_message(self, message: disnake.Message):
         """Handle incoming messages for TTS"""
@@ -1952,6 +1991,9 @@ class VoiceProcessingCog(commands.Cog):
 
         # Log original message length (content can be None for embed-only messages)
         raw_content = message.content or ""
+        file_text = await self._read_text_attachments(message)
+        if file_text:
+            raw_content = f"{raw_content}\n{file_text}" if raw_content.strip() else file_text
         original_content_length = len(raw_content)
         self.logger.debug(f"Processing message from {message.author.display_name}: original length={original_content_length} chars")
         
@@ -2000,7 +2042,8 @@ class VoiceProcessingCog(commands.Cog):
                     channel_id=channel_id,
                     text=chunk,
                     voice=user_voice,
-                    timestamp=time.time()
+                    timestamp=time.time(),
+                    expires=not file_text,
                 ))
                 chunks_queued += 1
                 self.logger.debug(f"Queued chunk {i}/{len(text_chunks)}: length={len(chunk)} chars")

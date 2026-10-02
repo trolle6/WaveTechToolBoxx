@@ -73,6 +73,7 @@ CONFIG_DEFAULTS = {
     "OPENAI_VOICES": None,  # comma list; unset = all 13 voices
     "TTS_MODEL": "gpt-4o-mini-tts",
     "TTS_VOLUME": None,  # float 0.1–2.0 applied after loudness normalization (default 1.0)
+    "TTS_MAX_FILE_CHARS": None,  # max chars read aloud from attached .txt files (default 20000)
     "DISCORD_MODERATOR_ROLE_ID": None,
     "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
 }
