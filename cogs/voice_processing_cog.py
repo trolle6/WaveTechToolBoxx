@@ -212,6 +212,7 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         self.enabled = True
+        self._skip_log_times: Dict[tuple, float] = {}
         self.logger.debug("TTS enabled")
         
         # Check FFmpeg and Discord DAVE (E2EE voice) dependencies
@@ -1906,6 +1907,15 @@ class VoiceProcessingCog(commands.Cog):
             await self._remove_state(guild_id)
 
     # ============ MESSAGE PROCESSING ============
+    def _log_skip(self, message: disnake.Message, reason: str) -> None:
+        key = (message.author.id, reason)
+        now = time.time()
+        if now - self._skip_log_times.get(key, 0) < 60:
+            return
+        self._skip_log_times[key] = now
+        self.logger.info("Ignored message from %s in #%s: %s",
+                         message.author.display_name, getattr(message.channel, "name", "?"), reason)
+
     async def _should_process_message(self, message: disnake.Message) -> bool:
         """Check if message should be processed"""
         if not self.enabled or message.author.bot or not message.guild:
@@ -1921,16 +1931,20 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel restriction (default: #no-mic-bot only)
         if not self._is_allowed_tts_text_channel(message.channel):
+            if self.allowed_channel is not None and getattr(message.author, "voice", None):
+                self._log_skip(message, f"TTS only reads <#{self.allowed_channel}>")
             return False
 
         # Check voice
         if not message.author.voice or not message.author.voice.channel:
+            self._log_skip(message, "author is not in a voice channel")
             return False
 
         # Check role (guard None/empty roles)
         author_roles = getattr(message.author, "roles", None) or []
         if self.tts_role_id:
             if not any(getattr(r, "id", None) == self.tts_role_id for r in author_roles):
+                self._log_skip(message, f"author lacks TTS_ROLE_ID {self.tts_role_id}")
                 return False
 
         return True
@@ -1974,6 +1988,7 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check rate limit
         if not await self.rate_limiter.check(str(message.author.id)):
+            self._log_skip(message, "rate limited")
             return
 
         # Name announcement: check if this session warrants "X says:" prefix (2-hour cooldown)
@@ -2001,7 +2016,7 @@ class VoiceProcessingCog(commands.Cog):
         # grammar corrections, and pronunciation improvement for acronyms/usernames in body
         cleaned_text = await self._clean_text(raw_content, max_length=None)
         if not cleaned_text or not cleaned_text.strip():
-            self.logger.debug("Cleaned text is empty, skipping")
+            self._log_skip(message, "no readable text (Message Content Intent off?)")
             return
         
         if is_first_message:
