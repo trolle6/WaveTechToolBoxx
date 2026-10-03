@@ -482,10 +482,23 @@ class VoiceProcessingCog(commands.Cog):
                     # Remove invalid assignment
                     guild_assignments.pop(user_id, None)
             
-            # Assign new voice for this session (deterministic based on user_id)
-            # Use modulo to ensure consistent assignment per user
-            voice_index = user_id % len(self.available_voices)
-            new_voice = self.available_voices[voice_index]
+            # One voice per user: prefer user_id's usual voice, else the next free one.
+            # When every voice is taken, all assignments in this guild are reset.
+            voices = self.available_voices
+            voice_index = user_id % len(voices)
+            taken = {a.get("voice") for a in guild_assignments.values() if isinstance(a, dict)}
+            new_voice = next(
+                (voices[(voice_index + i) % len(voices)] for i in range(len(voices))
+                 if voices[(voice_index + i) % len(voices)] not in taken),
+                None,
+            )
+            if new_voice is None:
+                self.logger.info(
+                    "All %s voices in use in %s; resetting voice assignments",
+                    len(voices), member.guild.name,
+                )
+                guild_assignments.clear()
+                new_voice = voices[voice_index]
             
             # Store assignment with timestamp
             guild_assignments[user_id] = {
