@@ -1132,8 +1132,9 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 pcm_source = disnake.FFmpegPCMAudio(
                     temp_file,
-                    before_options='-nostdin -loglevel error',
-                    options=f'-vn -af {AUDIO_LOUDNORM_FILTER}'
+                    before_options='-nostdin',
+                    # disnake appends its own "-loglevel warning" after -i; ours must come later to win.
+                    options=f'-vn -af {AUDIO_LOUDNORM_FILTER} -loglevel error'
                 )
                 audio = disnake.PCMVolumeTransformer(pcm_source, volume=self.tts_volume)
             except Exception as e:
@@ -2068,6 +2069,16 @@ class VoiceProcessingCog(commands.Cog):
                 break
 
         self.logger.debug("Queued TTS: %s chars → %s chunks → %s queued", original_content_length, len(text_chunks), chunks_queued)
+        if chunks_queued:
+            preview = " ".join(cleaned_text.split())
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            extras = [message.author.voice.channel.name, user_voice, f"{len(cleaned_text)} chars"]
+            if file_text:
+                extras.append("from .txt")
+            if chunks_queued > 1:
+                extras.append(f"{chunks_queued} parts")
+            self.logger.info("%s - %s  [%s]", message.author.display_name, preview, ", ".join(extras))
 
         # Record name announcement only when we actually queued (so empty/filtered messages don't consume it)
         if chunks_queued > 0 and is_first_message:
