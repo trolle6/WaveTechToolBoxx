@@ -535,8 +535,10 @@ except RuntimeError as e:
 
 logger, discord_handler = setup_logging(config)
 
-# Initialize bot with all intents (needed for voice, members, etc.)
+# Privileged intents used: message_content (TTS reads text) and members (Secret Santa,
+# file distribution). Presences is never used, so it isn't requested.
 intents = disnake.Intents.all()
+intents.presences = False
 bot = commands.InteractionBot(intents=intents)
 bot.config = config
 bot.logger = logger
@@ -1087,6 +1089,15 @@ if __name__ == "__main__":
                 bot.run(config.DISCORD_TOKEN, reconnect=True)
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt - shutting down")
+                shutdown_flag[0] = True
+                break
+            except disnake.PrivilegedIntentsRequired:
+                logger.critical(
+                    "Discord refused the login: privileged intents are off for this bot. "
+                    "Fix: https://discord.com/developers/applications -> your bot -> Bot -> "
+                    "'Privileged Gateway Intents' -> turn ON 'Server Members Intent' and "
+                    "'Message Content Intent' -> Save, then restart. Not retrying until then."
+                )
                 shutdown_flag[0] = True
                 break
             except Exception as e:
