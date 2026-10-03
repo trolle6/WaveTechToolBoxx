@@ -6,12 +6,18 @@
 bash /home/container/startup.sh
 ```
 
-(`source startup.sh` also works.) With `AUTO_UPDATE=1`, every start:
+(`source startup.sh` also works.)
 
-1. Fetches `BRANCH` (default `master`) and forces the code to match GitHub exactly.
-2. Stashes code edits made on the server first, so they never block an update. Recover with `git stash list` / `git stash show -p`. **Make code changes on GitHub, not on the server.**
-3. Keeps `config.env`, `cogs/archive/` (Secret Santa years) and other bot data untouched.
-4. Prints `[update] Updated master: old -> new` or `[update] Already on latest master (sha)`; the bot then logs `Starting unknown@<sha>`.
+**Normal start (`AUTO_UPDATE=1`, nuke OFF): safe.** The code is only fast-forwarded to GitHub, and nothing on the server is ever overwritten or deleted. Server edits in files the update doesn't touch stay as they are. If a server edit clashes with the update, the update is skipped and the log names the file:
+
+```
+[update] WARNING: update to origin/master SKIPPED; nothing on the server was changed.
+[update]   blocked by: main.py
+```
+
+**`GIT_HARD_RESET_NUKE` ON (rare cases only):** the code is forced to match GitHub. Edited tracked files are backed up to `git stash list` first. `config.env`, bot data files and `cogs/archive/` are kept. Turn it OFF again after that boot.
+
+Each boot logs `[update] Updated master: old -> new` or `[update] Running master at <sha>`, and the bot logs `Starting unknown@<sha>`.
 
 ## Voice / TTS on Pterodactyl
 
@@ -32,3 +38,4 @@ This host already proved Discord voice UDP works (`Connected to Public`). If **W
 | `PY_FILE` | `main.py` |
 | `REQUIREMENTS_FILE` | `requirements.txt` |
 | `BRANCH` | `master` (branch auto-update follows) |
+| `GIT_HARD_RESET_NUKE` | OFF normally; ON for one boot to force-sync the code |
