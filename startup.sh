@@ -14,7 +14,12 @@ if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then
     [[ -z "$_branch" || "$_branch" == "HEAD" ]] && _branch=master
     _before=$(git rev-parse --short HEAD 2>/dev/null)
     _nuke=0
-    case "${GIT_HARD_RESET_NUKE,,}" in 1|true|yes|on) _nuke=1 ;; esac
+    # Panel variable names vary (GIT_HARD_RESET_NUKE, HARD_RESET_NUKE, GIT_NUKE...); accept any *NUKE*.
+    _nukevars=$(env | grep -iE '^[A-Z0-9_]*NUKE[A-Z0-9_]*=' || true)
+    while IFS='=' read -r _k _v; do
+        case "${_v,,}" in 1|true|yes|on) _nuke=1 ;; esac
+    done <<< "$_nukevars"
+    echo "[update] Hard reset toggle: ${_nukevars:-none found in panel variables} -> $([[ $_nuke == 1 ]] && echo ON || echo off)"
     if ! git fetch -q origin "$_branch"; then
         echo "[update] WARNING: git fetch failed; starting current code ($_before)"
     elif [[ $_nuke == 1 ]]; then
@@ -40,7 +45,7 @@ if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then
     else
         echo "[update] Updated $_branch: $_before -> $_after"
     fi
-    unset _root _branch _before _after _keep _nuke _out
+    unset _root _branch _before _after _keep _nuke _out _nukevars _k _v
 fi
 
 if [[ -n "${PY_PACKAGES}" ]]; then pip install -q -U --prefix .local ${PY_PACKAGES}; fi
