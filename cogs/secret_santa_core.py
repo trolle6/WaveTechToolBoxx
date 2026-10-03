@@ -1167,7 +1167,7 @@ class SecretSantaCore(commands.Cog):
             return text
 
         payload = {
-            "model": str(getattr(self.bot.config, "PRONUNCIATION_MODEL", None) or "gpt-5.6-terra").strip(),
+            "model": str(getattr(self.bot.config, "CHAT_MODEL", None) or "gpt-5.6-terra").strip(),
             "messages": [{
                 "role": "user",
                 "content": (

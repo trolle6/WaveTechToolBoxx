@@ -266,7 +266,7 @@ class VoiceProcessingCog(commands.Cog):
         self._announcement_lock = asyncio.Lock()
 
         # TTS config
-        self.pronunciation_model = str(getattr(bot.config, "PRONUNCIATION_MODEL", None) or "gpt-5.6-terra").strip()
+        self.chat_model = str(getattr(bot.config, "CHAT_MODEL", None) or "gpt-5.6-terra").strip()
         self.tts_url = str(getattr(bot.config, "TTS_URL", None) or "https://api.openai.com/v1/audio/speech").strip()
         self.tts_model = str(getattr(bot.config, "TTS_MODEL", None) or "gpt-4o-mini-tts").strip()
         self.available_voices = self._parse_voice_pool(getattr(bot.config, "OPENAI_VOICES", None))
@@ -632,7 +632,7 @@ class VoiceProcessingCog(commands.Cog):
         estimated_tokens = int(len(text) / 4 * 1.5)
         max_tokens = min(2000, max(200, estimated_tokens))
         payload = {
-            "model": self.pronunciation_model,
+            "model": self.chat_model,
             "messages": [{"role": "user", "content": prompt}],
             # max_completion_tokens / no temperature: accepted by both older and reasoning chat models
             "max_completion_tokens": max_tokens,
