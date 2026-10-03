@@ -98,6 +98,8 @@ MIN_VALID_AUDIO_SIZE = 100  # Reject API responses smaller than this (likely err
 # voice/model to a consistent speech level, TTS_VOLUME trims on top (1.0 = no change).
 AUDIO_LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
 DEFAULT_TTS_VOLUME = 1.0
+DEFAULT_TTS_MAX_FILE_CHARS = 20000  # ~15-20 min of speech per attached .txt
+TEXT_ATTACHMENT_MAX_BYTES = 1024 * 1024
 TTS_SPEED = 1.0  # Natural speed (no artificial slowdown)
 
 # Every voice /v1/audio/speech documents for gpt-4o-mini-tts. tts-1 / tts-1-hd accept
@@ -136,9 +138,11 @@ class TTSQueueItem:
     voice: str
     audio_data: Optional[bytes] = None
     timestamp: float = 0.0
+    # Chunks of a long .txt file are queued at once and play for minutes back to back.
+    expires: bool = True
 
     def is_expired(self, max_age: int = 60) -> bool:
-        return (time.time() - self.timestamp) > max_age
+        return self.expires and (time.time() - self.timestamp) > max_age
 
 
 class GuildVoiceState:
@@ -208,6 +212,7 @@ class VoiceProcessingCog(commands.Cog):
             return
 
         self.enabled = True
+        self._skip_log_times: Dict[tuple, float] = {}
         self.logger.debug("TTS enabled")
         
         # Check FFmpeg and Discord DAVE (E2EE voice) dependencies
@@ -261,7 +266,8 @@ class VoiceProcessingCog(commands.Cog):
         self._announcement_lock = asyncio.Lock()
 
         # TTS config
-        self.tts_url = "https://api.openai.com/v1/audio/speech"
+        self.chat_model = str(getattr(bot.config, "CHAT_MODEL", None) or "gpt-5.6-terra").strip()
+        self.tts_url = str(getattr(bot.config, "TTS_URL", None) or "https://api.openai.com/v1/audio/speech").strip()
         self.tts_model = str(getattr(bot.config, "TTS_MODEL", None) or "gpt-4o-mini-tts").strip()
         self.available_voices = self._parse_voice_pool(getattr(bot.config, "OPENAI_VOICES", None))
         self.default_voice = "alloy" if "alloy" in self.available_voices else self.available_voices[0]
@@ -270,6 +276,10 @@ class VoiceProcessingCog(commands.Cog):
         except (TypeError, ValueError):
             self.tts_volume = DEFAULT_TTS_VOLUME
         self.tts_volume = max(0.1, min(2.0, self.tts_volume))
+        try:
+            self.max_file_chars = int(getattr(bot.config, "TTS_MAX_FILE_CHARS", None) or DEFAULT_TTS_MAX_FILE_CHARS)
+        except (TypeError, ValueError):
+            self.max_file_chars = DEFAULT_TTS_MAX_FILE_CHARS
         self.logger.info(
             "TTS model %s, %s voices: %s",
             self.tts_model,
@@ -622,10 +632,10 @@ class VoiceProcessingCog(commands.Cog):
         estimated_tokens = int(len(text) / 4 * 1.5)
         max_tokens = min(2000, max(200, estimated_tokens))
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": self.chat_model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.1
+            # max_completion_tokens / no temperature: accepted by both older and reasoning chat models
+            "max_completion_tokens": max_tokens,
         }
         self.logger.debug(f"Pronunciation improvement API: input_length={len(text)}, max_tokens={max_tokens}")
 
@@ -868,8 +878,8 @@ class VoiceProcessingCog(commands.Cog):
             if not name:
                 continue
             if name not in ALL_TTS_VOICES:
-                self.logger.warning("OPENAI_VOICES: unknown voice %r ignored", name)
-                continue
+                # Kept so a newer TTS_MODEL's voices work without a code change; a 400 drops it at runtime.
+                self.logger.info("OPENAI_VOICES: %r is not a known voice; trying it anyway", name)
             if name not in pool:
                 pool.append(name)
         return pool or list(ALL_TTS_VOICES)
@@ -1123,8 +1133,9 @@ class VoiceProcessingCog(commands.Cog):
             try:
                 pcm_source = disnake.FFmpegPCMAudio(
                     temp_file,
-                    before_options='-nostdin -loglevel error',
-                    options=f'-vn -af {AUDIO_LOUDNORM_FILTER}'
+                    before_options='-nostdin',
+                    # disnake appends its own "-loglevel warning" after -i; ours must come later to win.
+                    options=f'-vn -af {AUDIO_LOUDNORM_FILTER} -loglevel error'
                 )
                 audio = disnake.PCMVolumeTransformer(pcm_source, volume=self.tts_volume)
             except Exception as e:
@@ -1898,6 +1909,15 @@ class VoiceProcessingCog(commands.Cog):
             await self._remove_state(guild_id)
 
     # ============ MESSAGE PROCESSING ============
+    def _log_skip(self, message: disnake.Message, reason: str) -> None:
+        key = (message.author.id, reason)
+        now = time.time()
+        if now - self._skip_log_times.get(key, 0) < 60:
+            return
+        self._skip_log_times[key] = now
+        self.logger.info("Ignored message from %s in #%s: %s",
+                         message.author.display_name, getattr(message.channel, "name", "?"), reason)
+
     async def _should_process_message(self, message: disnake.Message) -> bool:
         """Check if message should be processed"""
         if not self.enabled or message.author.bot or not message.guild:
@@ -1913,19 +1933,54 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel restriction (default: #no-mic-bot only)
         if not self._is_allowed_tts_text_channel(message.channel):
+            if self.allowed_channel is not None and getattr(message.author, "voice", None):
+                self._log_skip(message, f"TTS only reads <#{self.allowed_channel}>")
             return False
 
         # Check voice
         if not message.author.voice or not message.author.voice.channel:
+            self._log_skip(message, "author is not in a voice channel")
             return False
 
         # Check role (guard None/empty roles)
         author_roles = getattr(message.author, "roles", None) or []
         if self.tts_role_id:
             if not any(getattr(r, "id", None) == self.tts_role_id for r in author_roles):
+                self._log_skip(message, f"author lacks TTS_ROLE_ID {self.tts_role_id}")
                 return False
 
         return True
+
+    async def _read_text_attachments(self, message: disnake.Message) -> str:
+        """Return the decoded text of any .txt attachments, capped at max_file_chars."""
+        parts = []
+        remaining = self.max_file_chars
+        for att in message.attachments:
+            ctype = (att.content_type or "").lower()
+            if not (att.filename.lower().endswith(".txt") or ctype.startswith("text/plain")):
+                continue
+            if att.size > TEXT_ATTACHMENT_MAX_BYTES:
+                self.logger.warning("Skipping %s: %s bytes is over the 1 MB limit", att.filename, att.size)
+                continue
+            try:
+                data = await att.read()
+            except (disnake.HTTPException, aiohttp.ClientError) as e:
+                self.logger.warning("Could not download %s: %s", att.filename, e)
+                continue
+            text = data.decode("utf-8-sig", errors="replace").strip()
+            if not text:
+                continue
+            if len(text) > remaining:
+                self.logger.info(
+                    "%s is %s chars; reading the first %s (TTS_MAX_FILE_CHARS)",
+                    att.filename, len(text), remaining,
+                )
+                text = text[:remaining]
+            parts.append(text)
+            remaining -= len(text)
+            if remaining <= 0:
+                break
+        return "\n\n".join(parts)
 
     @commands.Cog.listener()
     async def on_message(self, message: disnake.Message):
@@ -1935,6 +1990,7 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check rate limit
         if not await self.rate_limiter.check(str(message.author.id)):
+            self._log_skip(message, "rate limited")
             return
 
         # Name announcement: check if this session warrants "X says:" prefix (2-hour cooldown)
@@ -1952,6 +2008,9 @@ class VoiceProcessingCog(commands.Cog):
 
         # Log original message length (content can be None for embed-only messages)
         raw_content = message.content or ""
+        file_text = await self._read_text_attachments(message)
+        if file_text:
+            raw_content = f"{raw_content}\n{file_text}" if raw_content.strip() else file_text
         original_content_length = len(raw_content)
         self.logger.debug(f"Processing message from {message.author.display_name}: original length={original_content_length} chars")
         
@@ -1959,7 +2018,7 @@ class VoiceProcessingCog(commands.Cog):
         # grammar corrections, and pronunciation improvement for acronyms/usernames in body
         cleaned_text = await self._clean_text(raw_content, max_length=None)
         if not cleaned_text or not cleaned_text.strip():
-            self.logger.debug("Cleaned text is empty, skipping")
+            self._log_skip(message, "no readable text (Message Content Intent off?)")
             return
         
         if is_first_message:
@@ -2000,7 +2059,8 @@ class VoiceProcessingCog(commands.Cog):
                     channel_id=channel_id,
                     text=chunk,
                     voice=user_voice,
-                    timestamp=time.time()
+                    timestamp=time.time(),
+                    expires=not file_text,
                 ))
                 chunks_queued += 1
                 self.logger.debug(f"Queued chunk {i}/{len(text_chunks)}: length={len(chunk)} chars")
@@ -2010,6 +2070,16 @@ class VoiceProcessingCog(commands.Cog):
                 break
 
         self.logger.debug("Queued TTS: %s chars → %s chunks → %s queued", original_content_length, len(text_chunks), chunks_queued)
+        if chunks_queued:
+            preview = " ".join(cleaned_text.split())
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            extras = [message.author.voice.channel.name, user_voice, f"{len(cleaned_text)} chars"]
+            if file_text:
+                extras.append("from .txt")
+            if chunks_queued > 1:
+                extras.append(f"{chunks_queued} parts")
+            self.logger.info("%s - %s  [%s]", message.author.display_name, preview, ", ".join(extras))
 
         # Record name announcement only when we actually queued (so empty/filtered messages don't consume it)
         if chunks_queued > 0 and is_first_message:

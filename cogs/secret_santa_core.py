@@ -1167,7 +1167,7 @@ class SecretSantaCore(commands.Cog):
             return text
 
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": str(getattr(self.bot.config, "CHAT_MODEL", None) or "gpt-5.6-terra").strip(),
             "messages": [{
                 "role": "user",
                 "content": (
@@ -1178,8 +1178,7 @@ class SecretSantaCore(commands.Cog):
                     "Original: {text}\n\nRewritten:"
                 ).format(type=message_type, text=text)
             }],
-            "max_tokens": 150,
-            "temperature": 0.2
+            "max_completion_tokens": 150,
         }
         last_error = None
         for attempt in range(ANONYMIZE_RETRY_MAX):
