@@ -72,6 +72,8 @@ CONFIG_DEFAULTS = {
     "TTS_CHANNEL_NAME": "no-mic-bot",  # set to "all" to listen in every text channel
     "OPENAI_VOICES": None,  # comma list; unset = all 13 voices
     "TTS_MODEL": "gpt-4o-mini-tts",
+    "PRONUNCIATION_MODEL": None,  # chat model for TTS gamertags + Secret Santa anonymizing (default gpt-5.6-terra)
+    "TTS_URL": None,  # default https://api.openai.com/v1/audio/speech
     "TTS_VOLUME": None,  # float 0.1–2.0 applied after loudness normalization (default 1.0)
     "TTS_MAX_FILE_CHARS": None,  # max chars read aloud from attached .txt files (default 20000)
     "DISCORD_MODERATOR_ROLE_ID": None,

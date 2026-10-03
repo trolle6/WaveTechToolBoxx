@@ -266,7 +266,8 @@ class VoiceProcessingCog(commands.Cog):
         self._announcement_lock = asyncio.Lock()
 
         # TTS config
-        self.tts_url = "https://api.openai.com/v1/audio/speech"
+        self.pronunciation_model = str(getattr(bot.config, "PRONUNCIATION_MODEL", None) or "gpt-5.6-terra").strip()
+        self.tts_url = str(getattr(bot.config, "TTS_URL", None) or "https://api.openai.com/v1/audio/speech").strip()
         self.tts_model = str(getattr(bot.config, "TTS_MODEL", None) or "gpt-4o-mini-tts").strip()
         self.available_voices = self._parse_voice_pool(getattr(bot.config, "OPENAI_VOICES", None))
         self.default_voice = "alloy" if "alloy" in self.available_voices else self.available_voices[0]
@@ -631,10 +632,10 @@ class VoiceProcessingCog(commands.Cog):
         estimated_tokens = int(len(text) / 4 * 1.5)
         max_tokens = min(2000, max(200, estimated_tokens))
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": self.pronunciation_model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.1
+            # max_completion_tokens / no temperature: accepted by both older and reasoning chat models
+            "max_completion_tokens": max_tokens,
         }
         self.logger.debug(f"Pronunciation improvement API: input_length={len(text)}, max_tokens={max_tokens}")
 
@@ -877,8 +878,8 @@ class VoiceProcessingCog(commands.Cog):
             if not name:
                 continue
             if name not in ALL_TTS_VOICES:
-                self.logger.warning("OPENAI_VOICES: unknown voice %r ignored", name)
-                continue
+                # Kept so a newer TTS_MODEL's voices work without a code change; a 400 drops it at runtime.
+                self.logger.info("OPENAI_VOICES: %r is not a known voice; trying it anyway", name)
             if name not in pool:
                 pool.append(name)
         return pool or list(ALL_TTS_VOICES)
