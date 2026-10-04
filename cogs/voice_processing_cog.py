@@ -1946,8 +1946,6 @@ class VoiceProcessingCog(commands.Cog):
 
         # Check channel restriction (default: #no-mic-bot only)
         if not self._is_allowed_tts_text_channel(message.channel):
-            if self.allowed_channel is not None and getattr(message.author, "voice", None):
-                self._log_skip(message, f"TTS only reads <#{self.allowed_channel}>")
             return False
 
         # Check voice
