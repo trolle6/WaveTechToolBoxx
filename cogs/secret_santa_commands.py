@@ -43,6 +43,12 @@ from .secret_santa_core import DISCORD_LOCALE_TO_IANA
 class SecretSantaCommandsMixin:
     """Slash commands; mixed into SecretSantaCog."""
 
+    async def cog_before_slash_command_invoke(self, inter: disnake.ApplicationCommandInteraction):
+        opts = getattr(inter, "filled_options", None) or {}
+        args = " ".join(f"{k}={v!r}" for k, v in opts.items())
+        self.logger.info("SS /%s by %s%s", inter.application_command.qualified_name,
+                         inter.author.display_name, f" {args}" if args else "")
+
     @commands.slash_command(name="ss")
     async def ss_root(self, inter: disnake.ApplicationCommandInteraction):
         """Secret Santa commands"""
@@ -2358,6 +2364,7 @@ class SecretSantaCommandsMixin:
                 return
             current["participants"][user_id] = name
             await self._save_async()
+        self.logger.info("SS join: %s (%s participants)", name, len(current["participants"]))
 
         # Participant role on join (if configured on /ss start)
         if payload.guild_id:
@@ -2417,9 +2424,12 @@ class SecretSantaCommandsMixin:
                     if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
                         return  # Event was stopped or is different, don't modify
                     participants = current.get("participants")
+                    left_name = None
                     if isinstance(participants, dict):
-                        participants.pop(user_id, None)
+                        left_name = participants.pop(user_id, None)
                     await self._save_async()
+                self.logger.info("SS leave: %s (%s participants)", left_name or user_id,
+                                 len(participants) if isinstance(participants, dict) else 0)
 
                 if payload.guild_id:
                     guild = self.bot.get_guild(payload.guild_id)

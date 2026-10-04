@@ -587,6 +587,13 @@ class SecretSantaCore(commands.Cog):
                 "timestamp": time.time()
             })
             await self._save_async()
+        names = event.get("participants") or {}
+        santa = names.get(str(santa_id), santa_id) if isinstance(names, dict) else santa_id
+        giftee = names.get(str(giftee_id), giftee_id) if isinstance(names, dict) else giftee_id
+        sender, receiver = (giftee, santa) if msg_type == "reply" else (santa, giftee)
+        self.logger.info("SS %s %s -> %s: %s", msg_type, sender, receiver, message)
+        if rewritten and rewritten != message:
+            self.logger.info("SS %s (sent anonymized): %s", msg_type, rewritten)
     
     def _format_dm_question(self, rewritten_question: str, year: int) -> str:
         """DM to giftee — speak to *you*; never @mention the reader (no self-ping)."""
