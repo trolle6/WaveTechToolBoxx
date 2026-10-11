@@ -77,7 +77,6 @@ def check_environment():
     required_vars = [
         "DISCORD_TOKEN",
         "DISCORD_CHANNEL_ID",
-        "DISCORD_LOG_CHANNEL_ID",
         "OPENAI_API_KEY",
     ]
     optional_vars = ["DISCORD_MODERATOR_ROLE_ID", "DEBUG_MODE", "LOG_LEVEL"]

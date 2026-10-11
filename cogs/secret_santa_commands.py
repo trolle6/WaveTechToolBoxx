@@ -59,7 +59,7 @@ class SecretSantaCommandsMixin:
     # 4. Optional: warn if current_year archive already exists (continue anyway) → 5. Collect participants from message.reactions (safe)
     # 6. Resolve timezone from Discord locale → 7. Parse shuffle / end if set; validate future and stop > shuffle
     # 8. Build new_event dict → 9. Under lock: if event already active return; else state.current_year + state.current_event = new_event; save
-    # 10. Send join DMs to participants → 11. Edit response with success + schedule info → 12. Optional Discord log
+    # 10. Send join DMs to participants → 11. Edit response with success + schedule info
     @ss_root.sub_command(name="start", description="Start Secret Santa (react on message to join)")
     @mod_check()
     async def ss_start(
@@ -130,11 +130,10 @@ class SecretSantaCommandsMixin:
             await self._safe_edit_response(inter, embed=embed)
             
             self.logger.warning(f"Starting new event for {current_year} but archive already exists!")
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log(
-                    f"⚠️ {safe_display_name(inter.author)} is starting a new Secret Santa {current_year} event, but {current_year}.json archive already exists!",
-                    "WARNING"
-                )
+            self._panel_log(
+                f"⚠️ {safe_display_name(inter.author)} is starting a new Secret Santa {current_year} event, but {current_year}.json archive already exists!",
+                "WARNING"
+            )
 
         if existing_archive.exists() and debug_start:
             self.logger.debug(
@@ -316,12 +315,10 @@ class SecretSantaCommandsMixin:
         
         await self._safe_edit_response(inter, content=response_msg)
         
-        # Notify Discord log channel
         log_msg = f"Secret Santa {current_year} event started by {safe_display_name(inter.author)} - {len(participants)} participants joined"
         if scheduled_timestamp:
             log_msg += f" (shuffle scheduled for <t:{int(scheduled_timestamp)}:F>)"
-        if hasattr(self.bot, 'send_to_discord_log'):
-            await self.bot.send_to_discord_log(log_msg, "SUCCESS")
+        self._panel_log(log_msg, "SUCCESS")
 
     async def _execute_shuffle_internal(self, inter: Optional[disnake.ApplicationCommandInteraction] = None, scheduler_id: Optional[int] = None) -> tuple[bool, Optional[str]]:
         """
@@ -419,11 +416,10 @@ class SecretSantaCommandsMixin:
                         error_msg = f"❌ {validation_error}"
                         if inter:
                             await self._safe_edit_response(inter, content=error_msg)
-                        if hasattr(self.bot, 'send_to_discord_log'):
-                            await self.bot.send_to_discord_log(
-                                f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
-                                "ERROR"
-                            )
+                        self._panel_log(
+                            f"Secret Santa assignment failed even with all fallbacks - {validation_error}",
+                            "ERROR"
+                        )
                         return False, error_msg
                     continue
                 
@@ -439,11 +435,10 @@ class SecretSantaCommandsMixin:
                         error_msg = f"❌ Assignment failed: {e}"
                         if inter:
                             await self._safe_edit_response(inter, content=error_msg)
-                        if hasattr(self.bot, 'send_to_discord_log'):
-                            await self.bot.send_to_discord_log(
-                                f"Secret Santa assignment failed even with all fallbacks - {e}",
-                                "ERROR"
-                            )
+                        self._panel_log(
+                            f"Secret Santa assignment failed even with all fallbacks - {e}",
+                            "ERROR"
+                        )
                         return False, error_msg
                     continue
             
@@ -486,11 +481,10 @@ class SecretSantaCommandsMixin:
         guild_id = event.get("guild_id")
         if failed:
             await self._post_fallback_for_failed_dms(guild_id, failed, "assignment", current_year)
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log(
-                    f"Secret Santa: {len(failed)} participant(s) did not receive assignment DM – fallback posted in channel",
-                    "WARNING",
-                )
+            self._panel_log(
+                f"Secret Santa: {len(failed)} participant(s) did not receive assignment DM – fallback posted in channel",
+                "WARNING",
+            )
 
         # Build success message
         response_msg = f"✅ Assignments complete!\n"
@@ -506,7 +500,7 @@ class SecretSantaCommandsMixin:
         if inter:
             await self._safe_edit_response(inter, content=response_msg)
         
-        # Notify Discord log channel (DM stats: e.g. "5/5 DMs sent" or "4/5 DMs sent (1 fallback)")
+        # Summary (DM stats: e.g. "5/5 DMs sent" or "4/5 DMs sent (1 fallback)")
         total_dms = len(dm_items)
         success_dms = total_dms - len(failed)
         dm_stats = f"{success_dms}/{total_dms} DMs sent"
@@ -514,11 +508,10 @@ class SecretSantaCommandsMixin:
             dm_stats += f" ({len(failed)} fallback in channel)"
         self.logger.debug("Shuffle complete: %s", dm_stats)
         executor_name = safe_display_name(inter.author) if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
-        if hasattr(self.bot, 'send_to_discord_log'):
-            log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs, {dm_stats}"
-            if fallback_used:
-                log_msg += f" (history fallback: excluded {', '.join(map(str, exclude_years))})"
-            await self.bot.send_to_discord_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")
+        log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs, {dm_stats}"
+        if fallback_used:
+            log_msg += f" (history fallback: excluded {', '.join(map(str, exclude_years))})"
+        self._panel_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")
         
         return True, None
 
@@ -569,21 +562,18 @@ class SecretSantaCommandsMixin:
                 guild_id = event.get("guild_id")
                 if failed:
                     await self._post_fallback_for_failed_dms(guild_id, failed, "stop", year)
-                    if hasattr(self.bot, 'send_to_discord_log'):
-                        await self.bot.send_to_discord_log(
-                            f"Secret Santa stop: {len(failed)} participant(s) did not receive DM – fallback posted in channel",
-                            "WARNING",
-                        )
+                    self._panel_log(
+                        f"Secret Santa stop: {len(failed)} participant(s) did not receive DM – fallback posted in channel",
+                        "WARNING",
+                    )
 
-        # Notify Discord log channel
-        if hasattr(self.bot, 'send_to_discord_log'):
-            participants_count = len(event.get("participants", {}))
-            gifts_count = len(event.get("gift_submissions", {}))
-            executor_name = f"User {stopper_id}" if stopper_id else "Scheduled task"
-            await self.bot.send_to_discord_log(
-                f"Secret Santa {year} event stopped by {executor_name} - {participants_count} participants, {gifts_count} gifts submitted",
-                "INFO"
-            )
+        participants_count = len(event.get("participants", {}))
+        gifts_count = len(event.get("gift_submissions", {}))
+        executor_name = f"User {stopper_id}" if stopper_id else "Scheduled task"
+        self._panel_log(
+            f"Secret Santa {year} event stopped by {executor_name} - {participants_count} participants, {gifts_count} gifts submitted",
+            "INFO"
+        )
         
         return True, saved_filename
 
@@ -2157,12 +2147,10 @@ class SecretSantaCommandsMixin:
             
             await self._safe_edit_response(inter, embed=embed)
             
-            # Log to Discord
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log(
-                    f"🛡️ {safe_display_name(inter.author)} moved Secret Santa {year} to backups (safely archived)",
-                    "INFO"
-                )
+            self._panel_log(
+                f"🛡️ {safe_display_name(inter.author)} moved Secret Santa {year} to backups (safely archived)",
+                "INFO"
+            )
             
         except Exception as e:
             self.logger.error(f"Failed to move archive to backups: {e}")
@@ -2250,12 +2238,10 @@ class SecretSantaCommandsMixin:
             
             await self._safe_edit_response(inter, embed=embed)
             
-            # Log to Discord
-            if hasattr(self.bot, 'send_to_discord_log'):
-                await self.bot.send_to_discord_log(
-                    f"♻️ {safe_display_name(inter.author)} restored Secret Santa {year} from backups",
-                    "INFO"
-                )
+            self._panel_log(
+                f"♻️ {safe_display_name(inter.author)} restored Secret Santa {year} from backups",
+                "INFO"
+            )
             
         except Exception as e:
             self.logger.error(f"Failed to restore archive from backups: {e}")
@@ -2483,8 +2469,6 @@ class SecretSantaCommandsMixin:
                 f"and was removed from the roster."
             )
             self.logger.warning(msg)
-            if hasattr(self.bot, "send_to_discord_log"):
-                await self.bot.send_to_discord_log(msg, "WARNING")
             return
 
         # Already paired — alert only (persist assignments; never reshuffle silently)
@@ -2501,8 +2485,6 @@ class SecretSantaCommandsMixin:
         details.append("Assignments were **not** reshuffled — handle manually if needed.")
         msg = " ".join(details)
         self.logger.warning("Secret Santa member left after shuffle: %s", msg)
-        if hasattr(self.bot, "send_to_discord_log"):
-            await self.bot.send_to_discord_log(f"Secret Santa: {msg}", "WARNING")
 
     @commands.Cog.listener()
     async def on_ready(self):

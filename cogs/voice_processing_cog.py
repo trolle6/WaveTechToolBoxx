@@ -2180,7 +2180,8 @@ class VoiceProcessingCog(commands.Cog):
                     await vc.disconnect()
                     await self._remove_state(guild.id)
                 finally:
-                    self._expected_disconnect.discard(guild.id)
+                    # Discord reports our own leave a moment later; keep the flag so it isn't logged as a kick.
+                    asyncio.get_running_loop().call_later(10, self._expected_disconnect.discard, guild.id)
 
     # ============ CLEANUP ============
     async def _cleanup_loop(self):

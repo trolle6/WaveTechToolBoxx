@@ -96,7 +96,6 @@ def check_config_env():
     required_keys = {
         "DISCORD_TOKEN": "Discord bot token",
         "DISCORD_CHANNEL_ID": "Discord channel ID",
-        "DISCORD_LOG_CHANNEL_ID": "Discord log channel ID",
         "OPENAI_API_KEY": "OpenAI API key"
     }
     
@@ -183,7 +182,7 @@ def validate_config_values():
             print_status("OPENAI_API_KEY format", True, "Looks valid")
     
     # Check channel IDs are numeric
-    for key in ["DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID"]:
+    for key in ["DISCORD_CHANNEL_ID"]:
         value = os.getenv(key, "")
         if value:
             try:

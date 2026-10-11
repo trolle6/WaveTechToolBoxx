@@ -19,7 +19,6 @@ import signal
 import sys
 import time
 import warnings
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
@@ -39,7 +38,6 @@ load_dotenv("config.env", override=True)
 # Required (config.env):
 #   DISCORD_TOKEN          - Bot token
 #   DISCORD_CHANNEL_ID     - main: send_discord_message; Secret Santa DM fallback channel
-#   DISCORD_LOG_CHANNEL_ID - DiscordLogHandler, send_to_discord_log, reconnect notifications
 #   OPENAI_API_KEY        - TTS, DALL-E, Secret Santa anonymize
 #
 # Optional (CONFIG_DEFAULTS below or in config.env):
@@ -51,11 +49,8 @@ load_dotenv("config.env", override=True)
 #   MAX_QUEUE_SIZE, RATE_LIMIT_*, MAX_TTS_CACHE, VOICE_TIMEOUT, etc. - TTS/DALL-E tuning
 # Per-event guild_id (not config): Secret Santa stores guild_id on the active event (inter.guild.id).
 #
-REQUIRED_CONFIG_KEYS = {
-    "DISCORD_TOKEN", "DISCORD_CHANNEL_ID",
-    "DISCORD_LOG_CHANNEL_ID", "OPENAI_API_KEY",
-}
-REQUIRED_SNOWFLAKE_KEYS = ("DISCORD_CHANNEL_ID", "DISCORD_LOG_CHANNEL_ID")
+REQUIRED_CONFIG_KEYS = {"DISCORD_TOKEN", "DISCORD_CHANNEL_ID", "OPENAI_API_KEY"}
+REQUIRED_SNOWFLAKE_KEYS = ("DISCORD_CHANNEL_ID",)
 
 CONFIG_DEFAULTS = {
     "DEBUG_MODE": False,
@@ -288,95 +283,18 @@ class HttpManager:
                 pass
 
 
-# ============ DISCORD LOGGING ============
-class DiscordLogHandler(logging.Handler):
-    """Send log messages to Discord channel"""
-    
-    EMOJI_MAP = {"WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}
-    # Cap dedupe keys so unusual log spam cannot grow this dict without bound
-    _DEDUPE_MAX_KEYS = 512
-    _DEDUPE_WINDOW_SEC = 60.0
-    
-    def __init__(self, log_channel_id: int):
-        super().__init__()
-        self.log_channel_id = log_channel_id
-        self.bot: Optional[disnake.Client] = None
-        self.message_queue = asyncio.Queue(maxsize=50)
-        self.sender_task: Optional[asyncio.Task] = None
-        self._last_message: OrderedDict[str, float] = OrderedDict()
-    
-    def set_bot(self, bot: disnake.Client):
-        """Set bot instance and start sender task"""
-        self.bot = bot
-        if self.sender_task is None or self.sender_task.done():
-            self.sender_task = asyncio.create_task(self._sender_loop())
-    
-    def emit(self, record: logging.LogRecord):
-        """Queue log message for Discord"""
-        if not self.bot or not self.log_channel_id or record.levelno < logging.WARNING:
-            return
-        
-        # Rate limit duplicate messages
-        msg_key = f"{record.levelname}:{record.getMessage()[:50]}"
-        now = time.time()
-        last = self._last_message.get(msg_key)
-        if last is not None and (now - last) < self._DEDUPE_WINDOW_SEC:
-            return
-        if last is not None:
-            self._last_message.move_to_end(msg_key)
-        elif len(self._last_message) >= self._DEDUPE_MAX_KEYS:
-            self._last_message.popitem(last=False)
-        self._last_message[msg_key] = now
-        
-        # Format message
-        emoji = self.EMOJI_MAP.get(record.levelname, "ℹ️")
-        message = f"{emoji} **{record.levelname}** | {record.name}\n```\n{record.getMessage()}\n```"
-        if len(message) > 1900:
-            message = message[:1900] + "...\n```"
-        
-        # Queue for sending
-        try:
-            self.message_queue.put_nowait(message)
-        except asyncio.QueueFull:
-            pass
-    
-    async def _sender_loop(self):
-        """Background task to send queued messages"""
-        while True:
-            try:
-                message = await self.message_queue.get()
-                if self.bot and self.log_channel_id:
-                    channel = self.bot.get_channel(self.log_channel_id)
-                    if channel:
-                        await channel.send(message)
-                    await asyncio.sleep(1)  # Rate limit
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                continue
-    
-    def close(self):
-        """Clean shutdown"""
-        if self.sender_task:
-            self.sender_task.cancel()
-        super().close()
-
-
 # ============ LOGGING ============
 LOG_FILE_MAX_BYTES = 5_000_000  # 5MB - max log file size before rotation
 LOG_FILE_BACKUP_COUNT = 5  # Number of rotated log files to keep
 
 
-def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
-    """Setup logging with file, console, and Discord handlers"""
+def setup_logging(config: Config) -> logging.Logger:
+    """Setup logging with file and console handlers"""
     logger = logging.getLogger("bot")
     logger.setLevel(config.LOG_LEVEL)
     
-    # Prevent duplicate handlers
     if logger.handlers:
-        for handler in logger.handlers:
-            if isinstance(handler, DiscordLogHandler):
-                return logger, handler
+        return logger
     
     fmt = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -399,12 +317,7 @@ def setup_logging(config: Config) -> tuple[logging.Logger, DiscordLogHandler]:
     ch.setFormatter(fmt)
     logger.addHandler(ch)
     
-    # Discord handler
-    discord_handler = DiscordLogHandler(config.DISCORD_LOG_CHANNEL_ID)
-    discord_handler.setLevel(logging.WARNING)
-    logger.addHandler(discord_handler)
-    
-    return logger, discord_handler
+    return logger
 
 
 # OpenAI API validation configuration
@@ -524,6 +437,8 @@ def validate_runtime_dependencies(logger: logging.Logger) -> bool:
 
 
 DISCONNECT_WARNING_THRESHOLD = 10  # Warn if disconnects exceed this in 24h
+DISCONNECT_WARNING_MAX_UPTIME = 95.0  # ...and 24h uptime is below this percent
+DISCONNECT_WARNING_COOLDOWN = 6 * 3600
 SECONDS_PER_DAY = 86400  # Used for 24h disconnect tracking
 MAX_CONNECTION_PERIODS = 10000  # Max periods to track (safety limit)
 
@@ -533,7 +448,7 @@ except RuntimeError as e:
     print(f"Fatal: {e}")
     sys.exit(1)
 
-logger, discord_handler = setup_logging(config)
+logger = setup_logging(config)
 
 # Privileged intents used: message_content (TTS reads text) and members (Secret Santa,
 # file distribution). Presences is never used, so it isn't requested.
@@ -544,7 +459,6 @@ bot.config = config
 bot.logger = logger
 bot.http_mgr = HttpManager()
 bot.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bot-io")
-bot.discord_handler = discord_handler
 bot.ready_once = False
 
 # Connection tracking for monitoring stability
@@ -582,15 +496,10 @@ async def send_discord_message(channel_id: int, message: str, level: str = "INFO
     except Exception as e:
         logger.debug("Failed to send Discord message to channel %s: %s", channel_id, e)
 
-async def send_to_discord_log(message: str, level: str = "INFO"):
-    """Send message to Discord log channel"""
-    await send_discord_message(config.DISCORD_LOG_CHANNEL_ID, message, level, include_level=True)
-
 async def send_to_discord_channel(message: str, level: str = "INFO"):
     """Send message to default Discord channel"""
     await send_discord_message(config.DISCORD_CHANNEL_ID, message, level, include_level=False)
 
-bot.send_to_discord_log = send_to_discord_log
 bot.send_to_discord_channel = send_to_discord_channel
 
 
@@ -608,9 +517,6 @@ async def on_ready():
         stats["connection_start"] = now
         stats["last_connect"] = now
         
-        if discord_handler:
-            discord_handler.set_bot(bot)
-
         # Clear any HTTP session from pre-bot validation (asyncio.run uses a different loop)
         try:
             await bot.http_mgr.invalidate_session()
@@ -752,16 +658,18 @@ async def on_disconnect():
             uptime_str,
         )
     
-    if stats["disconnect_count_24h"] >= DISCONNECT_WARNING_THRESHOLD:
+    # Gateway reconnects every hour or two are normal for Discord; only warn when the bot
+    # was actually offline for a noticeable share of the day, and at most every 6 hours.
+    if (
+        stats["disconnect_count_24h"] >= DISCONNECT_WARNING_THRESHOLD
+        and uptime_percent < DISCONNECT_WARNING_MAX_UPTIME
+        and now - stats.get("last_disconnect_warning", 0) >= DISCONNECT_WARNING_COOLDOWN
+    ):
+        stats["last_disconnect_warning"] = now
         logger.warning(
             "High disconnection rate: %s disconnects in 24h (uptime: %.1f%%)",
             stats["disconnect_count_24h"],
             uptime_percent,
-        )
-        await send_to_discord_log(
-            f"High disconnection rate: {stats['disconnect_count_24h']} disconnects in 24h "
-            f"(uptime: {uptime_percent:.1f}%)",
-            "WARNING"
         )
 
 
@@ -788,10 +696,6 @@ async def on_resumed():
             logger.warning("Reconnected after %.1fs downtime", duration)
         else:
             logger.error("Reconnected after %.1fs — long disconnection", duration)
-            await send_to_discord_log(
-                f"Long disconnection: {duration:.1f}s - may have interrupted operations",
-                "ERROR"
-            )
         
         stats["last_disconnect"] = None
     else:
@@ -957,11 +861,6 @@ def prepare_bot_for_retry() -> None:
     bot.http_mgr._session_lock = asyncio.Lock()
 
     bot.ready_once = False
-
-    if discord_handler:
-        discord_handler.bot = None
-        discord_handler.sender_task = None
-        discord_handler.message_queue = asyncio.Queue(maxsize=50)
 
     if bot.extensions:
         reload_cogs()

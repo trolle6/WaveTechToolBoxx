@@ -833,11 +833,10 @@ class SecretSantaCore(commands.Cog):
                         int(scheduled_shuffle_time),
                         scheduler_id,
                     )
-                    if hasattr(self.bot, 'send_to_discord_log'):
-                        await self.bot.send_to_discord_log(
-                            f"🎲 **Scheduled shuffle running now** – assignments will be sent via DM shortly.",
-                            "INFO",
-                        )
+                    self._panel_log(
+                        f"🎲 **Scheduled shuffle running now** – assignments will be sent via DM shortly.",
+                        "INFO",
+                    )
 
                     # Clear the schedule first to prevent double execution
                     async with self._lock:
@@ -1147,6 +1146,10 @@ class SecretSantaCore(commands.Cog):
         
         return emoji_mapping
 
+    def _panel_log(self, message: str, level: str = "INFO") -> None:
+        log = {"WARNING": self.logger.warning, "ERROR": self.logger.error}.get(level, self.logger.info)
+        log("SS %s", message)
+
     def _get_openai_headers(self) -> Dict[str, str]:
         return get_openai_headers(getattr(self.bot.config, "OPENAI_API_KEY", None))
 
@@ -1254,13 +1257,10 @@ class SecretSantaCore(commands.Cog):
         """Archive event using the storage module"""
         filename = archive_event(event, year, logger=self.logger)
         
-        # Also notify via Discord if backup was created
-        if "backup" in filename and hasattr(self.bot, 'send_to_discord_log'):
-            asyncio.create_task(
-                self.bot.send_to_discord_log(
-                    f"⚠️ Archive protection: {year}.json already exists! Saved to {filename} to prevent data loss. Review manually!",
-                    "WARNING"
-                )
+        if "backup" in filename:
+            self._panel_log(
+                f"⚠️ Archive protection: {year}.json already exists! Saved to {filename} to prevent data loss. Review manually!",
+                "WARNING"
             )
         
         return filename
