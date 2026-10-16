@@ -32,6 +32,40 @@ GIFT_LOGGED_TITLES = (
 )
 
 
+COMMAND_GROUPS = {
+    "wishlist": ("🎁 Your wishlist", (
+        "`/ss wishlist add` · add an idea",
+        "`/ss wishlist view` · see your list",
+        "`/ss wishlist remove` · remove by number",
+        "`/ss wishlist clear` · empty it",
+    )),
+    "santa": ("🎅 Your giftee", (
+        "`/ss giftee` · their wishlist",
+        "`/ss ask_giftee` · anonymous question",
+        "`/ss submit_gift` · log what you gave",
+    )),
+    "files": ("📎 Shared files", (
+        "`/distribute upload` · share a file",
+        "`/distribute list` · all shared files",
+        "`/distribute browse` · pick from a menu",
+        "`/distribute get` · download one",
+    )),
+    "archive": ("📚 Past years", (
+        "`/ss history` · browse past years",
+        "`/ss edit_gift` · fix an old gift note",
+    )),
+}
+
+
+def add_commands(embed: disnake.Embed, *groups: str) -> disnake.Embed:
+    """Typed-command backup for when a button fails (timeouts, connection hiccups)."""
+    for i, group in enumerate(groups):
+        title, lines = COMMAND_GROUPS[group]
+        name = f"⌨️ Commands · {title}" if i == 0 else title
+        embed.add_field(name=name, value="\n".join(lines), inline=False)
+    return embed
+
+
 def _badge_event(year: int) -> str:
     return f"🎄 SECRET SANTA {year}"
 
@@ -66,7 +100,7 @@ def join_embed(year: int, shuffle_ts: Optional[float]) -> disnake.Embed:
         f"Favorite snacks, hobbies, colors, things you *don't* want: it all helps.\n\n"
         f"-# Changed your mind? Remove your reaction before the shuffle."
     )
-    return _embed(_badge_event(year), "You're on the list! ✨", description, GOLD)
+    return add_commands(_embed(_badge_event(year), "You're on the list! ✨", description, GOLD), "wishlist")
 
 
 def leave_embed(year: int, shuffle_ts: Optional[float]) -> disnake.Embed:
@@ -91,7 +125,8 @@ def match_embed(year: int, receiver_id: int, stop_ts: Optional[float]) -> disnak
         f"Keep your own wishlist fresh, because your Santa is looking at it.\n\n"
         f"-# 🤫 Don't reveal your match in the server. The magic is in the mystery."
     )
-    return _embed(BADGE_SANTA, "🎉 Your match is here!", description, CRANBERRY)
+    embed = _embed(BADGE_SANTA, "🎉 Your match is here!", description, CRANBERRY)
+    return add_commands(embed, "santa", "wishlist", "files")
 
 
 def match_fallback_embed(year: int) -> disnake.Embed:
@@ -107,7 +142,8 @@ def question_embed(year: int, question: str) -> disnake.Embed:
     description = (
         f"{_quote(question)}\n\n"
         f"Your Santa is trying to get this just right. 🎅\n"
-        f"Hit the button below to answer. Your Santa stays anonymous."
+        f"Hit the button below to answer. Your Santa stays anonymous.\n\n"
+        f"-# Replies only go through the button. If it fails, wait a moment and press it again."
     )
     return _embed(BADGE_GIFTEE, "Your Santa has a question!", description, PINE,
                   footer=f"Secret Santa {year}")
@@ -144,7 +180,7 @@ def giftee_replied_embed(year: int, giftee_id: int, reply: str, question: Option
     if question:
         embed.add_field(name="❓ You asked", value=_quote(question), inline=False)
     embed.add_field(name="💬 Their answer", value=_quote(reply), inline=False)
-    return embed
+    return add_commands(embed, "santa")
 
 
 def gift_logged_embed(year: int, receiver_name: str, description: str) -> disnake.Embed:
@@ -163,25 +199,25 @@ def gift_logged_embed(year: int, receiver_name: str, description: str) -> disnak
 
 
 def empty_wishlist_reminder_embed(year: int) -> disnake.Embed:
-    return _embed(
+    return add_commands(_embed(
         BADGE_GIFTEE,
         "📝 Your Santa is waiting for clues!",
         "Your wishlist is still empty.\n"
         "Even one idea makes your Santa's life much easier. 🎁",
         PINE,
         footer=f"Secret Santa {year} · Gifting season",
-    )
+    ), "wishlist")
 
 
 def final_week_reminder_embed(year: int, receiver_id: int, stop_ts: float) -> disnake.Embed:
-    return _embed(
+    return add_commands(_embed(
         BADGE_SANTA,
         "⏰ One week to go!",
         f"The event wraps up <t:{int(stop_ts)}:R>.\n"
         f"Have you sent your gift to <@{receiver_id}> yet? 🎅",
         CRANBERRY,
         footer=f"Secret Santa {year} · Final stretch",
-    )
+    ), "santa")
 
 
 def event_ended_embed(
@@ -203,12 +239,7 @@ def event_ended_embed(
     if receiver_name:
         note = f"*{gift}*" if gift else "*not logged*"
         embed.add_field(name="🎁 Your gift went to", value=f"{receiver_name}: {note}"[:1024], inline=False)
-    embed.add_field(
-        name="📚 Anytime",
-        value="`/ss history` · browse past years\n`/ss edit_gift` · fix an old gift note",
-        inline=False,
-    )
-    return embed
+    return add_commands(embed, "archive")
 
 
 def event_ended_fallback_embed(year: int) -> disnake.Embed:
