@@ -34,11 +34,14 @@ from .secret_santa_storage import (
 from .secret_santa_views import (
     BackupListPaginator,
     CommunicationsPaginator,
+    SANTA_ACTIONS,
+    SantaActionsView,
     SecretSantaReplyView,
     YearHistoryPaginator,
     YearTimelinePaginator,
 )
 from .secret_santa_core import DISCORD_LOCALE_TO_IANA
+from . import secret_santa_messages as ss_messages
 
 class SecretSantaCommandsMixin:
     """Slash commands; mixed into SecretSantaCog."""
@@ -283,8 +286,8 @@ class SecretSantaCommandsMixin:
                     self.logger.error(f"Role assign at start for {uid}: {e}", exc_info=True)
 
         # Send confirmation DMs (rate-limited to avoid Discord 429)
-        join_msg = self._get_join_message(current_year)
-        dm_items = [(int(uid), join_msg) for uid in participants]
+        join_embed, join_view = self._join_dm(current_year, new_event)
+        dm_items = [(int(uid), join_embed, join_view) for uid in participants]
         failed = await self._send_dms_to_participants(dm_items)
         successful = len(participants) - len(failed)
 
@@ -451,6 +454,7 @@ class SecretSantaCommandsMixin:
             # Save assignments BEFORE sending DMs (prevents race conditions)
             event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
             event["join_closed"] = True
+            event["shuffled_at"] = time.time()
             # Clear any scheduled shuffle since we just executed
             event.pop("scheduled_shuffle_time", None)
             event.pop("scheduled_by_user_id", None)
@@ -472,9 +476,8 @@ class SecretSantaCommandsMixin:
         current_year = self.state.get("current_year", dt.date.today().year)
         dm_items = []
         for giver, receiver in assignments.items():
-            receiver_name = participants_dict.get(str(receiver), f"User {receiver}")
-            msg = self._get_assignment_message(current_year, int(receiver) if isinstance(receiver, str) else receiver, receiver_name)
-            dm_items.append((int(giver) if isinstance(giver, str) else giver, msg))
+            match_embed, match_view = self._match_dm(current_year, int(receiver), event)
+            dm_items.append((int(giver), match_embed, match_view))
         self.logger.debug("Sending assignment DMs to %s participants", len(dm_items))
         failed = await self._send_dms_to_participants(dm_items)
         self.logger.debug("DM send complete: %s failed of %s", len(failed), len(dm_items))
@@ -550,11 +553,10 @@ class SecretSantaCommandsMixin:
         # Send thank you message to all participants with rate limiting and fallback
         participants = event.get("participants", {}) or {}
         if participants:
-            end_msg = self._get_event_end_message(year)
             dm_items = []
             for uid in participants:
                 try:
-                    dm_items.append((int(uid), end_msg))
+                    dm_items.append((int(uid), self._event_end_dm(year, event, str(uid))))
                 except (ValueError, TypeError):
                     continue
             if dm_items:
@@ -868,7 +870,7 @@ class SecretSantaCommandsMixin:
     #     3. Find santa_id: giver where receiver == giftee_id (inter.author.id).
     #     4. Send SecretSantaReplyModal(santa_id, giftee_id); user types reply and submits.
     #     5. Modal callback: reply = text_values["reply_text"]; cog._process_reply(inter, reply, santa_id, giftee_id).
-    #     6. _process_reply: _format_dm_reply → _send_dm(santa_id); _save_communication("reply"); followup embed to giftee.
+    #     6. _process_reply: _reply_dm → _send_dm(santa_id); _save_communication("reply"); followup embed to giftee.
     # (C) Giftee answers via Reply button on the DM (see secret_santa_views).
     # -------------------------------------------------------------------------
 
@@ -908,9 +910,8 @@ class SecretSantaCommandsMixin:
 
         # Send question with reply button (giftee only sees anonymized text)
         year = self.state.get("current_year", dt.date.today().year)
-        question_msg = self._format_dm_question(anonymized, year)
-        reply_view = SecretSantaReplyView()
-        success = await self._send_dm(int(receiver_id), question_msg, reply_view)
+        question_embed, reply_view = self._question_dm(anonymized, year)
+        success = await self._send_dm(int(receiver_id), embed=question_embed, view=reply_view)
 
         if success:
             # Save communication (raw + delivered text for mod oversight)
@@ -919,21 +920,9 @@ class SecretSantaCommandsMixin:
             )
 
             # Success embed
-            embed = self._success_embed(
-                title="✅ Question Sent!",
-                description=(
-                    "Your match received an **anonymized** version in DM "
-                    "(names and @mentions are stripped; writing style is obscured)."
-                ),
-                footer="💡 Tip: Keep asking questions to find the perfect gift!",
+            embed = ss_messages.question_delivered_embed(
+                year, self._truncate_text(cleaned, 1000), self._truncate_text(anonymized, 1000)
             )
-            embed.add_field(name="📝 You wrote", value=f"*{self._truncate_text(cleaned)}*", inline=False)
-            if anonymized != cleaned:
-                embed.add_field(
-                    name="📨 They saw (anonymized)",
-                    value=f"*{self._truncate_text(anonymized)}*",
-                    inline=False,
-                )
             await self._safe_edit_response(inter, embed=embed)
         else:
             embed = self._error_embed(
@@ -1079,49 +1068,11 @@ class SecretSantaCommandsMixin:
                 }
                 await self._save_async()
 
-        # Create beautiful success embed with variations
-        year = current_year
-        gift_templates = [
-            # Variation A: Gift logged
-            (f"🎁 Secret Santa {year} - GIFT LOGGED! 🎁",
-             "You've marked your gift as ready!\n\nYour giftee is going to be so excited! The organizers have been notified that you're all set.\n\nOne less thing on your holiday list! ✅"),
-            # Variation B: Mission accomplished
-            (f"✅ Secret Santa {year} - MISSION ACCOMPLISHED! ✅",
-             "Excellent! Your gift is marked as ready to go.\n\nYour giftee has no idea what's coming... but they're going to love it! 🎉\n\nOrganizers have been notified. Great work, Santa! 🎅"),
-            # Variation C: Gift prepared
-            (f"🌟 Secret Santa {year} - GIFT PREPARED! 🌟",
-             "Perfect! You've logged your gift as complete.\n\nThe anticipation is building... your giftee is in for a wonderful surprise! ✨\n\nThe organizers are now updated. Well done! 🎄")
-        ]
-        title, description = random.choice(gift_templates)
-        
-        embed = disnake.Embed(
-            title=title,
-            description=description,
-            color=disnake.Color.green()
+        embed = ss_messages.gift_logged_embed(
+            current_year,
+            receiver_name,
+            format_gift_description_for_display(gift_description, max_length=900),
         )
-        embed.add_field(
-            name="🎯 Recipient",
-            value=f"**{receiver_name}**",
-            inline=True
-        )
-        embed.add_field(
-            name="📅 Year",
-            value=f"**{self.state.get('current_year', dt.date.today().year)}**",
-            inline=True
-        )
-        embed.add_field(
-            name="⏰ Submitted",
-            value=f"<t:{int(time.time())}:R>",
-            inline=True
-        )
-        embed.add_field(
-            name="🎁 Gift Description",
-            value=format_gift_description_for_display(gift_description, max_length=900),
-            inline=False
-        )
-        embed.set_footer(text="🎄 Thank you for participating in Secret Santa! Your kindness makes the season brighter.")
-        embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/852616843715395605.png")  # Gift emoji
-
         await self._safe_edit_response(inter, embed=embed)
 
     @ss_root.sub_command(name="edit_gift", description="Edit your gift submission from a past year")
@@ -2362,8 +2313,8 @@ class SecretSantaCommandsMixin:
 
         # Send confirmation (same message as /ss start); rate-limit react spam
         if await self._limit_join_dm.check(str(payload.user_id)):
-            join_msg = self._get_join_message(self.state.get("current_year", dt.date.today().year))
-            await self._send_dm(payload.user_id, join_msg)
+            join_embed, join_view = self._join_dm(self.state.get("current_year", dt.date.today().year))
+            await self._send_dm(payload.user_id, embed=join_embed, view=join_view)
         else:
             self.logger.debug("Join DM skipped (rate limit) for user %s", payload.user_id)
 
@@ -2424,8 +2375,8 @@ class SecretSantaCommandsMixin:
                             guild, payload.user_id, add=False, reason="Left Secret Santa signup"
                         )
 
-                leave_msg = self._get_leave_message(self.state.get("current_year", dt.date.today().year))
-                await self._send_dm(payload.user_id, leave_msg)
+                leave_embed, leave_view = self._leave_dm(self.state.get("current_year", dt.date.today().year))
+                await self._send_dm(payload.user_id, embed=leave_embed, view=leave_view)
 
         except Exception as e:
             self.logger.error(f"Error handling reaction remove: {e}")
@@ -2492,4 +2443,5 @@ class SecretSantaCommandsMixin:
         if getattr(self, "_reply_view_registered", False):
             return
         self.bot.add_view(SecretSantaReplyView())
+        self.bot.add_view(SantaActionsView(*SANTA_ACTIONS))
         self._reply_view_registered = True

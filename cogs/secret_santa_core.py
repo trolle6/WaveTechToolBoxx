@@ -34,8 +34,10 @@ from .secret_santa_assignments import (
 )
 from .secret_santa_views import (
     SecretSantaReplyView, SecretSantaReplyModal, YearHistoryPaginator,
-    CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator
+    CommunicationsPaginator, YearTimelinePaginator, BackupListPaginator,
+    SantaActionsView, link_view,
 )
+from . import secret_santa_messages as ss_messages
 from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
@@ -70,6 +72,8 @@ SS_WISHLIST_RATE_WINDOW = 60
 SS_JOIN_DM_RATE_LIMIT = 5  # only blocks react spam re-join DMs, not /ss start batch
 SS_JOIN_DM_RATE_WINDOW = 600
 SS_MAX_COMMS_PER_PAIR = 40  # messages per Santa↔giftee thread per event
+REMINDER_WISHLIST_AFTER_SECONDS = 2 * 86400
+REMINDER_FINAL_WEEK_SECONDS = 7 * 86400
 
 # Default auto-stop when /ss start omits `end`: Christmas Day 23:59 (author TZ or UTC)
 DEFAULT_AUTO_STOP_MONTH = 12
@@ -158,7 +162,10 @@ class SecretSantaCore(commands.Cog):
         except disnake.errors.NotFound:
             # Interaction expired (404 Not Found - Unknown interaction)
             # This can happen if there's network latency or the bot is slow
-            self.logger.warning(f"Interaction expired before defer: {inter.id} (command: {inter.application_command.name})")
+            command = getattr(getattr(inter, "application_command", None), "name", None) or getattr(
+                getattr(inter, "data", None), "custom_id", "?"
+            )
+            self.logger.warning(f"Interaction expired before defer: {inter.id} (command: {command})")
             return False
         except disnake.errors.InteractionResponded:
             # Already responded to - this is fine, just return True
@@ -595,69 +602,54 @@ class SecretSantaCore(commands.Cog):
         if rewritten and rewritten != message:
             self.logger.info("SS %s (sent anonymized): %s", msg_type, rewritten)
     
-    def _format_dm_question(self, rewritten_question: str, year: int) -> str:
-        """DM to giftee — speak to *you*; never @mention the reader (no self-ping)."""
-        return (
-            f"❓ **Secret Santa {year}** — question from your Santa\n\n"
-            f"*\"{rewritten_question}\"*\n\n"
-            f"Answer with the **Reply to Santa** button on this message."
-        )
+    def _signup_url(self, event: Optional[dict]) -> Optional[str]:
+        if not event:
+            return None
+        g, c, m = event.get("guild_id"), event.get("announcement_channel_id"), event.get("announcement_message_id")
+        return f"https://discord.com/channels/{g}/{c}/{m}" if g and c and m else None
 
-    def _format_dm_reply(self, rewritten_reply: str, year: int, giftee_id: Optional[int] = None) -> str:
-        """DM to Santa — @mention the giftee once; Santa is always *you*, never @mentioned."""
-        match_line = (
-            f"<@{giftee_id}> replied:\n\n" if giftee_id else "Your match replied:\n\n"
-        )
-        return (
-            f"🎅 **Secret Santa {year}**\n\n"
-            f"{match_line}"
-            f"*\"{rewritten_reply}\"*\n\n"
-            f"Ask another question: `/ss ask_giftee`"
-        )
+    def _last_question(self, event: dict, santa_id: str) -> Optional[str]:
+        """Most recent question (as the giftee saw it) in this Santa's thread."""
+        entry = (event.get("communications") or {}).get(str(santa_id))
+        thread = entry.get("thread") if isinstance(entry, dict) else None
+        for item in reversed(thread if isinstance(thread, list) else []):
+            if isinstance(item, dict) and item.get("type") == "question":
+                return item.get("rewritten") or item.get("message")
+        return None
 
-    def _get_join_message(self, year: int) -> str:
-        """DM when someone joins — *you* only; no @mentions until shuffle."""
-        return (
-            f"🎄 **Secret Santa {year}** — you're in\n\n"
-            f"You're signed up. After the shuffle, you'll get **another DM here** "
-            f"with who your match is.\n\n"
-            f"**Useful now:**\n"
-            f"• `/ss wishlist add` — ideas for your Santa\n"
-            f"• `/ss wishlist view` — see your list\n\n"
-            f"Keep your match secret once you know who it is."
-        )
+    def _question_dm(self, rewritten_question: str, year: int):
+        return ss_messages.question_embed(year, rewritten_question), SecretSantaReplyView()
 
-    def _get_assignment_message(self, year: int, receiver_id: int, receiver_name: str) -> str:
-        """DM to Santa (giver): one @mention of giftee (receiver); never @mention the Santa."""
-        match = f"<@{receiver_id}>"
-        return (
-            f"🎁 **Secret Santa {year}** — your match\n\n"
-            f"You're Secret Santa for **{match}**.\n\n"
-            f"**Commands:**\n"
-            f"• `/ss giftee` — your match's wishlist\n"
-            f"• `/ss ask_giftee` — ask your match (anonymous)\n"
-            f"• `/ss wishlist add` / `view` — your wishlist\n"
-            f"• `/ss submit_gift` — log what you sent (optional)\n\n"
-            f"Your match can answer with **Reply to Santa** on question DMs.\n"
-            f"Don't reveal who your match is in the server."
-        )
-    
-    def _get_event_end_message(self, year: int) -> str:
-        """DM when the event stops — brief wrap-up."""
-        return (
-            f"🎄 **Secret Santa {year}** — event ended\n\n"
-            f"Thanks for taking part! This year's event is archived.\n\n"
-            f"• `/ss history` — browse past years\n"
-            f"• `/ss edit_gift` — fix your gift note for a past year"
-        )
+    def _reply_dm(self, rewritten_reply: str, year: int, giftee_id: int, question: Optional[str]):
+        embed = ss_messages.giftee_replied_embed(year, giftee_id, rewritten_reply, question)
+        return embed, SantaActionsView("ask", "giftee", labels={"ask": "Ask another"})
 
-    def _get_leave_message(self, year: int) -> str:
-        """DM when someone removes their react / leaves before shuffle."""
-        return (
-            f"👋 **Secret Santa {year}** — you left the event\n\n"
-            f"You're no longer on the participant list.\n\n"
-            f"Changed your mind? React on the signup message again **before** the shuffle."
-        )
+    def _join_dm(self, year: int, event: Optional[dict] = None):
+        shuffle_ts = (event or self._get_current_event() or {}).get("scheduled_shuffle_time")
+        return ss_messages.join_embed(year, shuffle_ts), SantaActionsView("wishlist_add", "wishlist_view")
+
+    def _match_dm(self, year: int, receiver_id: int, event: Optional[dict] = None):
+        stop_ts = (event or {}).get("scheduled_stop_time")
+        embed = ss_messages.match_embed(year, receiver_id, stop_ts)
+        return embed, SantaActionsView("giftee", "ask", "wishlist_view")
+
+    def _leave_dm(self, year: int, event: Optional[dict] = None):
+        event = event or self._get_current_event()
+        shuffle_ts = (event or {}).get("scheduled_shuffle_time")
+        return ss_messages.leave_embed(year, shuffle_ts), link_view("Go to signup message", self._signup_url(event))
+
+    def _event_end_dm(self, year: int, event: dict, user_id: str) -> disnake.Embed:
+        participants = event.get("participants") or {}
+        assignments = event.get("assignments") or {}
+        gifts = event.get("gift_submissions") or {}
+        logged = sum(1 for g in gifts.values() if isinstance(g, dict) and g.get("gift"))
+        receiver_id = assignments.get(str(user_id)) if isinstance(assignments, dict) else None
+        receiver_name = participants.get(str(receiver_id), f"User {receiver_id}") if receiver_id else None
+        gift = (gifts.get(str(user_id)) or {}).get("gift") if isinstance(gifts, dict) else None
+        if isinstance(gift, str):
+            gift = self._truncate_text(gift.strip(), 300)
+        total = len(assignments) if assignments else len(participants)
+        return ss_messages.event_ended_embed(year, total, logged, receiver_name, gift)
 
     async def _resolve_guild_member(
         self, guild: disnake.Guild, user_id: int
@@ -910,6 +902,13 @@ class SecretSantaCore(commands.Cog):
                             )
                             await self._send_dm(stopper_id, error_msg)
 
+                event = self._get_current_event()
+                if event and event.get("assignments"):
+                    try:
+                        await self._send_due_reminders(event, time.time())
+                    except Exception as e:
+                        self.logger.error(f"Error sending reminders: {e}", exc_info=True)
+
                 # Next run: soonest future scheduled time (shuffle or stop). If we have one, sleep until then
                 # (capped at CHECK_INTERVAL so we re-check hourly in case the event was edited).
                 next_run = None
@@ -933,12 +932,62 @@ class SecretSantaCore(commands.Cog):
                 self.logger.error(f"Scheduled events checker error: {e}", exc_info=True)
                 await asyncio.sleep(SCHEDULED_EVENT_CHECK_INTERVAL_SECONDS)
 
-    async def _send_dm(self, user_id: int, message: str, view: disnake.ui.View = None) -> bool:
+    async def _send_due_reminders(self, event: dict, now: float) -> None:
+        """Empty-wishlist nudge (2 days after shuffle) and one-week-left nudge (7 days before stop).
+        Each fires once per event; flags are saved before sending so a crash can't double-DM."""
+        shuffled_at = event.get("shuffled_at")
+        stop_ts = event.get("scheduled_stop_time")
+        assignments = event.get("assignments") or {}
+        if not shuffled_at or not isinstance(assignments, dict):
+            return
+        year = self.state.get("current_year", dt.date.today().year)
+        due: List[str] = []
+        if now >= shuffled_at + REMINDER_WISHLIST_AFTER_SECONDS:
+            due.append("wishlist")
+        if stop_ts and stop_ts - shuffled_at > REMINDER_FINAL_WEEK_SECONDS and \
+                stop_ts - REMINDER_FINAL_WEEK_SECONDS <= now < stop_ts:
+            due.append("final_week")
+
+        async with self._lock:
+            sent = event.setdefault("reminders_sent", {})
+            due = [kind for kind in due if not sent.get(kind)]
+            if not due:
+                return
+            for kind in due:
+                sent[kind] = now
+            await self._save_async()
+
+        items = []
+        if "wishlist" in due:
+            wishlists = event.get("wishlists") or {}
+            for receiver in assignments.values():
+                if not wishlists.get(str(receiver)):
+                    items.append((int(receiver), ss_messages.empty_wishlist_reminder_embed(year),
+                                  SantaActionsView("wishlist_add", labels={"wishlist_add": "Add an idea"})))
+        if "final_week" in due:
+            gifts = event.get("gift_submissions") or {}
+            for giver, receiver in assignments.items():
+                if not gifts.get(str(giver)):
+                    items.append((int(giver), ss_messages.final_week_reminder_embed(year, int(receiver), stop_ts),
+                                  SantaActionsView("submit_gift", "giftee")))
+        if items:
+            failed = await self._send_dms_to_participants(items)
+            self.logger.info("SS reminders %s: %s sent, %s failed", due, len(items) - len(failed), len(failed))
+
+    async def _send_dm(
+        self,
+        user_id: int,
+        message: Optional[str] = None,
+        view: disnake.ui.View = None,
+        embed: Optional[disnake.Embed] = None,
+    ) -> bool:
         """
-        Send DM to user with optional view. Retries on 429, 5xx, and connection errors.
+        Send DM to user with optional view/embed. Retries on 429, 5xx, and connection errors.
         Uses timeouts to prevent hanging; respects Retry-After for rate limits.
         """
-        if not message or not str(message).strip():
+        if isinstance(message, disnake.Embed):
+            message, embed = None, message
+        if embed is None and (not message or not str(message).strip()):
             self.logger.debug(f"Empty DM message for user {user_id}, skipping")
             return True  # Nothing to send, consider success
 
@@ -949,7 +998,7 @@ class SecretSantaCore(commands.Cog):
                     timeout=DM_FETCH_TIMEOUT
                 )
                 await asyncio.wait_for(
-                    user.send(message, view=view),
+                    user.send(content=message, embed=embed, view=view),
                     timeout=DM_SEND_TIMEOUT
                 )
                 return True
@@ -1001,16 +1050,18 @@ class SecretSantaCore(commands.Cog):
 
     async def _send_dms_to_participants(
         self,
-        items: list[tuple[int, str]],
+        items: list[tuple],
         view: disnake.ui.View = None,
     ) -> list[int]:
         """
         Send DMs to participants with rate limiting. Returns list of user_ids who failed to receive.
-        Spacing avoids Discord 429; each failure is logged.
+        Items are (user_id, str | Embed) or (user_id, str | Embed, view). Spacing avoids Discord 429.
         """
         failed: list[int] = []
-        for user_id, message in items:
-            success = await self._send_dm(user_id, message, view=view)
+        for item in items:
+            user_id, message = item[0], item[1]
+            item_view = item[2] if len(item) > 2 else view
+            success = await self._send_dm(user_id, message, view=item_view)
             if not success:
                 failed.append(user_id)
             await asyncio.sleep(DM_DELAY_SECONDS)
@@ -1049,27 +1100,26 @@ class SecretSantaCore(commands.Cog):
         if not channel:
             self.logger.warning(f"Cannot post fallback: no channel for guild {guild_id}")
             return False
-        mentions = " ".join(f"<@{uid}>" for uid in failed_user_ids)
-        if message_type == "assignment":
-            text = (
-                f"🎄 **Secret Santa {year} – Assignment Fallback** 🎄\n\n"
-                f"We couldn't send your assignment via DM. {mentions}\n\n"
-                f"**Your match is saved.** Use `/ss giftee` in this server to see your match's wishlist."
-            )
-        else:
-            text = (
-                f"🛑 **Secret Santa {year} – Event Ended** 🛑\n\n"
-                f"We couldn't send you the wrap-up message via DM. {mentions}\n\n"
-                f"Thanks for participating! The event has ended."
-            )
+        # Message content caps at 2000 chars; batch mentions so huge events still fit.
+        batches = [failed_user_ids[i:i + 60] for i in range(0, len(failed_user_ids), 60)]
+        builder = (
+            ss_messages.match_fallback_embed if message_type == "assignment"
+            else ss_messages.event_ended_fallback_embed
+        )
         for attempt in range(3):
             try:
-                first = True
-                for part in chunk_text(text):
-                    await asyncio.wait_for(channel.send(part), timeout=10.0)
-                    if not first:
+                for i, batch in enumerate(batches):
+                    mentions = " ".join(f"<@{uid}>" for uid in batch)
+                    await asyncio.wait_for(
+                        channel.send(
+                            content=mentions,
+                            embed=builder(year),
+                            allowed_mentions=disnake.AllowedMentions(users=True),
+                        ),
+                        timeout=10.0,
+                    )
+                    if i:
                         await asyncio.sleep(0.35)
-                    first = False
                 self.logger.info(f"Posted fallback for {len(failed_user_ids)} users in #{channel.name}")
                 return True
             except (disnake.HTTPException, ConnectionError, asyncio.TimeoutError) as e:
@@ -1103,20 +1153,17 @@ class SecretSantaCore(commands.Cog):
                 await self._safe_followup_send(inter, content="❌ Reply was empty after removing @mentions.", ephemeral=True)
                 return
             anonymized = await self._anonymize_text(cleaned, "reply")
-            reply_msg = self._format_dm_reply(anonymized, year, giftee_id=giftee_id)
-            success = await self._send_dm(santa_id, reply_msg)
+            reply_embed, reply_view = self._reply_dm(
+                anonymized, year, giftee_id, self._last_question(event, str(santa_id))
+            )
+            success = await self._send_dm(santa_id, embed=reply_embed, view=reply_view)
 
             if success:
                 if event:
                     await self._save_communication(
                         event, str(santa_id), str(giftee_id), "reply", cleaned, anonymized
                     )
-                embed = self._success_embed(
-                    title=f"✅ Reply sent — Secret Santa {year}",
-                    description="Your Santa got your message in DM.",
-                    footer="",
-                )
-                embed.add_field(name="What you sent", value=f"*{self._truncate_text(reply)}*", inline=False)
+                embed = ss_messages.reply_sent_embed(self._truncate_text(cleaned, 1000))
                 await self._safe_followup_send(inter, embed=embed, ephemeral=True)
             else:
                 embed = self._error_embed(

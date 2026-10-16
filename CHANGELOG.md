@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10 — Secret Santa message redesign
+
+- Participant DMs are now color-coded embeds: cranberry = Santa mode, pine = giftee mode, gold = event, frost = notices
+- DM shortcut buttons (add/view wishlist, view giftee wishlist, ask, log gift) — persistent across restarts
+- Leave DM links back to the signup message; match DM shows the real end date instead of a hardcoded Dec 25
+- Giftee reply DM shows the question it answers; wrap-up DM shows event stats and your own gift
+- New one-time reminders: empty-wishlist nudge 2 days after shuffle; one-week-left nudge for Santas with no logged gift
+- DM-failure fallbacks in the server channel are embeds and actually ping the affected users
+
 ## 2026-09 — Quiet console + TTS fix
 
 - Console: removed no-op daily maintenance / “Bot Online” / cog-loaded Discord spam; lifecycle noise → DEBUG

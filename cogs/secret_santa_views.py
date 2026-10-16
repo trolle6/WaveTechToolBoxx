@@ -15,7 +15,7 @@ ISOLATION:
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import disnake
 
@@ -118,6 +118,94 @@ class SecretSantaReplyModal(disnake.ui.Modal):
         
         # Process the reply using the existing logic
         await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
+
+
+class SecretSantaTextModal(disnake.ui.Modal):
+    """One-field form that forwards the typed text to an existing /ss command handler."""
+    def __init__(self, action: str, title: str, label: str, placeholder: str, max_length: int):
+        super().__init__(
+            title=title,
+            custom_id=f"ss_modal:{action}",
+            components=[
+                disnake.ui.TextInput(
+                    label=label,
+                    custom_id="text",
+                    placeholder=placeholder,
+                    style=disnake.TextInputStyle.paragraph,
+                    max_length=max_length,
+                    required=True,
+                )
+            ],
+        )
+        self.action = action
+
+    async def callback(self, inter: disnake.ModalInteraction):
+        text = ((getattr(inter, "text_values", None) or {}).get("text") or "").strip()
+        cog = inter.bot.get_cog("SecretSantaCog")
+        if not cog or not text:
+            await inter.response.send_message(
+                content="❌ Secret Santa system not available" if not cog else "❌ Please type something first.",
+                ephemeral=True,
+            )
+            return
+        if self.action == "wishlist_add":
+            await cog.wishlist_add.callback(cog, inter, item=text)
+        elif self.action == "ask":
+            await cog.ss_ask.callback(cog, inter, question=text)
+        elif self.action == "submit_gift":
+            await cog.ss_submit.callback(cog, inter, gift_description=text)
+
+
+# action -> (label, emoji, style, modal spec or None). Modal spec: (title, label, placeholder, max_length).
+SANTA_ACTIONS: Dict[str, tuple] = {
+    "wishlist_add": ("Add to wishlist", "📝", disnake.ButtonStyle.success,
+                     ("📝 Add to your wishlist", "Gift idea", "Favorite snacks, hobbies, colors…", 500)),
+    "wishlist_view": ("My wishlist", "👀", disnake.ButtonStyle.secondary, None),
+    "giftee": ("View their wishlist", "🎁", disnake.ButtonStyle.primary, None),
+    "ask": ("Ask them something", "❓", disnake.ButtonStyle.secondary,
+            ("❓ Ask your giftee (anonymous)", "Your question", "What's your favorite…", 2000)),
+    "submit_gift": ("Log my gift", "📦", disnake.ButtonStyle.success,
+                    ("📦 Log your gift", "What did you give?", "A cozy scarf and cocoa…", 2000)),
+}
+
+
+class SantaActionsView(disnake.ui.View):
+    """Persistent DM shortcut buttons. Register `SantaActionsView(*SANTA_ACTIONS)` once at startup;
+    messages can then carry any subset and keep working after restarts (matched by custom_id)."""
+    def __init__(self, *actions: str, labels: Optional[Dict[str, str]] = None):
+        super().__init__(timeout=None)
+        labels = labels or {}
+        for action in actions:
+            label, emoji, style, _ = SANTA_ACTIONS[action]
+            button = disnake.ui.Button(
+                label=labels.get(action, label), emoji=emoji, style=style, custom_id=f"ss_act:{action}"
+            )
+            button.callback = self._make_callback(action)
+            self.add_item(button)
+
+    @staticmethod
+    def _make_callback(action: str):
+        async def callback(inter: disnake.MessageInteraction):
+            cog = inter.bot.get_cog("SecretSantaCog")
+            if not cog:
+                await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
+                return
+            modal_spec = SANTA_ACTIONS[action][3]
+            if modal_spec:
+                await inter.response.send_modal(SecretSantaTextModal(action, *modal_spec))
+            elif action == "wishlist_view":
+                await cog.wishlist_view.callback(cog, inter)
+            elif action == "giftee":
+                await cog.ss_view_giftee_wishlist.callback(cog, inter)
+        return callback
+
+
+def link_view(label: str, url: Optional[str], emoji: str = "🔗") -> Optional[disnake.ui.View]:
+    if not url:
+        return None
+    view = disnake.ui.View(timeout=None)
+    view.add_item(disnake.ui.Button(label=label, emoji=emoji, url=url, style=disnake.ButtonStyle.link))
+    return view
 
 
 class YearHistoryPaginator(disnake.ui.View):
