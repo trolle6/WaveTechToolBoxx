@@ -24,6 +24,7 @@ import disnake
 
 from .secret_santa_checks import format_gift_description_for_display, GIFT_NO_SUBMISSION_ROW
 from . import secret_santa_messages as ss_messages
+from .utils import REPLY_FAILURES
 
 # action -> (button name shown in errors, typed command to use instead, what did NOT happen)
 ACTION_INFO: Dict[str, Tuple[str, Optional[str], str]] = {
@@ -43,15 +44,41 @@ def _is_expired_interaction(exc: BaseException) -> bool:
     return isinstance(exc, disnake.NotFound) and getattr(exc, "code", None) == 10062
 
 
-def _error_embed_for(exc: BaseException, action: str, year: int, typed: Optional[str]) -> disnake.Embed:
-    button_name, command, not_done = ACTION_INFO[action]
+def _failure_kind(exc: BaseException) -> str:
+    if _is_expired_interaction(exc):
+        return "expired"
     if isinstance(exc, disnake.HTTPException) and exc.status == 429:
-        return ss_messages.error_rate_limited(year, command, not_done, getattr(exc, "retry_after", None), typed)
+        return "rate_limited"
     if (isinstance(exc, disnake.HTTPException) and exc.status >= 500) or isinstance(
         exc, (asyncio.TimeoutError, ConnectionError, aiohttp.ClientError)
     ):
+        return "discord"
+    return "bug"
+
+
+def _error_embed_for(kind: str, action: str, year: int, typed: Optional[str],
+                     retry_after: Optional[float] = None) -> disnake.Embed:
+    button_name, command, not_done = ACTION_INFO[action]
+    if kind == "rate_limited":
+        return ss_messages.error_rate_limited(year, command, not_done, retry_after, typed)
+    if kind == "discord":
         return ss_messages.error_discord(year, command, not_done, typed)
     return ss_messages.error_bug(year, button_name, command, not_done, typed)
+
+
+async def _report_failure(inter: disnake.Interaction, action: str, year: int, kind: str,
+                          typed: Optional[str], retry_after: Optional[float] = None) -> None:
+    if kind == "expired":
+        await _dm_timed_out(inter, action, year)
+        return
+    embed = _error_embed_for(kind, action, year, typed, retry_after)
+    try:
+        if inter.response.is_done():
+            await inter.followup.send(embed=embed, ephemeral=True)
+        else:
+            await inter.response.send_message(embed=embed, ephemeral=True)
+    except disnake.HTTPException:
+        await _dm_timed_out(inter, action, year)
 
 
 async def _dm_timed_out(inter: disnake.Interaction, action: str, year: int) -> None:
@@ -72,26 +99,20 @@ async def run_guarded(inter: disnake.Interaction, action: str, handler, typed: O
     """Run a button/form handler; on any failure tell the user why and which command to type instead."""
     cog = inter.bot.get_cog("SecretSantaCog")
     year = cog.state.get("current_year", dt.date.today().year) if cog else dt.date.today().year
+    REPLY_FAILURES.pop(inter.id, None)
     try:
         await handler()
     except Exception as exc:
         logger = getattr(inter.bot, "logger", None)
         if logger:
             logger.error(f"SS button '{action}' failed: {exc!r}", exc_info=not isinstance(exc, disnake.HTTPException))
-        if _is_expired_interaction(exc):
-            await _dm_timed_out(inter, action, year)
-            return
-        embed = _error_embed_for(exc, action, year, typed)
-        try:
-            if inter.response.is_done():
-                await inter.followup.send(embed=embed, ephemeral=True)
-            else:
-                await inter.response.send_message(embed=embed, ephemeral=True)
-        except disnake.HTTPException:
-            await _dm_timed_out(inter, action, year)
+        await _report_failure(inter, action, year, _failure_kind(exc), typed, getattr(exc, "retry_after", None))
         return
-    # The /ss handlers swallow an expired defer and return quietly; nothing reached the user.
-    if not inter.response.is_done():
+    # The /ss handlers swallow reply errors (expired defer, failed edit) and return quietly.
+    swallowed = REPLY_FAILURES.pop(inter.id, None)
+    if swallowed:
+        await _report_failure(inter, action, year, swallowed, typed)
+    elif not inter.response.is_done():
         await _dm_timed_out(inter, action, year)
 
 
@@ -101,9 +122,9 @@ class SecretSantaReplyView(disnake.ui.View):
         super().__init__(timeout=None)  # Never expires - button stays active forever
     
     @disnake.ui.button(
-        label="💬 Reply to Santa", 
-        style=disnake.ButtonStyle.primary, 
-        emoji="🎅",
+        label="Reply to Santa",
+        style=disnake.ButtonStyle.primary,
+        emoji="💬",
         custom_id="ss_reply:persist"  # Persistent ID so Discord remembers it after restart
     )
     async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):

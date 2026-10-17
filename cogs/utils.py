@@ -24,7 +24,7 @@ import shutil
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
-from typing import Any, Generic, Iterator, Optional, TypeVar
+from typing import Any, Dict, Generic, Iterator, Optional, TypeVar
 
 import disnake
 
@@ -461,6 +461,21 @@ def chunk_text(text: str, limit: int = 1990) -> Iterator[str]:
         text = text[cut:].lstrip("\n")
 
 
+# interaction id -> why the bot's own reply could not be delivered ("expired" | "rate_limited" | "discord" | "bug").
+# Lets button wrappers notice failures these helpers swallow (otherwise the user sees "thinking…" forever).
+REPLY_FAILURES: Dict[int, str] = {}
+
+
+def _note_reply_failure(inter, kind: str) -> None:
+    if len(REPLY_FAILURES) > 500:
+        REPLY_FAILURES.clear()
+    REPLY_FAILURES[getattr(inter, "id", 0)] = kind
+
+
+def _failure_kind(status: Optional[int]) -> str:
+    return "rate_limited" if status == 429 else "discord"
+
+
 async def safe_edit_response(
     log: logging.Logger,
     inter: disnake.ApplicationCommandInteraction,
@@ -471,6 +486,7 @@ async def safe_edit_response(
     max_retries: int = 3,
 ) -> bool:
     """Edit an interaction response with retry logic for transient Discord errors."""
+    status = None
     for attempt in range(max_retries):
         try:
             kwargs = {}
@@ -492,6 +508,7 @@ async def safe_edit_response(
             return True
         except disnake.errors.NotFound:
             log.warning("Interaction expired before edit: %s", inter.id)
+            _note_reply_failure(inter, "expired")
             return False
         except disnake.errors.InteractionResponded:
             return True
@@ -517,6 +534,7 @@ async def safe_edit_response(
                     continue
             else:
                 log.error("HTTP error %s on edit_response: %s", status, e)
+                _note_reply_failure(inter, "bug")
                 return False
         except (ConnectionError, OSError, asyncio.TimeoutError) as e:
             if attempt < max_retries - 1:
@@ -528,10 +546,13 @@ async def safe_edit_response(
                 await asyncio.sleep(wait_time)
                 continue
             log.error("Connection error on edit_response after %s attempts: %s", max_retries, e)
+            _note_reply_failure(inter, "discord")
             return False
         except Exception as e:
             log.error("Unexpected error on edit_response: %s", e, exc_info=True)
+            _note_reply_failure(inter, "bug")
             return False
+    _note_reply_failure(inter, _failure_kind(status))
     return False
 
 
@@ -546,6 +567,7 @@ async def safe_followup_send(
     max_retries: int = 3,
 ) -> Optional[disnake.WebhookMessage]:
     """Send an interaction followup with retry logic for transient Discord errors."""
+    status = None
     for attempt in range(max_retries):
         try:
             kwargs = {'ephemeral': ephemeral}
@@ -564,6 +586,7 @@ async def safe_followup_send(
             )
         except disnake.errors.NotFound:
             log.warning("Interaction expired before followup: %s", inter.id)
+            _note_reply_failure(inter, "expired")
             return None
         except disnake.HTTPException as e:
             status = getattr(e, 'status', None)
@@ -587,6 +610,7 @@ async def safe_followup_send(
                     continue
             else:
                 log.error("HTTP error %s on followup_send: %s", status, e)
+                _note_reply_failure(inter, "bug")
                 return None
         except (ConnectionError, OSError, asyncio.TimeoutError) as e:
             if attempt < max_retries - 1:
@@ -598,8 +622,11 @@ async def safe_followup_send(
                 await asyncio.sleep(wait_time)
                 continue
             log.error("Connection error on followup_send after %s attempts: %s", max_retries, e)
+            _note_reply_failure(inter, "discord")
             return None
         except Exception as e:
             log.error("Unexpected error on followup_send: %s", e, exc_info=True)
+            _note_reply_failure(inter, "bug")
             return None
+    _note_reply_failure(inter, _failure_kind(status))
     return None

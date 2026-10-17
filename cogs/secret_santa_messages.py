@@ -240,7 +240,7 @@ def giftee_reveal_embed(year: int, receiver_id: int, stop_ts: Optional[float]) -
         f"**1 ·** Check their wishlist\n"
         f"**2 ·** Ask anonymous questions if you're stuck\n"
         f"**3 ·** Give your gift before {_deadline_text(stop_ts)}\n"
-        f"**4 ·** Log it with `/ss submit_gift`\n\n"
+        f"**4 ·** Log it with {cmd('ss submit_gift')}\n\n"
         f"### 🎁 Meanwhile, someone is gifting *you*\n"
         f"Keep your own wishlist fresh, because your Santa is looking at it.\n\n"
         f"-# 🤫 Keep your giftee a secret in the server. The magic is in the mystery.\n"
@@ -253,7 +253,7 @@ def giftee_fallback_embed(year: int) -> disnake.Embed:
     description = (
         f"We couldn't tell you privately who you're gifting for Secret Santa {year}, "
         f"but it's saved safely. 🔒\n\n"
-        f"Use `/ss giftee` here. Only **you** will see the answer.\n\n"
+        f"Use {cmd('ss giftee')} here. Only **you** will see the answer.\n\n"
         f"-# Tip: Server Settings → Privacy → allow DMs to get future updates."
     )
     return _embed(BADGE_NOTICE, "Psst, your DMs are closed", description, FROST)
@@ -370,7 +370,7 @@ def event_ended_embed(
 def event_ended_fallback_embed(year: int) -> disnake.Embed:
     description = (
         f"We couldn't DM you, so here's your thank-you! ✨\n"
-        f"Browse this year anytime with `/ss history`.\n\n"
+        f"Browse this year anytime with {cmd('ss history')}.\n\n"
         f"-# Tip: enable DMs from server members to get updates privately."
     )
     return _embed(_badge_event(year), f"🎄 Secret Santa {year} has wrapped up", description, FROST)
