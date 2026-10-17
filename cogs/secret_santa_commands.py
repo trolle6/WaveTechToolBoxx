@@ -476,10 +476,14 @@ class SecretSantaCommandsMixin:
         current_year = self.state.get("current_year", dt.date.today().year)
         dm_items = []
         for giver, receiver in assignments.items():
-            match_embed, match_view = self._match_dm(current_year, int(receiver), event)
-            dm_items.append((int(giver), match_embed, match_view))
+            reveal_embed, reveal_view = self._giftee_reveal_dm(current_year, int(receiver), event)
+            dm_items.append((int(giver), reveal_embed, reveal_view))
         self.logger.debug("Sending assignment DMs to %s participants", len(dm_items))
         failed = await self._send_dms_to_participants(dm_items)
+        card = ss_messages.commands_card_embed(current_year)
+        await self._send_dms_to_participants(
+            [(uid, card, None) for uid, _, _ in dm_items if uid not in failed]
+        )
         self.logger.debug("DM send complete: %s failed of %s", len(failed), len(dm_items))
         guild_id = event.get("guild_id")
         if failed:
@@ -927,7 +931,7 @@ class SecretSantaCommandsMixin:
         else:
             embed = self._error_embed(
                 title="❌ Delivery Failed",
-                description="Couldn't send your question. Your match may have DMs disabled."
+                description="Couldn't send your question. Your giftee may have DMs disabled."
             )
             await self._safe_edit_response(inter, embed=embed)
 
@@ -1483,12 +1487,12 @@ class SecretSantaCommandsMixin:
         giftee_wishlist = wishlists.get(receiver_id)
         if not isinstance(giftee_wishlist, list):
             giftee_wishlist = []
-        match = f"<@{receiver_id}>"
+        giftee_mention = f"<@{receiver_id}>"
         if not giftee_wishlist:
             embed = disnake.Embed(
-                title=f"📋 Your match's wishlist",
+                title="📋 Your giftee's wishlist",
                 description=(
-                    f"**{match}** hasn't added items yet.\n\n"
+                    f"**{giftee_mention}** hasn't added items yet.\n\n"
                     f"Ask with `/ss ask_giftee`."
                 ),
                 color=disnake.Color.blue(),
@@ -1496,8 +1500,8 @@ class SecretSantaCommandsMixin:
             embed.set_footer(text="Check back later with `/ss giftee`.")
         else:
             embed = disnake.Embed(
-                title="📋 Your match's wishlist",
-                description=f"**{match}** — **{len(giftee_wishlist)}** item{'s' if len(giftee_wishlist) != 1 else ''}:",
+                title="📋 Your giftee's wishlist",
+                description=f"**{giftee_mention}** — **{len(giftee_wishlist)}** item{'s' if len(giftee_wishlist) != 1 else ''}:",
                 color=disnake.Color.gold(),
             )
             wishlist_text = "\n".join(f"{i+1}. {item}" for i, item in enumerate(giftee_wishlist))

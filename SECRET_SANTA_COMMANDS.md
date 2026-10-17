@@ -58,7 +58,9 @@ These work after the shuffle.
 
 ## DMs, buttons and reminders
 
-The bot's DMs are color-coded: red for your match (Santa mode), green for your own wishlist and questions from your Santa (giftee mode), gold for the event, and blue-grey for notices. Most DMs have buttons for the common commands, so you can add wishlist items, ask your giftee, or log your gift without typing a slash command.
+The bot's DMs are color-coded: red for your giftee (Santa mode), green for your own wishlist and questions from your Santa (giftee mode), gold for the event, and blue-grey for notices. Most DMs have buttons for the common commands, so you can add wishlist items, ask your giftee, or log your gift without typing a slash command.
+
+Right after the shuffle DM telling you who you're gifting, the bot sends a **📖 commands card** listing every participant command. Scroll back to it anytime if a button times out.
 
 After the shuffle the bot sends two one-time reminders: one 2 days in, to anyone whose wishlist is still empty, and one a week before the auto-stop, to Santas who haven't logged a gift yet.
 

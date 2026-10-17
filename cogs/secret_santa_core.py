@@ -444,7 +444,7 @@ class SecretSantaCore(commands.Cog):
                 title="⏳ No giftee yet",
                 description=(
                     "The organizer hasn't run `/ss shuffle` yet.\n\n"
-                    "After shuffle you'll get a DM with your match. "
+                    "After the shuffle you'll get a DM telling you who you're gifting. "
                     "Until then: `/ss wishlist add` for your own list."
                 ),
             )
@@ -483,7 +483,7 @@ class SecretSantaCore(commands.Cog):
             embed = self._error_embed(
                 title="⏳ No giftee yet",
                 description=(
-                    "Wait for `/ss shuffle` — you'll get a DM with who your match is."
+                    "Wait for the shuffle — you'll get a DM telling you who you're gifting."
                 ),
             )
             await self._safe_edit_response(inter, embed=embed)
@@ -628,9 +628,9 @@ class SecretSantaCore(commands.Cog):
         shuffle_ts = (event or self._get_current_event() or {}).get("scheduled_shuffle_time")
         return ss_messages.join_embed(year, shuffle_ts), SantaActionsView("wishlist_add", "wishlist_view")
 
-    def _match_dm(self, year: int, receiver_id: int, event: Optional[dict] = None):
+    def _giftee_reveal_dm(self, year: int, receiver_id: int, event: Optional[dict] = None):
         stop_ts = (event or {}).get("scheduled_stop_time")
-        embed = ss_messages.match_embed(year, receiver_id, stop_ts)
+        embed = ss_messages.giftee_reveal_embed(year, receiver_id, stop_ts)
         return embed, SantaActionsView("giftee", "ask", "wishlist_view")
 
     def _leave_dm(self, year: int, event: Optional[dict] = None):
@@ -1103,7 +1103,7 @@ class SecretSantaCore(commands.Cog):
         # Message content caps at 2000 chars; batch mentions so huge events still fit.
         batches = [failed_user_ids[i:i + 60] for i in range(0, len(failed_user_ids), 60)]
         builder = (
-            ss_messages.match_fallback_embed if message_type == "assignment"
+            ss_messages.giftee_fallback_embed if message_type == "assignment"
             else ss_messages.event_ended_fallback_embed
         )
         for attempt in range(3):
@@ -1113,7 +1113,9 @@ class SecretSantaCore(commands.Cog):
                     await asyncio.wait_for(
                         channel.send(
                             content=mentions,
-                            embed=builder(year),
+                            embeds=[builder(year)] + (
+                                [ss_messages.commands_card_embed(year)] if message_type == "assignment" else []
+                            ),
                             allowed_mentions=disnake.AllowedMentions(users=True),
                         ),
                         timeout=10.0,
