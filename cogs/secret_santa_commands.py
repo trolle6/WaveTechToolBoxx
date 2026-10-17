@@ -553,6 +553,13 @@ class SecretSantaCommandsMixin:
         
         # Release lock before sending DMs (they can take time)
         # Event is already cleared, so concurrent stops will see no event and fail
+
+        distribute = self.bot.get_cog("DistributeZipCog")
+        if distribute:
+            try:
+                await distribute.on_secret_santa_ended(year, event)
+            except Exception as e:
+                self.logger.error(f"Could not start shared-file window for {year}: {e}", exc_info=True)
         
         # Send thank you message to all participants with rate limiting and fallback
         participants = event.get("participants", {}) or {}

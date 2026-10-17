@@ -15,7 +15,8 @@ FEATURES:
 
 COMMANDS:
 - /distribute upload [attachment] [required_by] - Upload and DM files (SS participants)
-- /distribute list / browse / get - Download shared files (SS participants)
+- /distribute list / browse / get - Download this year's shared files (SS participants;
+  after the event, holders of that year's role for 90 days, then files are deleted)
 - /distribute remove - Remove a file (moderator only)
 
 DESIGN DECISIONS:
@@ -65,6 +66,11 @@ FILE_SEND_TIMEOUT = 120  # 2 minutes - timeout for sending files via DM (large f
 FILE_SEND_RETRY_DELAY = 2  # Seconds to wait before retry on transient errors
 MAX_RETRIES = 2  # Maximum retries for transient network errors
 
+# Files belong to one Secret Santa year. After that year's event ends, holders of its join role
+# (or its participants, if no role was set) can still list/browse/get them; then they are deleted.
+FILE_RETENTION_SECONDS = 90 * 86400
+CLEANUP_INTERVAL_SECONDS = 6 * 3600
+
 
 def load_metadata() -> Dict:
     """Load file metadata (synchronous - call from executor). Always returns a dict."""
@@ -102,6 +108,9 @@ class DistributeZipCog(commands.Cog):
             self.metadata["files"] = {}
         if not isinstance(self.metadata.get("history"), list):
             self.metadata["history"] = []
+        if not isinstance(self.metadata.get("ended_years"), dict):
+            self.metadata["ended_years"] = {}
+        self._cleanup_task: Optional[asyncio.Task] = None
         
         # Migration: Mark history entries as deleted if file no longer exists
         # This handles cases where files were deleted before the status field was added
@@ -116,12 +125,125 @@ class DistributeZipCog(commands.Cog):
         
         self.logger.debug("DistributeZip cog initialized")
 
+    # ============ YEARS ============
+    @staticmethod
+    def _file_year(data: dict) -> int:
+        """Year tag; files from before tagging fall back to their upload year."""
+        year = data.get("year")
+        if isinstance(year, int):
+            return year
+        return time.gmtime(data.get("uploaded_at") or 0).tm_year
+
+    def _files_for_year(self, year: Optional[int]) -> Dict[str, dict]:
+        files = self.metadata.get("files") or {}
+        if year is None or not isinstance(files, dict):
+            return {}
+        return {fid: d for fid, d in files.items() if isinstance(d, dict) and self._file_year(d) == year}
+
+    def _santa_state(self) -> Tuple[Optional[dict], Optional[int]]:
+        cog = self.bot.get_cog("SecretSantaCog")
+        state = getattr(cog, "state", None) or {}
+        event = state.get("current_event")
+        if not isinstance(event, dict) or not event.get("active"):
+            event = None
+        return event, state.get("current_year")
+
+    async def _has_year_access(self, user_id: int, info: dict) -> bool:
+        role_id, guild_id = info.get("role_id"), info.get("guild_id")
+        if role_id and guild_id:
+            guild = self.bot.get_guild(int(guild_id))
+            if guild:
+                member = guild.get_member(user_id)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except disnake.HTTPException:
+                        member = None
+                if member is not None:
+                    return any(r.id == int(role_id) for r in member.roles)
+        return str(user_id) in (info.get("participants") or [])
+
+    async def _visible_year(self, user_id: int) -> Tuple[Optional[int], str]:
+        """Which year's files this user may see right now, or (None, reason)."""
+        event, current_year = self._santa_state()
+        if event:
+            if str(user_id) in (event.get("participants") or {}):
+                return current_year, ""
+            return None, "❌ You must be signed up for the active Secret Santa event to use this command."
+        now = time.time()
+        ended = self.metadata.get("ended_years") or {}
+        for year in sorted(ended, key=lambda y: int(y), reverse=True):
+            info = ended[year]
+            if now - info.get("ended_at", 0) < FILE_RETENTION_SECONDS and await self._has_year_access(user_id, info):
+                return int(year), ""
+        return None, "❌ No active Secret Santa event — shared files are only available to participants."
+
+    async def _require_year_access(self, inter: disnake.ApplicationCommandInteraction) -> Optional[int]:
+        year, reason = await self._visible_year(inter.author.id)
+        if year is None:
+            await self._safe_edit_response(inter, content=reason)
+        return year
+
+    async def on_secret_santa_ended(self, year: int, event: dict) -> None:
+        """Called by /ss stop: start this year's 90-day download window."""
+        async with self._metadata_lock:
+            self.metadata["ended_years"][str(year)] = {
+                "ended_at": time.time(),
+                "role_id": event.get("role_id"),
+                "guild_id": event.get("guild_id"),
+                "participants": list((event.get("participants") or {}).keys()),
+            }
+            await self._save_metadata_async()
+
+    async def _cleanup_expired_files(self) -> int:
+        """Delete files whose year ended more than 90 days ago. Untracked past years get a fresh 90 days."""
+        active_event, current_year = self._santa_state()
+        now = time.time()
+        removed = 0
+        async with self._metadata_lock:
+            ended = self.metadata["ended_years"]
+            files = self.metadata["files"]
+            for data in files.values():
+                year = self._file_year(data) if isinstance(data, dict) else None
+                if year and year != current_year and str(year) not in ended:
+                    ended[str(year)] = {"ended_at": now, "role_id": None, "guild_id": None, "participants": []}
+            expired = {
+                fid for fid, data in files.items()
+                if isinstance(data, dict)
+                and not (active_event and self._file_year(data) == current_year)
+                and now - (ended.get(str(self._file_year(data))) or {}).get("ended_at", now) >= FILE_RETENTION_SECONDS
+            }
+            for fid in expired:
+                path = safe_filename_in_dir((files[fid].get("filename") or "").strip(), FILES_DIR)
+                if path and path.exists():
+                    path.unlink()
+                del files[fid]
+                for entry in self.metadata.get("history", []):
+                    if entry.get("file_id") == fid:
+                        entry["status"] = "*expired*"
+                removed += 1
+            await self._save_metadata_async()
+        if removed:
+            self.logger.info("Deleted %s shared file(s) past the 90-day window", removed)
+        return removed
+
+    async def _cleanup_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                await self._cleanup_expired_files()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.logger.error(f"Shared file cleanup failed: {e}", exc_info=True)
+            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
     # ============ FILE UTILITIES ============
-    def _find_file_by_name(self, file_name: str) -> Optional[Tuple[str, dict]]:
-        """Find file by name (case-insensitive)"""
+    def _find_file_by_name(self, file_name: str, year: Optional[int] = None) -> Optional[Tuple[str, dict]]:
+        """Find file by name (case-insensitive); limited to one year's files when year is given."""
         if not file_name or not isinstance(file_name, str) or not file_name.strip():
             return None
-        files = self.metadata.get("files") or {}
+        files = self._files_for_year(year) if year is not None else (self.metadata.get("files") or {})
         if not isinstance(files, dict):
             return None
         file_name_lower = file_name.strip().lower()
@@ -130,9 +252,9 @@ class DistributeZipCog(commands.Cog):
                 return (fid, data)
         return None
     
-    def _get_available_files(self) -> List[str]:
-        """Get list of available file names"""
-        files = self.metadata.get("files") or {}
+    def _get_available_files(self, year: Optional[int] = None) -> List[str]:
+        """Get list of available file names (one year's files when year is given)"""
+        files = self._files_for_year(year) if year is not None else (self.metadata.get("files") or {})
         if not isinstance(files, dict):
             return []
         return sorted([
@@ -182,9 +304,14 @@ class DistributeZipCog(commands.Cog):
         await loop.run_in_executor(self._executor, save_metadata, self.metadata, self.logger)
     
     @autocomplete_safety_wrapper
-    async def _autocomplete_file_name(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
+    async def _autocomplete_file_name(self, inter: disnake.ApplicationCommandInteraction, string: str,
+                                      all_years: bool = False) -> List[str]:
         """Autocomplete for file_name selection."""
-        available_files = self._get_available_files()
+        if all_years:
+            available_files = self._get_available_files()
+        else:
+            year, _ = await self._visible_year(inter.author.id)
+            available_files = self._get_available_files(year) if year is not None else []
         if not available_files:
             return []
         string_lower = (string or "").lower()
@@ -199,7 +326,7 @@ class DistributeZipCog(commands.Cog):
 
     async def autocomplete_file_name_remove(self, inter: disnake.ApplicationCommandInteraction, string: str) -> List[str]:
         """Autocomplete for remove file_name parameter."""
-        return await self._autocomplete_file_name(inter, string)
+        return await self._autocomplete_file_name(inter, string, all_years=True)
     
     async def _require_participant(self, inter: disnake.ApplicationCommandInteraction) -> bool:
         """Active Secret Santa participant check (call after defer)."""
@@ -360,15 +487,26 @@ class DistributeZipCog(commands.Cog):
         )
         return embed
 
+    def _retention_note(self, year: int) -> str:
+        info = (self.metadata.get("ended_years") or {}).get(str(year))
+        if not info:
+            return "Kept until 90 days after the event ends"
+        until = time.strftime("%b %d, %Y", time.gmtime(info["ended_at"] + FILE_RETENTION_SECONDS))
+        return f"Available until {until}"
+
+    def _no_files_text(self, year: Optional[int]) -> str:
+        return f"📦 No files have been shared for Secret Santa {year} yet" if year else "📦 No files have been uploaded yet"
+
     # ============ FILE BROWSER ============
-    async def _handle_file_browser(self, inter: disnake.ApplicationCommandInteraction, action_type: str, handler_func):
-        """Common file browser setup"""
-        files = self.metadata.get("files") or {}
+    async def _handle_file_browser(self, inter: disnake.ApplicationCommandInteraction, action_type: str, handler_func,
+                                   year: Optional[int] = None):
+        """Common file browser setup (one year's files when year is given)"""
+        files = self._files_for_year(year) if year is not None else (self.metadata.get("files") or {})
         if not isinstance(files, dict) or not files:
-            await self._safe_edit_response(inter, content="📦 No files have been uploaded yet")
+            await self._safe_edit_response(inter, content=self._no_files_text(year))
             return
-        
-        embed, browser_view = create_file_browser_view(FILES_DIR, self.metadata, action_type)
+
+        embed, browser_view = create_file_browser_view(FILES_DIR, {**self.metadata, "files": files}, action_type)
         if not browser_view:
             await self._safe_edit_response(inter, embed=embed)
             return
@@ -844,7 +982,8 @@ class DistributeZipCog(commands.Cog):
                         "required_by": requester_user.id,
                         "uploaded_at": time.time(),
                         "size": att.size,
-                        "download_count": 0
+                        "download_count": 0,
+                        "year": self._santa_state()[1],
                     }
                     
                     self.metadata["history"].append({
@@ -921,15 +1060,14 @@ class DistributeZipCog(commands.Cog):
 
     @distribute_root.sub_command(name="list", description="List all uploaded files")
     async def list_files(self, inter: disnake.ApplicationCommandInteraction):
-        """List all uploaded files"""
+        """List this year's shared files"""
         await inter.response.defer(ephemeral=True)
-        if not await self._require_participant(inter):
+        year = await self._require_year_access(inter)
+        if year is None:
             return
-        files = self.metadata.get("files") or {}
-        if not isinstance(files, dict):
-            files = {}
+        files = self._files_for_year(year)
         if not files:
-            await self._safe_edit_response(inter, content="📦 No files have been uploaded yet")
+            await self._safe_edit_response(inter, content=self._no_files_text(year))
             return
         
         # Sort by upload time (newest first); only include entries that are dicts
@@ -946,7 +1084,7 @@ class DistributeZipCog(commands.Cog):
             await self._safe_edit_response(inter, embed=embed, view=paginator)
         else:
             # Show all files on one page (no pagination needed)
-            embed = disnake.Embed(title="📦 Uploaded Files", color=disnake.Color.blue())
+            embed = disnake.Embed(title=f"📦 Secret Santa {year} files", color=disnake.Color.blue())
             
             for file_id, file_data in sorted_files:
                 file_name = file_data.get("name", "Unknown")
@@ -965,14 +1103,15 @@ class DistributeZipCog(commands.Cog):
                     inline=False
                 )
             
-            embed.set_footer(text=f"Total: {len(sorted_files)} file(s)")
+            embed.set_footer(text=f"Total: {len(sorted_files)} file(s) · {self._retention_note(year)}")
             await self._safe_edit_response(inter, embed=embed)
     
     @distribute_root.sub_command(name="browse", description="Browse and select files using an interactive file browser")
     async def browse_files(self, inter: disnake.ApplicationCommandInteraction):
         """Browse files using an interactive file browser"""
         await inter.response.defer(ephemeral=True)
-        if not await self._require_participant(inter):
+        year = await self._require_year_access(inter)
+        if year is None:
             return
         
         async def handler(interaction, file_id, file_data, file_path):
@@ -983,7 +1122,7 @@ class DistributeZipCog(commands.Cog):
             embed.set_footer(text="Use /distribute get to download this file")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         
-        await self._handle_file_browser(inter, "browse", handler)
+        await self._handle_file_browser(inter, "browse", handler, year=year)
 
     @distribute_root.sub_command(name="get", description="Get/download a file (use browse command for easier selection)")
     async def get_file(
@@ -993,7 +1132,8 @@ class DistributeZipCog(commands.Cog):
     ):
         """Get/download a specific file"""
         await inter.response.defer(ephemeral=True)
-        if not await self._require_participant(inter):
+        year = await self._require_year_access(inter)
+        if year is None:
             return
 
         if not file_name or (isinstance(file_name, str) and not file_name.strip()):
@@ -1005,11 +1145,11 @@ class DistributeZipCog(commands.Cog):
                     await interaction.response.send_message("❌ File not found on disk", ephemeral=True)
                     return
                 await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
-            await self._handle_file_browser(inter, "get", handler)
+            await self._handle_file_browser(inter, "get", handler, year=year)
             return
         
         # Find file by name
-        result = self._find_file_by_name(file_name)
+        result = self._find_file_by_name(file_name, year=year)
         if not result:
             await self._safe_edit_response(inter,
                 content=f"❌ File '{file_name}' not found\n\n💡 Try `/distribute get` (without file_name) to browse all files!"
@@ -1102,6 +1242,7 @@ class DistributeZipCog(commands.Cog):
     # ============ COG LIFECYCLE ============
     async def cog_load(self):
         """Initialize cog"""
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self.logger.debug("DistributeZip cog loaded")
 
     async def _async_unload(self):
@@ -1117,6 +1258,8 @@ class DistributeZipCog(commands.Cog):
         if self._unloaded:
             return
         self._unloaded = True
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
         self.logger.debug("Unloading DistributeZip cog...")
         if self.bot.is_closed():
             try:

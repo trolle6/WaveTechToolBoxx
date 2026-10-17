@@ -8,6 +8,7 @@
 - Removed the word "match" from all participant-facing text (now "giftee")
 - Every button and form is guarded: failures get a slate private reply saying why (bug, Discord trouble, rate limit, DMs closed), which command to type instead, what did NOT happen, and a copy of anything typed
 - Expired button presses (Discord's "This interaction failed") get a follow-up DM, max once per 5 minutes per user
+- `/distribute` files are per year: list/browse/get show only the current year; after `/ss stop`, that year's role holders keep access for 90 days, then files are deleted (older untracked years get a fresh 90 days on first run)
 - Commands in messages are clickable `</ss giftee:ID>` mentions (ids cached at startup; plain text fallback)
 - Leave DM links back to the signup message; giftee DM shows the real end date instead of a hardcoded Dec 25
 - Giftee reply DM shows the question it answers; wrap-up DM shows event stats and your own gift

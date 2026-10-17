@@ -30,7 +30,7 @@ If you join a voice channel and send messages while TTS is active, your message 
 
 ### File distribution (opt-in / moderator-initiated)
 
-Files uploaded via `/distribute` are stored on our private server to share with participants. Metadata (filename, uploader, date) is stored locally.
+Files uploaded via `/distribute` are stored on our private server to share with participants. Metadata (filename, uploader, date) is stored locally. Files belong to one Secret Santa year and are **deleted automatically 90 days after that year's event ends**.
 
 ## What we do not do
 

@@ -66,6 +66,12 @@ After the shuffle the bot sends two one-time reminders: one 2 days in, to anyone
 
 ---
 
+## Shared files
+
+`/distribute list`, `browse` and `get` only show the current year's files. After the event ends, people who still have that year's join role (or, if no role was set, that year's participants) can download the files for 90 more days. Then the bot deletes them.
+
+---
+
 ## For everyone
 
 | Command | What it does |
