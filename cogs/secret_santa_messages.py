@@ -1,14 +1,14 @@
 """Secret Santa participant-facing embeds (DMs, confirmations, reminders, fallbacks).
 
 Color code by role so a glance tells you what a message is about:
-cranberry = you as Santa, pine = you as giftee, gold = the event, frost = notices.
+cranberry = you as Santa, pine = you as giftee, gold = the event, frost = notices, slate = errors.
 """
 
 from __future__ import annotations
 
 import random
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 import disnake
 
@@ -32,29 +32,45 @@ GIFT_LOGGED_TITLES = (
 )
 
 
+SLATE = disnake.Color(0x6B7280)
+
+# Root command name -> Discord command id, filled at startup so commands render as clickable mentions.
+COMMAND_IDS: Dict[str, int] = {}
+
+
+def cmd(path: str) -> str:
+    """`ss giftee` -> clickable </ss giftee:ID> when the id is known, else `/ss giftee`."""
+    command_id = COMMAND_IDS.get(path.split()[0])
+    return f"</{path}:{command_id}>" if command_id else f"`/{path}`"
+
+
 COMMAND_GROUPS = {
     "wishlist": ("🎁 Your wishlist", (
-        "`/ss wishlist add` · add an idea",
-        "`/ss wishlist view` · see your list",
-        "`/ss wishlist remove` · remove by number",
-        "`/ss wishlist clear` · empty it",
+        ("ss wishlist add", "add an idea"),
+        ("ss wishlist view", "see your list"),
+        ("ss wishlist remove", "remove by number"),
+        ("ss wishlist clear", "empty it"),
     )),
     "santa": ("🎅 Your giftee", (
-        "`/ss giftee` · their wishlist",
-        "`/ss ask_giftee` · anonymous question",
-        "`/ss submit_gift` · log what you gave",
+        ("ss giftee", "their wishlist"),
+        ("ss ask_giftee", "anonymous question"),
+        ("ss submit_gift", "log what you gave"),
     )),
     "files": ("📎 Shared files", (
-        "`/distribute upload` · share a file",
-        "`/distribute list` · all shared files",
-        "`/distribute browse` · pick from a menu",
-        "`/distribute get` · download one",
+        ("distribute upload", "share a file"),
+        ("distribute list", "all shared files"),
+        ("distribute browse", "pick from a menu"),
+        ("distribute get", "download one"),
     )),
     "archive": ("📚 Past years", (
-        "`/ss history` · browse past years",
-        "`/ss edit_gift` · fix an old gift note",
+        ("ss history", "browse past years"),
+        ("ss edit_gift", "fix an old gift note"),
     )),
 }
+
+
+def _command_lines(group: str) -> str:
+    return "\n".join(f"{cmd(path)} · {what}" for path, what in COMMAND_GROUPS[group][1])
 
 
 LOST_HINT = "-# Lost? Scroll up to your 📖 commands card."
@@ -65,13 +81,107 @@ def commands_card_embed(year: int) -> disnake.Embed:
     embed = _embed(
         BADGE_NOTICE,
         "📖 Your Secret Santa commands",
-        "Buttons are the quick way. If one times out or fails, type the command instead.",
+        "Buttons are the quick way. If one times out or fails, type the command instead.\n"
+        "-# Button says *This interaction failed*? The bot may be restarting. "
+        "Wait a minute or type the command.",
         FROST,
         footer=f"Secret Santa {year} · Scroll back here anytime",
     )
-    for title, lines in COMMAND_GROUPS.values():
-        embed.add_field(name=title, value="\n".join(lines), inline=False)
+    for group, (title, _) in COMMAND_GROUPS.items():
+        embed.add_field(name=title, value=_command_lines(group), inline=False)
     return embed
+
+
+# ---- Errors (slate, private): what happened -> not your fault / what to do -> command to use instead.
+
+def _error(year: int, title: str, description: str, try_label: str, command: Optional[str],
+           not_done: str, typed: Optional[str] = None) -> disnake.Embed:
+    embed = disnake.Embed(title=title, description=description, color=SLATE)
+    embed.add_field(
+        name=f"➡️ {try_label}",
+        value=cmd(command) if command else "Press the button again in a minute.",
+        inline=False,
+    )
+    if typed:
+        embed.add_field(name="📝 What you typed (copy it from here)", value=f"```{typed[:1000].replace('```', '´´´')}```", inline=False)
+    embed.set_footer(text=f"Secret Santa {year} · {not_done}")
+    return embed
+
+
+def error_bug(year: int, button_name: str, command: Optional[str], not_done: str,
+              typed: Optional[str] = None) -> disnake.Embed:
+    return _error(
+        year, "🔧 That button tripped over its own feet",
+        f"The **{button_name}** button hit a snag on our end, not yours.\n"
+        "The good news? There's another way in. 🎅",
+        "Try this instead", command, not_done, typed,
+    )
+
+
+def error_discord(year: int, command: Optional[str], not_done: str, typed: Optional[str] = None) -> disnake.Embed:
+    return _error(
+        year, "❄️ Discord caught a little cold",
+        "Discord isn't responding properly right now.\n"
+        "Give it a minute, then try again. Nothing was lost. ✨",
+        "Try this in a minute", command, not_done, typed,
+    )
+
+
+def error_rate_limited(year: int, command: Optional[str], not_done: str,
+                       retry_after: Optional[float] = None, typed: Optional[str] = None) -> disnake.Embed:
+    when = (f"You can try again <t:{int(time.time() + retry_after) + 1}:R>. 🎁" if retry_after
+            else "Wait a few seconds, then try again. 🎁")
+    return _error(
+        year, "🦌 The reindeer need a breather",
+        "Lots of Santas are busy right now, so Discord asked the bot to slow down for a moment.\n\n" + when,
+        "Try this shortly", command, not_done, typed,
+    )
+
+
+def error_dms_closed(year: int, to_santa: bool = False) -> disnake.Embed:
+    if to_santa:
+        embed = disnake.Embed(
+            title="📭 Your reply couldn't reach your Santa",
+            description="Your Santa has DMs turned off, so the bot can't deliver your reply right now.",
+            color=SLATE,
+        )
+        embed.add_field(name="💡 What you can do",
+                        value="• Try again later, in case they open their DMs\n"
+                              "• Add the answer to your wishlist with " + cmd("ss wishlist add"),
+                        inline=False)
+        embed.set_footer(text=f"Secret Santa {year} · Your reply wasn't sent")
+        return embed
+    embed = disnake.Embed(
+        title="📭 Your question couldn't reach them",
+        description="Your giftee has DMs turned off, so the bot can't deliver questions to them right now.\n\n"
+                    "Don't worry, they won't know you tried. 🤫",
+        color=SLATE,
+    )
+    embed.add_field(name="💡 What you can do",
+                    value=f"• Check their wishlist with {cmd('ss giftee')}\n"
+                          "• Try again later, in case they open their DMs\n"
+                          "• Ask your host to give them a gentle nudge",
+                    inline=False)
+    embed.set_footer(text=f"Secret Santa {year} · You're still anonymous")
+    return embed
+
+
+def error_question_stuck(year: int, typed: Optional[str] = None) -> disnake.Embed:
+    return _error(
+        year, "✉️ Your question got stuck in the wrapping paper",
+        "We couldn't get your question ready to send.\n"
+        "It wasn't delivered, so feel free to try again. 🎅",
+        "Try this again shortly", "ss ask_giftee", "Nothing was sent to your giftee", typed,
+    )
+
+
+def error_timed_out_dm(year: int, button_name: str, command: Optional[str], not_done: str) -> disnake.Embed:
+    return _error(
+        year, "⏳ That button press timed out",
+        f"Your **{button_name}** press took too long to reach the bot, so Discord gave up on it.\n"
+        "Nothing is broken. Try again, or type the command. 🎅",
+        "Try this instead", command, not_done,
+    )
 
 
 def _badge_event(year: int) -> str:
@@ -106,7 +216,8 @@ def join_embed(year: int, shuffle_ts: Optional[float]) -> disnake.Embed:
         f"### 📝 While you wait\n"
         f"Your Santa will see your wishlist, so give them some ideas.\n"
         f"Favorite snacks, hobbies, colors, things you *don't* want: it all helps.\n\n"
-        f"-# Wishlist commands: `/ss wishlist add` · `view` · `remove` · `clear`\n"
+        f"-# Wishlist commands: {cmd('ss wishlist add')} · {cmd('ss wishlist view')} · "
+        f"{cmd('ss wishlist remove')} · {cmd('ss wishlist clear')}\n"
         f"-# Changed your mind? Remove your reaction before the shuffle."
     )
     return _embed(_badge_event(year), "You're on the list! ✨", description, GOLD)
@@ -252,8 +363,7 @@ def event_ended_embed(
     if receiver_name:
         note = f"*{gift}*" if gift else "*not logged*"
         embed.add_field(name="🎁 Your gift went to", value=f"{receiver_name}: {note}"[:1024], inline=False)
-    title, lines = COMMAND_GROUPS["archive"]
-    embed.add_field(name=title, value="\n".join(lines), inline=False)
+    embed.add_field(name=COMMAND_GROUPS["archive"][0], value=_command_lines("archive"), inline=False)
     return embed
 
 

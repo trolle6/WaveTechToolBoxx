@@ -142,6 +142,8 @@ class SecretSantaCore(commands.Cog):
         self._limit_reply = RateLimiter(limit=SS_REPLY_RATE_LIMIT, window=SS_REPLY_RATE_WINDOW)
         self._limit_wishlist = RateLimiter(limit=SS_WISHLIST_RATE_LIMIT, window=SS_WISHLIST_RATE_WINDOW)
         self._limit_join_dm = RateLimiter(limit=SS_JOIN_DM_RATE_LIMIT, window=SS_JOIN_DM_RATE_WINDOW)
+        # user_id -> (reason, retry_after) for the most recent failed DM: "dms_closed" | "rate_limited" | "discord"
+        self._dm_failure: Dict[int, tuple] = {}
         
         self.logger.debug("Secret Santa cog initialized")
     
@@ -602,6 +604,15 @@ class SecretSantaCore(commands.Cog):
         if rewritten and rewritten != message:
             self.logger.info("SS %s (sent anonymized): %s", msg_type, rewritten)
     
+    def _dm_failure_embed(self, user_id: int, year: int, command: Optional[str], not_done: str,
+                          typed: Optional[str] = None, to_santa: bool = False) -> disnake.Embed:
+        reason, retry_after = self._dm_failure.get(int(user_id), ("discord", None))
+        if reason == "dms_closed":
+            return ss_messages.error_dms_closed(year, to_santa=to_santa)
+        if reason == "rate_limited":
+            return ss_messages.error_rate_limited(year, command, not_done, retry_after, typed)
+        return ss_messages.error_discord(year, command, not_done, typed)
+
     def _signup_url(self, event: Optional[dict]) -> Optional[str]:
         if not event:
             return None
@@ -991,6 +1002,7 @@ class SecretSantaCore(commands.Cog):
             self.logger.debug(f"Empty DM message for user {user_id}, skipping")
             return True  # Nothing to send, consider success
 
+        self._dm_failure.pop(user_id, None)
         for attempt in range(DM_MAX_RETRIES):
             try:
                 user = await asyncio.wait_for(
@@ -1008,6 +1020,7 @@ class SecretSantaCore(commands.Cog):
                     self.logger.warning(f"User {user_id} has DMs disabled (50007) - DM not delivered")
                 else:
                     self.logger.warning(f"User {user_id} blocked DM (Forbidden: {error_code})")
+                self._dm_failure[user_id] = ("dms_closed", None)
                 return False
             except disnake.HTTPException as e:
                 status = getattr(e, 'status', None)
@@ -1028,6 +1041,7 @@ class SecretSantaCore(commands.Cog):
                     await asyncio.sleep(wait)
                     continue
                 self.logger.warning(f"HTTP error sending DM to {user_id}: {e}")
+                self._dm_failure[user_id] = ("rate_limited", retry_after) if status == 429 else ("discord", None)
                 return False
             except (ConnectionError, OSError, asyncio.TimeoutError) as e:
                 if attempt < DM_MAX_RETRIES - 1:
@@ -1039,6 +1053,7 @@ class SecretSantaCore(commands.Cog):
                     await asyncio.sleep(wait)
                     continue
                 self.logger.warning(f"Connection error sending DM to {user_id} after retries: {e}")
+                self._dm_failure[user_id] = ("discord", None)
                 return False
             except disnake.NotFound:
                 self.logger.warning(f"User {user_id} not found - DM not delivered")
@@ -1168,15 +1183,15 @@ class SecretSantaCore(commands.Cog):
                 embed = ss_messages.reply_sent_embed(self._truncate_text(cleaned, 1000))
                 await self._safe_followup_send(inter, embed=embed, ephemeral=True)
             else:
-                embed = self._error_embed(
-                    title="❌ Message couldn't be delivered",
-                    description="Couldn't DM your Santa — they may have DMs closed."
+                embed = self._dm_failure_embed(
+                    santa_id, year, None, "Your reply wasn't sent yet", typed=cleaned, to_santa=True
                 )
                 await self._safe_followup_send(inter, embed=embed, ephemeral=True)
                 
         except Exception as e:
-            self.logger.error(f"Error processing reply: {e}")
-            await self._safe_followup_send(inter, content="Yikes – something went wrong while sending your message. Could you try again?", ephemeral=True)
+            self.logger.error(f"Error processing reply: {e}", exc_info=True)
+            embed = ss_messages.error_bug(year, "Reply to Santa", None, "Your reply wasn't sent yet", typed=reply)
+            await self._safe_followup_send(inter, embed=embed, ephemeral=True)
 
     def _get_year_emoji_mapping(self, participants: Dict[str, str]) -> Dict[str, str]:
         """

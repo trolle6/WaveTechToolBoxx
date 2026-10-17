@@ -14,12 +14,85 @@ ISOLATION:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import time
 from typing import Dict, List, Optional, Tuple
 
+import aiohttp
 import disnake
 
 from .secret_santa_checks import format_gift_description_for_display, GIFT_NO_SUBMISSION_ROW
+from . import secret_santa_messages as ss_messages
+
+# action -> (button name shown in errors, typed command to use instead, what did NOT happen)
+ACTION_INFO: Dict[str, Tuple[str, Optional[str], str]] = {
+    "wishlist_add": ("Add to wishlist", "ss wishlist add", "Your wishlist wasn't changed"),
+    "wishlist_view": ("My wishlist", "ss wishlist view", "Nothing was changed"),
+    "giftee": ("View their wishlist", "ss giftee", "Nothing was changed"),
+    "ask": ("Ask them something", "ss ask_giftee", "Your question wasn't sent yet"),
+    "submit_gift": ("Log my gift", "ss submit_gift", "Your gift wasn't logged yet"),
+    "reply": ("Reply to Santa", None, "Your reply wasn't sent yet"),
+}
+
+TIMEOUT_DM_COOLDOWN_SECONDS = 300
+_timeout_dm_sent_at: Dict[int, float] = {}
+
+
+def _is_expired_interaction(exc: BaseException) -> bool:
+    return isinstance(exc, disnake.NotFound) and getattr(exc, "code", None) == 10062
+
+
+def _error_embed_for(exc: BaseException, action: str, year: int, typed: Optional[str]) -> disnake.Embed:
+    button_name, command, not_done = ACTION_INFO[action]
+    if isinstance(exc, disnake.HTTPException) and exc.status == 429:
+        return ss_messages.error_rate_limited(year, command, not_done, getattr(exc, "retry_after", None), typed)
+    if (isinstance(exc, disnake.HTTPException) and exc.status >= 500) or isinstance(
+        exc, (asyncio.TimeoutError, ConnectionError, aiohttp.ClientError)
+    ):
+        return ss_messages.error_discord(year, command, not_done, typed)
+    return ss_messages.error_bug(year, button_name, command, not_done, typed)
+
+
+async def _dm_timed_out(inter: disnake.Interaction, action: str, year: int) -> None:
+    """Discord refuses late replies to an expired click, so tell the user by DM (rate-limited)."""
+    user_id = inter.author.id
+    now = time.monotonic()
+    if now - _timeout_dm_sent_at.get(user_id, -TIMEOUT_DM_COOLDOWN_SECONDS) < TIMEOUT_DM_COOLDOWN_SECONDS:
+        return
+    _timeout_dm_sent_at[user_id] = now
+    button_name, command, not_done = ACTION_INFO[action]
+    try:
+        await inter.author.send(embed=ss_messages.error_timed_out_dm(year, button_name, command, not_done))
+    except disnake.HTTPException:
+        pass
+
+
+async def run_guarded(inter: disnake.Interaction, action: str, handler, typed: Optional[str] = None) -> None:
+    """Run a button/form handler; on any failure tell the user why and which command to type instead."""
+    cog = inter.bot.get_cog("SecretSantaCog")
+    year = cog.state.get("current_year", dt.date.today().year) if cog else dt.date.today().year
+    try:
+        await handler()
+    except Exception as exc:
+        logger = getattr(inter.bot, "logger", None)
+        if logger:
+            logger.error(f"SS button '{action}' failed: {exc!r}", exc_info=not isinstance(exc, disnake.HTTPException))
+        if _is_expired_interaction(exc):
+            await _dm_timed_out(inter, action, year)
+            return
+        embed = _error_embed_for(exc, action, year, typed)
+        try:
+            if inter.response.is_done():
+                await inter.followup.send(embed=embed, ephemeral=True)
+            else:
+                await inter.response.send_message(embed=embed, ephemeral=True)
+        except disnake.HTTPException:
+            await _dm_timed_out(inter, action, year)
+        return
+    # The /ss handlers swallow an expired defer and return quietly; nothing reached the user.
+    if not inter.response.is_done():
+        await _dm_timed_out(inter, action, year)
 
 
 class SecretSantaReplyView(disnake.ui.View):
@@ -35,51 +108,21 @@ class SecretSantaReplyView(disnake.ui.View):
     )
     async def reply_button(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         """Handle reply button click - works even after bot restart"""
-        try:
-            # Get the cog instance
+        async def handler():
             cog = inter.bot.get_cog("SecretSantaCog")
             if not cog:
                 await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
                 return
-            
-            # Check if there's an active event
             event = cog._get_current_event()
             if not event:
                 await inter.response.send_message(content="❌ No active Secret Santa event", ephemeral=True)
                 return
-            
-            # Find who is the user's Santa (dynamic lookup from event data)
-            user_id = str(inter.author.id)
-            assignments = event.get("assignments") or {}
-            santa_id = None
-            if isinstance(assignments, dict):
-                for giver, receiver in assignments.items():
-                    if str(receiver) == user_id:
-                        try:
-                            santa_id = int(giver)
-                            break
-                        except (TypeError, ValueError):
-                            continue
+            santa_id = cog._find_santa_for_giftee(event, str(inter.author.id))
             if not santa_id:
                 await inter.response.send_message(content="❌ You don't have a Secret Santa assigned yet", ephemeral=True)
                 return
-            
-            # Create a modal for the reply (modal needs int IDs for DM sending)
-            modal = SecretSantaReplyModal(santa_id, int(user_id))
-            await inter.response.send_modal(modal)
-            
-        except Exception as e:
-            if hasattr(inter.bot, 'logger'):
-                inter.bot.logger.error(f"Reply button error: {e}")
-            try:
-                await inter.response.send_message(content="❌ An error occurred while opening the reply form", ephemeral=True)
-            except disnake.errors.InteractionResponded:
-                try:
-                    await inter.followup.send(content="❌ An error occurred while opening the reply form", ephemeral=True)
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            await inter.response.send_modal(SecretSantaReplyModal(santa_id, inter.author.id))
+        await run_guarded(inter, "reply", handler)
 
 
 class SecretSantaReplyModal(disnake.ui.Modal):
@@ -105,19 +148,20 @@ class SecretSantaReplyModal(disnake.ui.Modal):
     
     async def callback(self, inter: disnake.ModalInteraction):
         """Handle modal submission"""
-        await inter.response.defer(ephemeral=True)
         text_values = getattr(inter, "text_values", None) or {}
         reply = (text_values.get("reply_text") or "").strip()
-        if not reply:
-            await inter.followup.send(content="❌ Please type a reply before sending.", ephemeral=True)
-            return
-        cog = inter.bot.get_cog("SecretSantaCog")
-        if not cog:
-            await inter.followup.send(content="❌ Secret Santa system not available", ephemeral=True)
-            return
-        
-        # Process the reply using the existing logic
-        await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
+
+        async def handler():
+            await inter.response.defer(ephemeral=True)
+            if not reply:
+                await inter.followup.send(content="❌ Please type a reply before sending.", ephemeral=True)
+                return
+            cog = inter.bot.get_cog("SecretSantaCog")
+            if not cog:
+                await inter.followup.send(content="❌ Secret Santa system not available", ephemeral=True)
+                return
+            await cog._process_reply(inter, reply, self.santa_id, self.giftee_id)
+        await run_guarded(inter, "reply", handler, typed=reply or None)
 
 
 class SecretSantaTextModal(disnake.ui.Modal):
@@ -148,12 +192,15 @@ class SecretSantaTextModal(disnake.ui.Modal):
                 ephemeral=True,
             )
             return
-        if self.action == "wishlist_add":
-            await cog.wishlist_add.callback(cog, inter, item=text)
-        elif self.action == "ask":
-            await cog.ss_ask.callback(cog, inter, question=text)
-        elif self.action == "submit_gift":
-            await cog.ss_submit.callback(cog, inter, gift_description=text)
+
+        async def handler():
+            if self.action == "wishlist_add":
+                await cog.wishlist_add.callback(cog, inter, item=text)
+            elif self.action == "ask":
+                await cog.ss_ask.callback(cog, inter, question=text)
+            elif self.action == "submit_gift":
+                await cog.ss_submit.callback(cog, inter, gift_description=text)
+        await run_guarded(inter, self.action, handler, typed=text)
 
 
 # action -> (label, emoji, style, modal spec or None). Modal spec: (title, label, placeholder, max_length).
@@ -191,12 +238,15 @@ class SantaActionsView(disnake.ui.View):
                 await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
                 return
             modal_spec = SANTA_ACTIONS[action][3]
-            if modal_spec:
-                await inter.response.send_modal(SecretSantaTextModal(action, *modal_spec))
-            elif action == "wishlist_view":
-                await cog.wishlist_view.callback(cog, inter)
-            elif action == "giftee":
-                await cog.ss_view_giftee_wishlist.callback(cog, inter)
+
+            async def handler():
+                if modal_spec:
+                    await inter.response.send_modal(SecretSantaTextModal(action, *modal_spec))
+                elif action == "wishlist_view":
+                    await cog.wishlist_view.callback(cog, inter)
+                elif action == "giftee":
+                    await cog.ss_view_giftee_wishlist.callback(cog, inter)
+            await run_guarded(inter, action, handler)
         return callback
 
 

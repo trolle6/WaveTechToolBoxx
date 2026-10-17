@@ -6,6 +6,9 @@
 - DM shortcut buttons (add/view wishlist, view giftee wishlist, ask, log gift) — persistent across restarts
 - Shuffle sends the "Your giftee has been chosen!" DM, then a separate 📖 commands card; other DMs stay short and point back to it
 - Removed the word "match" from all participant-facing text (now "giftee")
+- Every button and form is guarded: failures get a slate private reply saying why (bug, Discord trouble, rate limit, DMs closed), which command to type instead, what did NOT happen, and a copy of anything typed
+- Expired button presses (Discord's "This interaction failed") get a follow-up DM, max once per 5 minutes per user
+- Commands in messages are clickable `</ss giftee:ID>` mentions (ids cached at startup; plain text fallback)
 - Leave DM links back to the signup message; giftee DM shows the real end date instead of a hardcoded Dec 25
 - Giftee reply DM shows the question it answers; wrap-up DM shows event stats and your own gift
 - New one-time reminders: empty-wishlist nudge 2 days after shuffle; one-week-left nudge for Santas with no logged gift

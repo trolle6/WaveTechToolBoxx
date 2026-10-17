@@ -910,11 +910,14 @@ class SecretSantaCommandsMixin:
             await self._safe_edit_response(inter, embed=embed)
             return
 
-        anonymized = await self._anonymize_text(cleaned, "question")
-
-        # Send question with reply button (giftee only sees anonymized text)
         year = self.state.get("current_year", dt.date.today().year)
-        question_embed, reply_view = self._question_dm(anonymized, year)
+        try:
+            anonymized = await self._anonymize_text(cleaned, "question")
+            question_embed, reply_view = self._question_dm(anonymized, year)
+        except Exception as e:
+            self.logger.error(f"Preparing question failed: {e}", exc_info=True)
+            await self._safe_edit_response(inter, embed=ss_messages.error_question_stuck(year, typed=cleaned))
+            return
         success = await self._send_dm(int(receiver_id), embed=question_embed, view=reply_view)
 
         if success:
@@ -929,9 +932,8 @@ class SecretSantaCommandsMixin:
             )
             await self._safe_edit_response(inter, embed=embed)
         else:
-            embed = self._error_embed(
-                title="❌ Delivery Failed",
-                description="Couldn't send your question. Your giftee may have DMs disabled."
+            embed = self._dm_failure_embed(
+                int(receiver_id), year, "ss ask_giftee", "Your question wasn't sent yet", typed=cleaned
             )
             await self._safe_edit_response(inter, embed=embed)
 
@@ -2449,3 +2451,14 @@ class SecretSantaCommandsMixin:
         self.bot.add_view(SecretSantaReplyView())
         self.bot.add_view(SantaActionsView(*SANTA_ACTIONS))
         self._reply_view_registered = True
+        await self._load_command_ids()
+
+    async def _load_command_ids(self) -> None:
+        """Cache slash command ids so messages can show clickable </ss giftee:ID> mentions."""
+        try:
+            api_commands = self.bot.global_slash_commands or await self.bot.fetch_global_commands()
+            for c in api_commands:
+                if getattr(c, "id", None) and getattr(c, "name", None):
+                    ss_messages.COMMAND_IDS[c.name] = c.id
+        except Exception as e:
+            self.logger.warning(f"Could not load command ids for clickable mentions: {e}")
