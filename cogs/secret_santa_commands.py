@@ -464,12 +464,7 @@ class SecretSantaCommandsMixin:
         # Release lock before sending DMs (they can take time, don't block other operations)
         # Assignments are already saved, so concurrent shuffle attempts will see them and fail
         
-        # Ensure participant role on everyone (covers anyone who joined before role was set or missed on react)
-        if guild:
-            for user_id in participants:
-                await self._apply_participant_role(
-                    guild, user_id, add=True, reason="Secret Santa participant (shuffle)"
-                )
+        role_summary = await self._sync_participant_roles(guild, event, participants)
 
         # Send assignment DMs with rate limiting (avoids 429) and track failures
         participants_dict = event.get("participants", {})
@@ -498,6 +493,8 @@ class SecretSantaCommandsMixin:
         response_msg += f"• {len(assignments)} pairs created\n"
         response_msg += f"• DMs sent to all participants" + (f" ({len(failed)} got fallback in channel)" if failed else "") + "\n"
         response_msg += f"• History respected (no repeated pairings!)\n"
+        if role_summary:
+            response_msg += f"• {role_summary}\n"
         
         if fallback_used:
             years_str = ", ".join(map(str, exclude_years))
@@ -521,6 +518,63 @@ class SecretSantaCommandsMixin:
         self._panel_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")
         
         return True, None
+
+    async def _sync_participant_roles(
+        self, guild: Optional[disnake.Guild], event: dict, participants: list
+    ) -> Optional[str]:
+        """Give the event role to every participant and strip it from non-participants."""
+        role_id = event.get("role_id")
+        if not guild or not role_id:
+            return None
+        role = guild.get_role(int(role_id))
+        if not role:
+            return f"⚠️ Role sync skipped: role {role_id} no longer exists"
+        me = guild.me
+        if not me or not (me.guild_permissions.manage_roles or me.guild_permissions.administrator):
+            self.logger.warning(f"Bot lacks Manage Roles in guild {guild.id}")
+            return f"⚠️ Role sync skipped: bot lacks **Manage Roles** ({role.mention} not assigned)"
+        if role >= me.top_role:
+            return f"⚠️ Role sync skipped: move the bot's role above {role.mention} in Server Settings → Roles"
+
+        reason = "Secret Santa role sync (shuffle)"
+        wanted = set(participants)
+        added = had = removed = failed = 0
+        for user_id in wanted:
+            member = await self._resolve_guild_member(guild, user_id)
+            if not member:
+                failed += 1
+                continue
+            if role in member.roles:
+                had += 1
+                continue
+            try:
+                await member.add_roles(role, reason=reason)
+                added += 1
+            except disnake.HTTPException as e:
+                self.logger.warning(f"Could not add SS role to {user_id}: {e}")
+                failed += 1
+        for member in list(role.members):
+            if member.id in wanted or member.bot:
+                continue
+            try:
+                await member.remove_roles(role, reason=reason)
+                removed += 1
+            except disnake.HTTPException as e:
+                self.logger.warning(f"Could not remove SS role from {member.id}: {e}")
+                failed += 1
+
+        self.logger.info(
+            "SS role sync %r: added=%s had=%s removed=%s failed=%s",
+            role.name, added, had, removed, failed,
+        )
+        summary = f"Role {role.mention}: {added + had}/{len(wanted)} participants have it"
+        if added:
+            summary += f" ({added} added)"
+        if removed:
+            summary += f", removed from {removed} non-participant(s)"
+        if failed:
+            summary += f", ⚠️ {failed} failed (see logs)"
+        return summary
 
     async def _execute_stop_internal(self, stopper_id: Optional[int] = None) -> tuple[bool, Optional[str]]:
         """
