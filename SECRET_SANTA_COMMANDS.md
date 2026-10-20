@@ -10,9 +10,9 @@ Hosts are server admins, the server owner, or anyone with the `DISCORD_MODERATOR
 
 | Command | What it does |
 |---|---|
-| `/ss start` | Opens signup. Pick your announcement `message`; people react to it to join. Optional: `role` (given to people who join), `shuffle` (auto-pair time, e.g. `2026-12-01 18:00`), `end` (auto-stop time; defaults to Dec 25 23:59). |
+| `/ss start` | Opens signup. By default the bot posts a **signup card** in the channel with 🎅 **Join** / **Leave** / wishlist buttons, a live headcount, the latest joiners and a shuffle countdown (reacting to the card works too). Optional: `blurb` (card text), `message` (use your own announcement instead; people react to join), `role` (given to people who join), `shuffle` (auto-pair time, e.g. `2026-12-01 18:00`), `end` (auto-stop time; defaults to Dec 25 23:59). |
 | `/ss status` | Shows who joined, the scheduled times, and the pairings. |
-| `/ss shuffle` | Closes signup, pairs everyone, and DMs each person their giftee. Avoids repeating last year's pairs. |
+| `/ss shuffle` | Closes signup, pairs everyone, and DMs each person their giftee. Avoids repeating last year's pairs. If `RANDOM_ORG_API_KEY` is set in `config.env`, the pairing is seeded from random.org atmospheric noise; otherwise it uses local OS entropy. |
 | `/ss oversight` | Spoilers: see submitted gifts and the anonymous questions and replies. |
 | `/ss stop` | Ends the event and saves the year to the archive. |
 | `/ss user_history` | One person's Secret Santa history across all years. |
@@ -21,7 +21,7 @@ Hosts are server admins, the server owner, or anyone with the `DISCORD_MODERATOR
 
 ### Yearly checklist
 
-1. Post an announcement ("react to join!"), then run `/ss start` and pick that message.
+1. Run `/ss start` in your event channel. The bot posts the signup card. (Or post your own announcement and pick it as `message` for react-to-join.)
 2. Wait for people to react. Check headcount with `/ss status`.
 3. Run `/ss shuffle` (or let the `shuffle` time do it).
 4. Let everyone gift. Peek with `/ss oversight` if needed.

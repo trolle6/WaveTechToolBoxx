@@ -34,6 +34,8 @@ ACTION_INFO: Dict[str, Tuple[str, Optional[str], str]] = {
     "ask": ("Ask them something", "ss ask_giftee", "Your question wasn't sent yet"),
     "submit_gift": ("Log my gift", "ss submit_gift", "Your gift wasn't logged yet"),
     "reply": ("Reply to Santa", None, "Your reply wasn't sent yet"),
+    "join": ("Join", None, "You weren't added yet"),
+    "leave": ("Leave", None, "You're still on the list"),
 }
 
 TIMEOUT_DM_COOLDOWN_SECONDS = 300
@@ -269,6 +271,48 @@ class SantaActionsView(disnake.ui.View):
                     await cog.ss_view_giftee_wishlist.callback(cog, inter)
             await run_guarded(inter, action, handler)
         return callback
+
+
+class JoinCardView(disnake.ui.View):
+    """Join/Leave buttons on the public signup card. Register `JoinCardView()` once at startup;
+    `with_wishlist=True` adds the wishlist shortcuts (handled by the registered SantaActionsView)."""
+    def __init__(self, with_wishlist: bool = False):
+        super().__init__(timeout=None)
+        join = disnake.ui.Button(label="Join", emoji="🎅", style=disnake.ButtonStyle.success, custom_id="ss_join:join")
+        leave = disnake.ui.Button(label="Leave", style=disnake.ButtonStyle.secondary, custom_id="ss_join:leave")
+        join.callback = self._make_callback("join")
+        leave.callback = self._make_callback("leave")
+        self.add_item(join)
+        self.add_item(leave)
+        if with_wishlist:
+            for action in ("wishlist_add", "wishlist_view"):
+                for item in SantaActionsView(action).children:
+                    self.add_item(item)
+
+    @staticmethod
+    def _make_callback(action: str):
+        async def callback(inter: disnake.MessageInteraction):
+            cog = inter.bot.get_cog("SecretSantaCog")
+            if not cog:
+                await inter.response.send_message(content="❌ Secret Santa system not available", ephemeral=True)
+                return
+
+            async def handler():
+                await inter.response.defer(ephemeral=True)
+                if action == "join":
+                    await cog._join_card_join(inter)
+                else:
+                    await cog._join_card_leave(inter)
+            await run_guarded(inter, action, handler)
+        return callback
+
+
+def join_card_view(phase: str) -> Optional[disnake.ui.View]:
+    if phase == "open":
+        return JoinCardView(with_wishlist=True)
+    if phase == "closed":
+        return SantaActionsView("giftee", "wishlist_view", labels={"giftee": "My giftee's wishlist"})
+    return None
 
 
 def link_view(label: str, url: Optional[str], emoji: str = "🔗") -> Optional[disnake.ui.View]:

@@ -43,6 +43,7 @@ load_dotenv("config.env", override=True)
 # Optional (CONFIG_DEFAULTS below or in config.env):
 #   DISCORD_MODERATOR_ROLE_ID - secret_santa_checks: mod_check() for /ss mod commands
 #                              (missing/invalid → warn; guild admins/owner still pass)
+#   RANDOM_ORG_API_KEY     - secret_santa_randomness: seed /ss shuffle from random.org atmospheric noise
 #   TTS_CHANNEL_ID         - voice_processing: restrict TTS to this text channel ID (overrides name)
 #   TTS_CHANNEL_NAME       - voice_processing: restrict TTS by channel name (default: no-mic-bot; "all" = every channel)
 #   TTS_ROLE_ID            - voice_processing: restrict who can use TTS (None = everyone)
@@ -72,7 +73,8 @@ CONFIG_DEFAULTS = {
     "TTS_VOLUME": None,  # float 0.1–2.0 applied after loudness normalization (default 1.0)
     "TTS_MAX_FILE_CHARS": None,  # max chars read aloud from attached .txt files (default 20000)
     "DISCORD_MODERATOR_ROLE_ID": None,
-    "SS_DEBUG_START": False,  # Skip "year already archived" warning on /ss start (testing only)
+    "SS_DEBUG_START": False,
+    "RANDOM_ORG_API_KEY": None,  # random.org key: Secret Santa shuffle uses atmospheric noise (falls back to OS entropy)  # Skip "year already archived" warning on /ss start (testing only)
 }
 
 

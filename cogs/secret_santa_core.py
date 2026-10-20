@@ -636,8 +636,9 @@ class SecretSantaCore(commands.Cog):
         return embed, SantaActionsView("ask", "giftee", labels={"ask": "Ask another"})
 
     def _join_dm(self, year: int, event: Optional[dict] = None):
-        shuffle_ts = (event or self._get_current_event() or {}).get("scheduled_shuffle_time")
-        return ss_messages.join_embed(year, shuffle_ts), SantaActionsView("wishlist_add", "wishlist_view")
+        event = event or self._get_current_event() or {}
+        embed = ss_messages.join_embed(year, event.get("scheduled_shuffle_time"), via_card=bool(event.get("join_card")))
+        return embed, SantaActionsView("wishlist_add", "wishlist_view")
 
     def _giftee_reveal_dm(self, year: int, receiver_id: int, event: Optional[dict] = None):
         stop_ts = (event or {}).get("scheduled_stop_time")
@@ -647,7 +648,8 @@ class SecretSantaCore(commands.Cog):
     def _leave_dm(self, year: int, event: Optional[dict] = None):
         event = event or self._get_current_event()
         shuffle_ts = (event or {}).get("scheduled_shuffle_time")
-        return ss_messages.leave_embed(year, shuffle_ts), link_view("Go to signup message", self._signup_url(event))
+        via_card = bool((event or {}).get("join_card"))
+        return ss_messages.leave_embed(year, shuffle_ts, via_card), link_view("Go to signup message", self._signup_url(event))
 
     def _event_end_dm(self, year: int, event: dict, user_id: str) -> disnake.Embed:
         participants = event.get("participants") or {}
