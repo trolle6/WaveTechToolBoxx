@@ -209,7 +209,7 @@ def _deadline_text(stop_ts: Optional[float]) -> str:
     return "**Dec 25**"
 
 
-def join_embed(year: int, shuffle_ts: Optional[float]) -> disnake.Embed:
+def join_embed(year: int, shuffle_ts: Optional[float], via_card: bool = False) -> disnake.Embed:
     when = f"<t:{int(shuffle_ts)}:R>" if shuffle_ts else "on shuffle day"
     description = (
         f"Welcome aboard. You'll find out who you're gifting {when}, right here in your DMs.\n\n"
@@ -218,16 +218,18 @@ def join_embed(year: int, shuffle_ts: Optional[float]) -> disnake.Embed:
         f"Favorite snacks, hobbies, colors, things you *don't* want: it all helps.\n\n"
         f"-# Wishlist commands: {cmd('ss wishlist add')} · {cmd('ss wishlist view')} · "
         f"{cmd('ss wishlist remove')} · {cmd('ss wishlist clear')}\n"
-        f"-# Changed your mind? Remove your reaction before the shuffle."
+        + ("-# Changed your mind? Press **Leave** on the signup card before the shuffle."
+           if via_card else "-# Changed your mind? Remove your reaction before the shuffle.")
     )
     return _embed(_badge_event(year), "You're on the list! ✨", description, GOLD)
 
 
-def leave_embed(year: int, shuffle_ts: Optional[float]) -> disnake.Embed:
+def leave_embed(year: int, shuffle_ts: Optional[float], via_card: bool = False) -> disnake.Embed:
     before = f"**<t:{int(shuffle_ts)}:f>**" if shuffle_ts else "the shuffle"
+    how = "Press **Join** on the signup card" if via_card else "React to the signup message"
     description = (
         "No worries, you're off the participant list.\n\n"
-        f"Want back in? React to the signup message again before {before}. 🎄"
+        f"Want back in? {how} again before {before}. 🎄"
     )
     return _embed(BADGE_NOTICE, f"You've left Secret Santa {year}", description, FROST)
 
@@ -374,3 +376,67 @@ def event_ended_fallback_embed(year: int) -> disnake.Embed:
         f"-# Tip: enable DMs from server members to get updates privately."
     )
     return _embed(_badge_event(year), f"🎄 Secret Santa {year} has wrapped up", description, FROST)
+
+
+JOIN_CARD_DEFAULT_BLURB = (
+    "Swap a surprise gift with someone from the server. 🎁\n"
+    "Press **Join** to sign up. When the shuffle happens, the bot DMs you who you're gifting."
+)
+JOIN_CARD_RECENT = 8
+
+
+def _progress_bar(count: int, width: int = 10) -> str:
+    goal = max(10, (count // 10 + 1) * 10)
+    filled = round(width * count / goal)
+    return f"{'▰' * filled}{'▱' * (width - filled)}  next stop: **{goal}**"
+
+
+def join_card_embed(year: int, event: dict, phase: str) -> disnake.Embed:
+    """Public signup card. phase: open (signup), closed (shuffled), ended (archived)."""
+    participants = event.get("participants") or {}
+    count = len(participants)
+    blurb = (event.get("join_card") or {}).get("blurb") or JOIN_CARD_DEFAULT_BLURB
+    shuffle_ts = event.get("scheduled_shuffle_time")
+    stop_ts = event.get("scheduled_stop_time")
+    santas = "Santa" if count == 1 else "Santas"
+
+    if phase == "open":
+        embed = _embed(_badge_event(year), f"🎄 Secret Santa {year} — signup is open!", blurb, GOLD)
+        embed.add_field(name=f"🎅 {count} {santas} signed up", value=_progress_bar(count), inline=False)
+        recent = list(participants)[-JOIN_CARD_RECENT:]
+        if recent:
+            embed.add_field(
+                name="✨ Latest to join",
+                value=" ".join(f"<@{uid}>" for uid in reversed(recent)),
+                inline=False,
+            )
+        embed.add_field(
+            name="🔀 Shuffle",
+            value=f"<t:{int(shuffle_ts)}:F> (<t:{int(shuffle_ts)}:R>)" if shuffle_ts else "Announced soon",
+            inline=True,
+        )
+        if stop_ts:
+            embed.add_field(name="🎁 Gift by", value=_deadline_text(stop_ts), inline=True)
+        embed.set_footer(text="Join · Leave · start your wishlist, all from the buttons below")
+    elif phase == "closed":
+        gifts = len(event.get("gift_submissions") or {})
+        description = (
+            f"**{count} {santas}** are in, and the pairs are out. Check your DMs! 📬\n\n"
+            f"Use the buttons below to see your giftee's wishlist or your own."
+        )
+        embed = _embed(_badge_event(year), f"🔒 Secret Santa {year} — signup closed", description, CRANBERRY)
+        embed.add_field(name="🎁 Gifts logged", value=f"{gifts}/{count}", inline=True)
+        if stop_ts:
+            embed.add_field(name="⏰ Gift by", value=_deadline_text(stop_ts), inline=True)
+        if "random.org" in str(event.get("shuffle_randomness") or ""):
+            embed.set_footer(text="🌩️ Pairs drawn from atmospheric noise")
+    else:
+        gifts = len(event.get("gift_submissions") or {})
+        description = f"**{count} {santas}** took part and **{gifts}** gifts were logged.\nThanks for playing, see you next year! 🎄"
+        embed = _embed(_badge_event(year), f"🎉 Secret Santa {year} is a wrap", description, PINE)
+    return embed
+
+
+def join_milestone_text(year: int, count: int, url: Optional[str]) -> str:
+    link = f" [Join here]({url})" if url else ""
+    return f"🎉 **{count} Santas** have signed up for Secret Santa {year}!{link}"

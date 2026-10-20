@@ -34,6 +34,7 @@ from .secret_santa_storage import (
 )
 from .secret_santa_views import (
     BackupListPaginator,
+    JoinCardView,
     CommunicationsPaginator,
     SANTA_ACTIONS,
     SantaActionsView,
@@ -64,12 +65,15 @@ class SecretSantaCommandsMixin:
     # 6. Resolve timezone from Discord locale → 7. Parse shuffle / end if set; validate future and stop > shuffle
     # 8. Build new_event dict → 9. Under lock: if event already active return; else state.current_year + state.current_event = new_event; save
     # 10. Send join DMs to participants → 11. Edit response with success + schedule info
-    @ss_root.sub_command(name="start", description="Start Secret Santa (react on message to join)")
+    @ss_root.sub_command(name="start", description="Start Secret Santa (posts a signup card with Join buttons)")
     @mod_check()
     async def ss_start(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        message: disnake.Message = commands.Param(description="Signup message — members react to join"),
+        message: Optional[disnake.Message] = commands.Param(
+            default=None,
+            description="Optional: your own signup message (members react to join). Empty = bot posts a Join card here",
+        ),
         shuffle: Optional[str] = commands.Param(
             default=None,
             name="shuffle",
@@ -82,7 +86,12 @@ class SecretSantaCommandsMixin:
         ),
         role: Optional[disnake.Role] = commands.Param(
             default=None,
-            description="Optional: Discord role added when someone joins (react) and removed if they leave",
+            description="Optional: Discord role added when someone joins and removed if they leave",
+        ),
+        blurb: Optional[str] = commands.Param(
+            default=None,
+            max_length=1000,
+            description="Optional: text shown on the signup card (ignored if you pick a message)",
         ),
     ):
         """Start event; optional auto-shuffle and auto-stop times"""
@@ -91,17 +100,14 @@ class SecretSantaCommandsMixin:
         if not inter.guild:
             await self._safe_edit_response(inter, content="❌ Use this command in a server.")
             return
-        if not message:
-            await self._safe_edit_response(inter, content="❌ No message provided.")
-            return
-        msg_id = message.id
-        msg_guild = getattr(message, "guild", None)
-        if not msg_guild:
-            await self._safe_edit_response(inter, content="❌ Message must be from a server channel (not DMs).")
-            return
-        if msg_guild.id != inter.guild.id:
-            await self._safe_edit_response(inter, content="❌ Message must be from this server.")
-            return
+        if message:
+            msg_guild = getattr(message, "guild", None)
+            if not msg_guild:
+                await self._safe_edit_response(inter, content="❌ Message must be from a server channel (not DMs).")
+                return
+            if msg_guild.id != inter.guild.id:
+                await self._safe_edit_response(inter, content="❌ Message must be from this server.")
+                return
 
         # Get role ID if provided
         role_id_int = role.id if role else None
@@ -148,7 +154,7 @@ class SecretSantaCommandsMixin:
         # Collect participants from the message reactions (may be empty if no one reacted yet)
         participants = {}
         try:
-            reactions = getattr(message, "reactions", None) or []
+            reactions = (getattr(message, "reactions", None) or []) if message else []
             for reaction in reactions:
                 async for user in reaction.users():
                     if getattr(user, "bot", True):
@@ -239,12 +245,9 @@ class SecretSantaCommandsMixin:
             used_default_stop = scheduled_stop_timestamp is not None
 
         # Create event (current_year already set above during safety check)
-        channel_id = getattr(getattr(message, "channel", None), "id", None)
         new_event = {
             "active": True,
             "join_closed": False,
-            "announcement_message_id": msg_id,
-            "announcement_channel_id": channel_id,
             "role_id": role_id_int,
             "participants": participants,
             "assignments": {},
@@ -264,11 +267,37 @@ class SecretSantaCommandsMixin:
             new_event["scheduled_stop_time"] = scheduled_stop_timestamp
             new_event["scheduled_stop_by_user_id"] = inter.author.id
 
+        card = None
+        if message:
+            new_event["announcement_message_id"] = message.id
+            new_event["announcement_channel_id"] = getattr(getattr(message, "channel", None), "id", None)
+        else:
+            if self._get_current_event():
+                await self._safe_edit_response(inter, content="❌ Event already active")
+                return
+            new_event["join_card"] = {"blurb": (blurb or "").strip() or None}
+            try:
+                card = await self._post_join_card(inter.channel, current_year, new_event)
+            except disnake.HTTPException as e:
+                await self._safe_edit_response(
+                    inter,
+                    content=f"❌ Couldn't post the signup card in this channel ({e.status}). "
+                            "Check the bot can send messages and embeds here.",
+                )
+                return
+            new_event["announcement_message_id"] = card.id
+            new_event["announcement_channel_id"] = card.channel.id
+
         # Use lock to prevent concurrent event creation
         async with self._lock:
             # CRITICAL: Check if event already active INSIDE lock (prevents race conditions)
             event = self.state.get("current_event")
             if event and event.get("active"):
+                if card:
+                    try:
+                        await card.delete()
+                    except disnake.HTTPException:
+                        pass
                 await self._safe_edit_response(inter, content="❌ Event already active")
                 return
             
@@ -293,15 +322,22 @@ class SecretSantaCommandsMixin:
         successful = len(participants) - len(failed)
 
         # Build response message
-        response_msg = (
-            f"✅ Secret Santa {current_year} started!\n"
-            f"• Participants: {len(participants)}\n"
-            f"• DMs sent: {successful}/{len(participants)}"
-        )
+        if card:
+            response_msg = (
+                f"✅ Secret Santa {current_year} started!\n"
+                f"• Signup card posted: {card.jump_url}\n"
+                f"• Members press **Join** (or react to the card) to sign up"
+            )
+        else:
+            response_msg = (
+                f"✅ Secret Santa {current_year} started!\n"
+                f"• Participants: {len(participants)}\n"
+                f"• DMs sent: {successful}/{len(participants)}"
+            )
         if debug_start:
             response_msg += "\n• 🔧 SS_DEBUG_START: archive warning skipped"
         if role:
-            response_msg += f"\n• Join role: {role.mention} _(added on react; bot role must be above this role)_"
+            response_msg += f"\n• Join role: {role.mention} _(added on join; bot role must be above this role)_"
         
         if scheduled_timestamp:
             response_msg += f"\n\n📅 **Auto-shuffle:** <t:{int(scheduled_timestamp)}:F>"
@@ -474,6 +510,7 @@ class SecretSantaCommandsMixin:
             event.pop("scheduled_by_user_id", None)
             await self._save_async()
             self.logger.debug("Assignments saved, releasing lock before DMs")
+        await self._update_join_card(event)
         
         # Release lock before sending DMs (they can take time, don't block other operations)
         # Assignments are already saved, so concurrent shuffle attempts will see them and fail
@@ -565,6 +602,7 @@ class SecretSantaCommandsMixin:
             event.pop("scheduled_stop_by_user_id", None)
             self.state["current_event"] = None
             await self._save_async()
+        await self._update_join_card({**event, "active": False}, year=year, phase="ended")
         
         # Release lock before sending DMs (they can take time)
         # Event is already cleared, so concurrent stops will see no event and fail
@@ -1095,6 +1133,7 @@ class SecretSantaCommandsMixin:
                     "timestamp": dt.datetime.now().isoformat()
                 }
                 await self._save_async()
+            self._schedule_join_card_refresh()
 
         embed = ss_messages.gift_logged_embed(
             current_year,
@@ -2309,39 +2348,18 @@ class SecretSantaCommandsMixin:
         # Get user name
         name = f"User {payload.user_id}"
         if payload.guild_id:
-            try:
-                guild = self.bot.get_guild(payload.guild_id)
-                if guild:
-                    member = guild.get_member(payload.user_id)
-                    if member:
-                        name = member.display_name
-            except Exception:
-                pass
-
-        # Add participant only if event is still current (re-check inside lock)
-        async with self._lock:
-            current = self.state.get("current_event")
-            if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
-                return  # Event was stopped or is different
-            if "participants" not in current:
-                current["participants"] = {}
-            if user_id in current["participants"]:
-                return
-            current["participants"][user_id] = name
-            await self._save_async()
-        self.logger.info("SS join: %s (%s participants)", name, len(current["participants"]))
-
-        # Participant role on join (if configured on /ss start)
-        if payload.guild_id:
             guild = self.bot.get_guild(payload.guild_id)
-            if guild:
-                await self._apply_participant_role(
-                    guild, payload.user_id, add=True, reason="Secret Santa signup (reaction)"
-                )
+            member = guild.get_member(payload.user_id) if guild else None
+            if member:
+                name = member.display_name
+
+        status, _ = await self._signup_add(payload.guild_id, payload.user_id, name, "reaction")
+        if status != "joined":
+            return
 
         # Send confirmation (same message as /ss start); rate-limit react spam
         if await self._limit_join_dm.check(str(payload.user_id)):
-            join_embed, join_view = self._join_dm(self.state.get("current_year", dt.date.today().year))
+            join_embed, join_view = self._join_dm(self._year())
             await self._send_dm(payload.user_id, embed=join_embed, view=join_view)
         else:
             self.logger.debug("Join DM skipped (rate limit) for user %s", payload.user_id)
@@ -2372,38 +2390,14 @@ class SecretSantaCommandsMixin:
 
             message = await channel.fetch_message(payload.message_id)
 
-            # Check all reactions
-            has_reaction = False
             for reaction in message.reactions:
                 async for user in reaction.users():
                     if user.id == payload.user_id:
-                        has_reaction = True
-                        break
-                if has_reaction:
-                    break
+                        return
 
-            # Remove if no reactions (only if event is still current and active)
-            if not has_reaction:
-                async with self._lock:
-                    current = self.state.get("current_event")
-                    if not current or not current.get("active") or current.get("announcement_message_id") != payload.message_id:
-                        return  # Event was stopped or is different, don't modify
-                    participants = current.get("participants")
-                    left_name = None
-                    if isinstance(participants, dict):
-                        left_name = participants.pop(user_id, None)
-                    await self._save_async()
-                self.logger.info("SS leave: %s (%s participants)", left_name or user_id,
-                                 len(participants) if isinstance(participants, dict) else 0)
-
-                if payload.guild_id:
-                    guild = self.bot.get_guild(payload.guild_id)
-                    if guild:
-                        await self._apply_participant_role(
-                            guild, payload.user_id, add=False, reason="Left Secret Santa signup"
-                        )
-
-                leave_embed, leave_view = self._leave_dm(self.state.get("current_year", dt.date.today().year))
+            status, _ = await self._signup_remove(payload.guild_id, payload.user_id, "reaction")
+            if status == "left":
+                leave_embed, leave_view = self._leave_dm(self._year())
                 await self._send_dm(payload.user_id, embed=leave_embed, view=leave_view)
 
         except Exception as e:
@@ -2472,6 +2466,7 @@ class SecretSantaCommandsMixin:
             return
         self.bot.add_view(SecretSantaReplyView())
         self.bot.add_view(SantaActionsView(*SANTA_ACTIONS))
+        self.bot.add_view(JoinCardView())
         self._reply_view_registered = True
         await self._load_command_ids()
 
