@@ -12,7 +12,7 @@ Hosts are server admins, the server owner, or anyone with the `DISCORD_MODERATOR
 |---|---|
 | `/ss start` | Opens signup. Pick your announcement `message`; people react to it to join. Optional: `role` (given to people who join), `shuffle` (auto-pair time, e.g. `2026-12-01 18:00`), `end` (auto-stop time; defaults to Dec 25 23:59). |
 | `/ss status` | Shows who joined, the scheduled times, and the pairings. |
-| `/ss shuffle` | Closes signup, pairs everyone, and DMs each person their giftee. Avoids repeating last year's pairs. |
+| `/ss shuffle` | Closes signup, pairs everyone, and DMs each person their giftee. Avoids repeating last year's pairs. If `RANDOM_ORG_API_KEY` is set in `config.env`, the pairing is seeded from random.org atmospheric noise; otherwise it uses local OS entropy. |
 | `/ss oversight` | Spoilers: see submitted gifts and the anonymous questions and replies. |
 | `/ss stop` | Ends the event and saves the year to the archive. |
 | `/ss user_history` | One person's Secret Santa history across all years. |

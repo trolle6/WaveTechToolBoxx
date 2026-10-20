@@ -218,7 +218,7 @@ def _validate_assignment_integrity(assignments: Dict[int, int], participants: Li
             raise ValueError(f"Invalid receiver: {receiver} not in participants")
 
 
-def make_assignments(participants: List[int], history: Dict[str, List[int]], logger=None) -> Dict[int, int]:
+def make_assignments(participants: List[int], history: Dict[str, List[int]], logger=None, rng=None) -> Dict[int, int]:
     """
     Create Secret Santa assignments avoiding repeats from history.
     
@@ -251,6 +251,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]], log
     Args:
         participants: List of user IDs participating
         history: Dict mapping giver ID (str) to list of previous receiver IDs
+        rng: Optional random.Random (e.g. seeded from random.org); defaults to SystemRandom
     
     Returns:
         Dict mapping giver ID (int) to receiver ID (int)
@@ -263,7 +264,7 @@ def make_assignments(participants: List[int], history: Dict[str, List[int]], log
 
     # Use cryptographically secure random number generator
     # This provides true randomness from OS entropy pool
-    secure_random = secrets.SystemRandom()
+    secure_random = rng if rng is not None else secrets.SystemRandom()
     
     # SPECIAL CASE: 2 participants (simple exchange)
     if len(participants) == 2:
