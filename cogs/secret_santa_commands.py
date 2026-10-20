@@ -17,6 +17,7 @@ from .secret_santa_assignments import (
     make_assignments,
     validate_assignment_possibility,
 )
+from .secret_santa_randomness import get_shuffle_rng
 from .secret_santa_checks import (
     GIFT_NO_SUBMISSION_ROW,
     format_gift_description_for_display,
@@ -384,6 +385,18 @@ class SecretSantaCommandsMixin:
                 lambda: load_history_from_archives(ARCHIVE_DIR, exclude_years=[current_year], logger=self.logger)
             )
             
+            session = None
+            http_mgr = getattr(self.bot, "http_mgr", None)
+            if http_mgr is not None:
+                try:
+                    session = await http_mgr.get_session()
+                except Exception as e:
+                    self.logger.warning("No HTTP session for random.org: %s", e)
+            rng, rng_source = await get_shuffle_rng(
+                getattr(self.bot.config, "RANDOM_ORG_API_KEY", None), session, logger=self.logger
+            )
+            self.logger.info("Secret Santa shuffle randomness: %s", rng_source)
+
             self.logger.debug("Attempting Secret Santa assignment with %s participants", len(participants))
             self.logger.debug("Available history years: %s", available_years)
             self.logger.debug("Excluding current year %s from history", current_year)
@@ -429,7 +442,7 @@ class SecretSantaCommandsMixin:
                 try:
                     assignments = await loop.run_in_executor(
                         self._executor,
-                        lambda: make_assignments(participants, history, logger=self.logger)
+                        lambda: make_assignments(participants, history, logger=self.logger, rng=rng)
                     )
                     self.logger.debug("Assignment algorithm succeeded")
                     break
@@ -455,6 +468,7 @@ class SecretSantaCommandsMixin:
             event["assignments"] = {str(k): str(v) for k, v in assignments.items()}
             event["join_closed"] = True
             event["shuffled_at"] = time.time()
+            event["shuffle_randomness"] = rng_source
             # Clear any scheduled shuffle since we just executed
             event.pop("scheduled_shuffle_time", None)
             event.pop("scheduled_by_user_id", None)
@@ -498,6 +512,7 @@ class SecretSantaCommandsMixin:
         response_msg += f"• {len(assignments)} pairs created\n"
         response_msg += f"• DMs sent to all participants" + (f" ({len(failed)} got fallback in channel)" if failed else "") + "\n"
         response_msg += f"• History respected (no repeated pairings!)\n"
+        response_msg += f"• Randomness: {rng_source}\n"
         
         if fallback_used:
             years_str = ", ".join(map(str, exclude_years))
@@ -515,7 +530,7 @@ class SecretSantaCommandsMixin:
             dm_stats += f" ({len(failed)} fallback in channel)"
         self.logger.debug("Shuffle complete: %s", dm_stats)
         executor_name = safe_display_name(inter.author) if inter else (f"User {scheduler_id}" if scheduler_id else "Scheduled task")
-        log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs, {dm_stats}"
+        log_msg = f"Secret Santa assignments completed by {executor_name} - {len(assignments)} pairs, {dm_stats}, randomness: {rng_source}"
         if fallback_used:
             log_msg += f" (history fallback: excluded {', '.join(map(str, exclude_years))})"
         self._panel_log(log_msg, "SUCCESS" if not fallback_used else "WARNING")

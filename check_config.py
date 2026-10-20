@@ -121,6 +121,7 @@ def check_config_env():
     optional_keys = {
         "DISCORD_MODERATOR_ROLE_ID": "Moderator role (unset = admins/owner only)",
         "TTS_ROLE_ID": "TTS role restriction (None = everyone)",
+        "RANDOM_ORG_API_KEY": "random.org key for atmospheric Secret Santa shuffle (unset = OS entropy)",
         "DEBUG_MODE": "Debug mode",
         "LOG_LEVEL": "Logging level"
     }
